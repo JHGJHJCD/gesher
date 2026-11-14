@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Installer version for a release (X.Y.Z); leave empty for the CI version'
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -22,6 +28,30 @@ jobs:
       policy_ref: ${{ github.repository }}/.github/workflows/ci.yml@${{ github.sha }}
     steps:
       - run: echo "SOURCE_IDENTITY source=${{ github.sha }}"
+  update-contracts:
+    needs: [source-identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            tools/package
+            tests/windows/shell
+      - name: Release updater and control panel contracts on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          tests/windows/shell/UiLocalizationChecks.ps1
+          tests/windows/shell/MicrogDefaultsChecks.ps1
+          tests/windows/shell/ControlPanelRefreshChecks.ps1
+          tests/windows/shell/UpdateChecks.ps1
+          tests/windows/shell/UpdateTransportChecks.ps1
+          tests/windows/shell/ControlPanelUpdateChecks.ps1
+          tests/windows/shell/RuntimeFileChecks.ps1
   union-tsf:
     needs: [artifact-preflight]
     uses: ./.github/workflows/tsf-format-component.yml
@@ -563,6 +593,7 @@ jobs:
     runs-on: windows-2022
     env:
       GH_TOKEN: ${{ github.token }}
+      GESHER_RELEASE_VERSION: ${{ inputs.release_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -585,6 +616,10 @@ jobs:
           tests/windows/shell/UiLocalizationChecks.ps1
           tests/windows/shell/MicrogDefaultsChecks.ps1
           tests/windows/shell/ControlPanelRefreshChecks.ps1
+          tests/windows/shell/UpdateChecks.ps1
+          tests/windows/shell/UpdateTransportChecks.ps1
+          tests/windows/shell/ControlPanelUpdateChecks.ps1
+          tests/windows/shell/RuntimeFileChecks.ps1
 
       - name: Verify and assemble windows-x64 artifact
         shell: pwsh
@@ -655,9 +690,18 @@ jobs:
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
           $hebrew = Join-Path (Split-Path $iscc) 'Languages\Hebrew.isl'
           if (-not (Test-Path $iscc) -or -not (Test-Path $hebrew)) { choco upgrade innosetup --no-progress -y | Out-Null }
-          $version = "0.1.${{ github.run_number }}"
+          $version = $env:GESHER_RELEASE_VERSION
+          if ([string]::IsNullOrEmpty($version)) { $version = "0.1.$env:GITHUB_RUN_NUMBER" }
+          if ($version -cnotmatch '\A(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\z' -or
+              @($version.Split('.') | Where-Object { [int]$_ -gt 65535 }).Count) {
+            throw 'Installer version must be X.Y.Z, with decimal components from 0 through 65535 and no leading zeros.'
+          }
           & $iscc /Qp "/DBuildDir=$PWD\dist" "/DAppVersion=$version" "/O$PWD\installer" tools\package\gesher.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "GESHER_PACKAGE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $installer = Get-Item -LiteralPath "installer\gesher-setup-$version.exe"
+          $checksum = (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum  $($installer.Name)" | Set-Content -LiteralPath 'installer\SHA256SUMS.txt' -Encoding ascii
           Get-ChildItem installer
 
       # Uploaded before the checks below: the e2e job tests this installer even when one
@@ -666,7 +710,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: gesher-setup
-          path: installer/*.exe
+          path: |
+            installer/*.exe
+            installer/SHA256SUMS.txt
 
       - name: Install, run Hello, uninstall
         shell: pwsh
@@ -678,6 +724,17 @@ jobs:
           $env:GESHER_REQUIRE_BOOT_IMAGE = '1'
           Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait
           $app = Join-Path $env:LOCALAPPDATA 'Programs\Gesher'
+          foreach ($file in 'gesher-update.ps1', 'gesher-version.ini', 'gesher-runtime-files.ps1') {
+            if (-not (Test-Path -LiteralPath (Join-Path $app $file) -PathType Leaf)) { throw "The installer left out $file" }
+          }
+          . (Join-Path $app 'gesher-update.ps1')
+          if ((Get-GesherInstalledVersion -InstallDirectory $app) -cne $env:GESHER_PACKAGE_VERSION) {
+            throw 'Installed release version does not match the installer version'
+          }
+          if ((Get-GesherUpdateInstallerVersion -Path $setup) -cne $env:GESHER_PACKAGE_VERSION) {
+            throw 'Installer ProductVersion does not match the release version'
+          }
+          'PASS  installer: updater, runtime synchronizer and exact release version are installed' | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
           if (-not ($userPath -split ';' -contains $app)) { throw "PATH lacks $app" }
           $out = & "$app\gesher.cmd" "$app\hello.dex" gesher.Hello 2>&1 | Out-String
@@ -1236,6 +1293,21 @@ jobs:
             -Destination (Join-Path $programs $legacyHelloLinks[1])
           $upgradeSentinel = Join-Path $programs 'gesher-ci-upgrade-sentinel.txt'
           Set-Content $upgradeSentinel 'unrelated Start menu entry'
+          # An update runs Setup in place. Application data and settings must survive.
+          $updateState = Join-Path $env:LOCALAPPDATA 'Gesher\updates'
+          Save-GesherUpdatePreferences -StateDirectory $updateState -Preferences ([PSCustomObject]@{
+            AutomaticChecks = $false; LastCheckUtc = '2026-11-14T12:00:00.0000000Z'
+          })
+          $updatePreferences = Join-Path $updateState 'update-settings.json'
+          $retainedFiles = @{
+            (Join-Path $env:LOCALAPPDATA 'Gesher\data\data\com.gesher.components\files\gesher-update-retention.txt') = 'installed application data retained'
+            (Join-Path $env:LOCALAPPDATA 'Gesher\data\system\gesher-update-retention.properties') = 'user.setting=retained'
+            $updatePreferences = [IO.File]::ReadAllText($updatePreferences)
+          }
+          foreach ($entry in $retainedFiles.GetEnumerator()) {
+            New-Item -ItemType Directory -Force (Split-Path $entry.Key) | Out-Null
+            [IO.File]::WriteAllText($entry.Key, $entry.Value, [Text.UTF8Encoding]::new($false))
+          }
           $p = Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART' -Wait -PassThru
           $problems = @()
           if ($p.ExitCode -ne 0) { $problems += "Setup exit $($p.ExitCode)" }
@@ -1249,6 +1321,18 @@ jobs:
           }
           if (-not (Test-Path $upgradeSentinel)) { throw 'Upgrade removed an unrelated Start menu entry' }
           Remove-Item $upgradeSentinel
+          foreach ($entry in $retainedFiles.GetEnumerator()) {
+            if (-not (Test-Path -LiteralPath $entry.Key) -or [IO.File]::ReadAllText($entry.Key) -cne $entry.Value) {
+              throw "Upgrade changed application data or settings: $($entry.Key)"
+            }
+          }
+          if ((Get-GesherInstalledVersion -InstallDirectory $app) -cne $env:GESHER_PACKAGE_VERSION) {
+            throw 'Installed release version changed during reinstall'
+          }
+          if ((Get-GesherUpdatePreferences -StateDirectory $updateState).AutomaticChecks) {
+            throw 'Upgrade reset the disabled automatic update preference'
+          }
+          'PASS  installer: in-place update retains installed application data, user settings and release version' | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           'PASS  installer: upgrade removes English and Hebrew Hello shortcuts and preserves unrelated Start menu entries' | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           'PASS  installer: an update with gesher_shellext.dll loaded in another process leaves that process running (Explorer is not closed) and moves the loaded copy aside' | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           # Something of the Start menu that is not Gesher's, which uninstalling must keep.
