@@ -34,7 +34,8 @@ class Window {
 bool EditorAction(int modifiers) { return @GUARD@; }
 struct WindowEvent {
  enum { kMouseDown=1,kMouseUp=2,kMouseMove=3,kWheel=4,kKeyDown=5,kKeyUp=6,
- kFocus=9,kTouchDown=11,kTouchMove=12,kTouchUp=13,kTouchCancel=14,kMouseLeave=15,kOutside=17 };
+ kFocus=9,kTouchDown=11,kTouchMove=12,kTouchUp=13,kTouchCancel=14,kMouseLeave=15,kOutside=17,
+ kMouseCancel=19 };
  int type=kKeyDown,key=0,scan=0,modifiers=0,repeat=0,button=0;
 };
 struct AndroidEvent {

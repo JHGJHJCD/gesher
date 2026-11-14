@@ -915,6 +915,20 @@ intptr_t Window::HandleMessage(unsigned msg, uintptr_t wparam, intptr_t lparam) 
       e.button = msg == WM_SETFOCUS;
       Queue(e);
       return 0;
+    case WM_CAPTURECHANGED:
+    case WM_CANCELMODE:
+      if (buttons_ != 0) {
+        // A modal window or another capture owner may receive the button-up.
+        // Retire the gesture before Queue/DefWindowProc can reenter us. A normal
+        // final button-up has already cleared buttons_ before ReleaseCapture.
+        buttons_ = 0;
+        e.type = WindowEvent::kMouseCancel;
+        e.modifiers = Modifiers();
+        Queue(e);
+      }
+      // WM_CANCELMODE must still let DefWindowProc cancel menu/scroll tracking
+      // and release capture. Never try to reacquire it in WM_CAPTURECHANGED.
+      return msg == WM_CANCELMODE ? -1 : 0;
     case WM_LBUTTONDOWN:
     case WM_RBUTTONDOWN:
     case WM_MBUTTONDOWN:

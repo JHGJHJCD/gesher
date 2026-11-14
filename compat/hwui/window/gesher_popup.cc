@@ -51,6 +51,7 @@ bool IsPointer(int32_t type) {
   switch (type) {
     case WindowEvent::kMouseDown:
     case WindowEvent::kMouseUp:
+    case WindowEvent::kMouseCancel:
     case WindowEvent::kMouseMove:
     case WindowEvent::kWheel:
     case WindowEvent::kTouchDown:
@@ -123,7 +124,8 @@ bool Window::RouteEvent(const WindowEvent& event) {
     gesture_touches_--;
   }
   if (gesture_active_ && gesture_touches_ == 0 && buttons_ == 0 &&
-      (event.type == WindowEvent::kMouseUp || event.type == WindowEvent::kTouchUp ||
+      (event.type == WindowEvent::kMouseUp || event.type == WindowEvent::kMouseCancel ||
+       event.type == WindowEvent::kTouchUp ||
        event.type == WindowEvent::kTouchCancel)) {
     gesture_active_ = false;
     gesture_target_ = nullptr;

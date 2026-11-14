@@ -187,6 +187,7 @@ bool Translator::IsInput(const WindowEvent& event) {
   switch (event.type) {
     case WindowEvent::kMouseDown:
     case WindowEvent::kMouseUp:
+    case WindowEvent::kMouseCancel:
     case WindowEvent::kMouseMove:
     case WindowEvent::kWheel:
     case WindowEvent::kMouseLeave:
@@ -209,6 +210,7 @@ void Translator::Translate(const WindowEvent& event, int64_t now_ns,
   switch (event.type) {
     case WindowEvent::kMouseDown:
     case WindowEvent::kMouseUp:
+    case WindowEvent::kMouseCancel:
     case WindowEvent::kMouseMove:
     case WindowEvent::kWheel:
     case WindowEvent::kMouseLeave:
@@ -321,6 +323,17 @@ void Translator::Mouse(const WindowEvent& event, int64_t t, std::vector<AndroidE
       if (buttons_ == 0) release.down_time = mouse_down_time_;
       out->push_back(release);
       if (buttons_ == 0) out->push_back(MouseMotion(AMOTION_EVENT_ACTION_UP, x, y, t, meta));
+      return;
+    }
+    case WindowEvent::kMouseCancel: {
+      if (buttons_ == 0) return;
+      AndroidEvent cancel = MouseMotion(AMOTION_EVENT_ACTION_CANCEL, last_x_, last_y_, t, meta);
+      cancel.flags |= AMOTION_EVENT_FLAG_CANCELED;
+      out->push_back(cancel);
+      buttons_ = 0;
+      hovering_ = false;
+      has_last_ = false;
+      mouse_down_time_ = 0;
       return;
     }
     case WindowEvent::kWheel: {
