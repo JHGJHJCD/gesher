@@ -273,6 +273,9 @@ class Host {
   static bool DeleteCookies(int32_t which, int64_t callback_id);
   // COREWEBVIEW2_BROWSING_DATA_KINDS.
   static bool ClearBrowsingData(int32_t kinds, int64_t callback_id);
+  // HTTP(S) WebStorage origin: first-party file systems and IndexedDB only.
+  // Invalid/unsupported serialized origins are rejected without a callback.
+  static bool ClearOriginData(const std::wstring& origin, int64_t callback_id);
 
   // For the WebView thread (webview_host.cc).
   struct Impl;

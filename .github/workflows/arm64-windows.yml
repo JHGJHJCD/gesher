@@ -83,6 +83,7 @@ jobs:
             platform_probe \
             socket_probe \
             mman_probe \
+            madvise_probe \
             epoll_probe \
             posix_probe \
             timerfd_windows_test \
@@ -99,6 +100,7 @@ jobs:
             out-arm64/platform_probe.exe
             out-arm64/socket_probe.exe
             out-arm64/mman_probe.exe
+            out-arm64/madvise_probe.exe
             out-arm64/epoll_probe.exe
             out-arm64/posix_probe.exe
             out-arm64/timerfd_windows_test.exe

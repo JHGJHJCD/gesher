@@ -152,7 +152,9 @@ public final class Zygote {
     /**
      * A path for Win32: {@code /mnt/<drive>} selects that drive (ADR 0045), while a
      * drive-less path gets the runtime's drive (ADR 0010). A UNC share uses
-     * {@code /mnt/unc/<server>/<share>}; '/' becomes '\'.
+     * {@code /mnt/unc/<server>/<share>}; '/' becomes '\'. The names under the root
+     * have their Windows-reserved characters encoded, as gesher-base stores them
+     * (ADR 0083), so the path names the file the app created.
      */
     public static String windowsPath(String path) {
         // Unix File/Path normalization folds a leading "//" to "/". Recognize
@@ -168,9 +170,9 @@ public final class Zygote {
                         || p.charAt(5) >= 'a' && p.charAt(5) <= 'z')
                 && (p.length() == 6 || p.charAt(6) == '/')) {
             return Character.toUpperCase(p.charAt(5)) + ":"
-                    + (p.length() == 6 ? "\\" : p.substring(6).replace('/', '\\'));
+                    + (p.length() == 6 ? "\\" : encodeReserved(p.substring(6)).replace('/', '\\'));
         }
-        p = p.replace('/', '\\');
+        p = encodeReserved(p).replace('/', '\\');
         if (p.startsWith("\\") && !p.startsWith("\\\\")) {
             String exe = exePath();
             if (exe != null && exe.length() > 2 && exe.charAt(1) == ':') {
@@ -184,7 +186,9 @@ public final class Zygote {
      * A Windows path with a drive letter (a file picker's) as gesher-base's path model reads
      * it (docs/posix.md, gesher-app.ps1's NoDrive): no drive on Gesher's drive,
      * {@code /mnt/<drive>/...} on another. UNC roots use {@code /mnt/unc/server/share}
-     * so Java normalization preserves them. Device namespaces are not file paths.
+     * so Java normalization preserves them. Device namespaces are not file paths. An
+     * encoded reserved character (ADR 0083) below the root comes back as itself; a UNC
+     * server and share stay literal, as in gesher-base.
      */
     public static String fromWindowsPath(String path) {
         String p = path.replace('\\', '/');
@@ -197,14 +201,46 @@ public final class Zygote {
             return uncGuestPath(p.substring(2));
         }
         if (p.length() >= 2 && p.charAt(1) == ':' && Character.isLetter(p.charAt(0))) {
-            String rest = p.substring(2);
+            String rest = decodeReserved(p.substring(2));
             if (!rest.startsWith("/")) rest = "/" + rest;
             String exe = exePath();
             boolean sameDrive = exe != null && exe.length() > 1 && exe.charAt(1) == ':'
                     && Character.toLowerCase(exe.charAt(0)) == Character.toLowerCase(p.charAt(0));
             return sameDrive ? rest : "/mnt/" + Character.toLowerCase(p.charAt(0)) + rest;
         }
-        return p;
+        return decodeReserved(p);
+    }
+
+    /**
+     * Names under a Windows root with each character Windows reserves in a file name
+     * ({@code < > : " | ? *} and 1-31) as U+F000 + c, as gesher-base's
+     * {@code gesher/reserved_names.h} stores it (ADR 0083). '/' and '\' are kept.
+     */
+    private static String encodeReserved(String names) {
+        StringBuilder sb = null;
+        for (int i = 0; i < names.length(); i++) {
+            char c = names.charAt(i);
+            boolean reserved = reserved(c);
+            if (reserved && sb == null) sb = new StringBuilder(names.length()).append(names, 0, i);
+            if (sb != null) sb.append(reserved ? (char) (0xF000 + c) : c);
+        }
+        return sb == null ? names : sb.toString();
+    }
+
+    /** {@link #encodeReserved} undone; any other private-use character is kept. */
+    private static String decodeReserved(String names) {
+        StringBuilder sb = null;
+        for (int i = 0; i < names.length(); i++) {
+            char c = names.charAt(i);
+            boolean encoded = c >= 0xF000 && c < 0xF080 && reserved((char) (c - 0xF000));
+            if (encoded && sb == null) sb = new StringBuilder(names.length()).append(names, 0, i);
+            if (sb != null) sb.append(encoded ? (char) (c - 0xF000) : c);
+        }
+        return sb == null ? names : sb.toString();
+    }
+
+    private static boolean reserved(char c) {
+        return c >= 1 && c < 0x20 || ":*?\"<>|".indexOf(c) >= 0;
     }
 
     private static boolean asciiDrive(char c) {
@@ -232,7 +268,9 @@ public final class Zygote {
 
     private static String uncGuestPath(String body) {
         requireUncShare(body);
-        return "/mnt/unc/" + body;
+        int shareEnd = body.indexOf('/', body.indexOf('/') + 1);
+        if (shareEnd < 0) return "/mnt/unc/" + body;
+        return "/mnt/unc/" + body.substring(0, shareEnd) + decodeReserved(body.substring(shareEnd));
     }
 
     private static String uncWindowsPath(String path) {
@@ -244,6 +282,8 @@ public final class Zygote {
             throw new IllegalArgumentException("UNC path requires a server and share: " + path);
         String body = path.substring(prefix.length() + 1);
         requireUncShare(body);
-        return "\\\\" + body.replace('/', '\\');
+        // The server and share hold no reserved character (requireUncShare); the names
+        // under them are encoded as gesher-base stores them (ADR 0083).
+        return "\\\\" + encodeReserved(body).replace('/', '\\');
     }
 }

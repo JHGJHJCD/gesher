@@ -379,9 +379,15 @@ std::string Kinds(JNIEnv* r, jmethodID mid, jclass cls, jobject obj, bool is_sta
 // The .so's variable arguments as a jvalue array.
 class Args {
  public:
-  Args(const std::string& kinds, SysvVaList* ap) : values_(kinds.size() + 1) {
+  Args(const std::string& kinds, SysvVaList* ap)
+      : overflow_(kinds.size() > kInlineArguments ? kinds.size() + 1 : 0) {
+    // Keep small JNI callbacks' storage on this call's stack, so nested
+    // Java/native callbacks cannot overwrite an outer call.
+    // Retain the zeroed spare slot and union bytes of the vector-backed path.
+    jvalue* values = overflow_.empty() ? inline_ : overflow_.data();
+    if (overflow_.empty()) std::memset(values, 0, (kinds.size() + 1) * sizeof(jvalue));
     for (size_t i = 0; i < kinds.size(); ++i) {
-      jvalue& v = values_[i];
+      jvalue& v = values[i];
       switch (kinds[i]) {
         case 'Z': v.z = static_cast<jboolean>(NextGp(ap)); break;
         case 'B': v.b = static_cast<jbyte>(NextGp(ap)); break;
@@ -395,10 +401,12 @@ class Args {
       }
     }
   }
-  const jvalue* data() const { return values_.data(); }
+  const jvalue* data() const { return overflow_.empty() ? inline_ : overflow_.data(); }
 
  private:
-  std::vector<jvalue> values_;
+  static constexpr size_t kInlineArguments = 16;
+  jvalue inline_[kInlineArguments + 1];
+  std::vector<jvalue> overflow_;
 };
 
 // --- the System V JNIEnv table ---------------------------------------------------

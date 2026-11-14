@@ -21,6 +21,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "jni_argument_callbacks.h"
+
 static jclass g_class;  // gesher/Arm64Jni, a global reference
 static int g_onload_ran;
 static int failures;
@@ -75,6 +77,7 @@ JNIEXPORT jint JNICALL Java_gesher_Arm64Jni_callbacks(JNIEnv* env, jclass cls, j
   jvalue arg;
   arg.i = 50;
   check("CallStaticIntMethodA", (*env)->CallStaticIntMethodA(env, cls, twice, &arg) == 100);
+  check("18-argument callbacks (variadic, V and A)", jni_argument_wide_callback(env, cls));
 
   // Mixed arguments through the variadic bridge (ints, long, double, float).
   jmethodID describe = (*env)->GetStaticMethodID(env, cls, "describe", "(IJDF)Ljava/lang/String;");

@@ -31,7 +31,21 @@ the Linux kernel:
 
 Full design: [docs/architecture.md](docs/architecture.md).
 
+The [runtime performance audit](docs/research/runtime-performance-audit-2026-11-14.md)
+maps execution paths and records measured allocation, file-I/O and archive-scan
+reductions, frame-cache lifetime repairs, regression coverage and remaining work.
+
 ## Compatibility
+
+The [November 14 contract audit](docs/research/android-contract-audit-2026-11-14.md)
+maps every tracked path, refreshes the SDK and service/JNI review queues, and
+repairs pthread clocks, location completion, NSD values, media callbacks and
+Windows mouse-capture cancellation with independent QA and mandatory CI gates.
+
+The [Android/Windows contract audit](docs/research/android-windows-compatibility-2026-11-14.md)
+maps every repository file, records SDK36 gap candidates, and repairs ELF lookup,
+memory advice, media ownership, audio negotiation, task snapshots and services.
+It includes independent regression controls, Windows gates and remaining gaps.
 
 The [lifecycle contract audit](docs/research/android-lifecycle-contracts-2026-11-13.md)
 maps the runtime, records a fresh SDK inventory, and repairs network callbacks,
@@ -39,7 +53,7 @@ message-port ownership, timers and media lifetimes with independent QA.
 
 Android compatibility is partial. Apps can still fail on missing module APIs,
 native imports or backend behavior. The
-[current compatibility audit](docs/research/android-compatibility-deep-audit-2026-11-13.md)
+[earlier compatibility audit](docs/research/android-compatibility-deep-audit-2026-11-13.md)
 records concrete crash-contract repairs, regression coverage and substantial
 remaining work; a successful build or symbol lookup alone does not prove that
 an arbitrary APK will run correctly.
@@ -47,7 +61,7 @@ an arbitrary APK will run correctly.
 The [compatibility follow-up](docs/research/android-compatibility-followup-2026-11-13.md)
 adds a repository map, exhaustive SDK gap lists, and focused service, filesystem
 and media repairs with independent regression controls and Windows gates.
-The current audit builds on that work with network and Wi-Fi data contracts,
+The earlier deep audit builds on that work with network and Wi-Fi data contracts,
 event-loop fairness, audio-state and native-window repairs, and a fresh combined
 SDK inventory that separates structural gaps from demonstrated failures.
 

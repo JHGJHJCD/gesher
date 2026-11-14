@@ -28,6 +28,8 @@
 
 #include "gesher_shell.h"
 
+#include <gesher/reserved_names.h>
+
 #include <io.h>
 #include <windows.h>
 
@@ -1230,7 +1232,7 @@ bool GlobMatch(const std::string& pat, const std::string& str) {
         ++s;
         continue;
       }
-    } else if (p < pat.size() && (pat[p] == '?' || pat[p] == str[s])) {
+    } else if (p < pat.size() && (pat[p] == '?' || (pat[p] != '*' && pat[p] == str[s]))) {
       ++p;
       ++s;
       continue;
@@ -1608,26 +1610,36 @@ void GlobExpand(Shell* sh, const std::string& text, const std::string& glob,
   }
   // Split into path components.
   std::vector<std::string> comps;
-  std::string cur;
+  std::vector<std::string> patterns;
+  std::string cur, pattern;
   bool absolute = !text.empty() && (text[0] == '/' || text[0] == '\\');
-  for (char c : text) {
+  for (size_t i = 0; i < text.size(); ++i) {
+    char c = text[i];
     if (c == '/') {
       comps.push_back(cur);
+      patterns.push_back(pattern);
       cur.clear();
+      pattern.clear();
     } else {
       cur += c;
+      // Keep quoted metacharacters literal even when another part is active.
+      if (c == '\\' || ((c == '*' || c == '?' || c == '[') &&
+                        (i >= glob.size() || glob[i] != '1'))) pattern += '\\';
+      pattern += c;
     }
   }
   comps.push_back(cur);
+  patterns.push_back(pattern);
   std::vector<std::string> paths;
   paths.push_back(absolute ? std::string(1, '/') : std::string());
   for (size_t ci = 0; ci < comps.size(); ++ci) {
     const std::string& comp = comps[ci];
+    const std::string& pat = patterns[ci];
     bool last = ci + 1 == comps.size();
     if (comp.empty()) continue;
     std::vector<std::string> next;
     for (const std::string& base : paths) {
-      if (!HasGlobMeta(comp)) {
+      if (!HasGlobMeta(pat)) {
         std::string joined =
             base.empty()
                 ? comp
@@ -1641,12 +1653,12 @@ void GlobExpand(Shell* sh, const std::string& text, const std::string& glob,
       HANDLE h = FindFirstFileW((wdir + L"\\*").c_str(), &fd);
       if (h != INVALID_HANDLE_VALUE) {
         do {
-          std::string name = Narrow(fd.cFileName);
+          std::string name = Narrow(gesher::reserved_names::Decoded(fd.cFileName));
           if (name == "." || name == "..") continue;
           if (!name.empty() && name[0] == '.' &&
               (comp.empty() || comp[0] != '.'))
             continue;
-          if (GlobMatch(comp, name)) {
+          if (GlobMatch(pat, name)) {
             if (!last && (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
               continue;
             std::string joined =

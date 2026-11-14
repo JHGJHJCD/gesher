@@ -1,6 +1,8 @@
 /* Copyright (C) 2026 The Gesher Authors; SPDX-License-Identifier: Apache-2.0 */
 package com.gesher.server;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -105,7 +107,7 @@ final class SettingsStore {
             Files.createDirectories(parent.toPath());
             temporary = File.createTempFile("settings-", ".tmp", parent);
             try (FileOutputStream bytes = new FileOutputStream(temporary);
-                 DataOutputStream out = new DataOutputStream(bytes)) {
+                 DataOutputStream out = new DataOutputStream(new BufferedOutputStream(bytes))) {
                 out.writeInt(MAGIC); out.writeLong(mNextId);
                 for (String table : TABLES) {
                     Map<String, String> rows = mTables.get(table);
@@ -135,7 +137,7 @@ final class SettingsStore {
         if (!mFile.isFile()) return;
         Map<String, Map<String, String>> tables = new LinkedHashMap<>();
         Map<String, Map<String, Long>> ids = new LinkedHashMap<>();
-        try (DataInputStream in = new DataInputStream(new FileInputStream(mFile))) {
+        try (DataInputStream in = new DataInputStream(new BufferedInputStream(new FileInputStream(mFile)))) {
             if (in.readInt() != MAGIC) throw new IOException("Unknown settings version");
             long nextId = in.readLong();
             if (nextId < 0) throw new IOException("Invalid setting generation");

@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * A stand-in for a system service's AIDL interface, served in-process or across processes.
@@ -50,6 +51,9 @@ public final class StandIn<T extends IInterface> implements InvocationHandler {
     private final T mProxy;
     private final IBinder mBinder;
     private final Set<String> mReported = new HashSet<>();
+    // The implementation class is fixed for this wrapper's lifetime. Cache only
+    // resolution, never results or strict-mode decisions, and retain no global classes.
+    private final ConcurrentHashMap<Method, Method> mMethods = new ConcurrentHashMap<>();
 
     private StandIn(Class<T> iface, Object impl) {
         mInterface = iface;
@@ -123,6 +127,19 @@ public final class StandIn<T extends IInterface> implements InvocationHandler {
         return mBinder;
     }
 
+    private Method implementation(Method method) throws NoSuchMethodException {
+        Method resolved = mMethods.get(method);
+        if (resolved != null) return resolved;
+        synchronized (mMethods) {
+            resolved = mMethods.get(method);
+            if (resolved == null) {
+                resolved = mImpl.getClass().getMethod(method.getName(), method.getParameterTypes());
+                mMethods.put(method, resolved);
+            }
+        }
+        return resolved;
+    }
+
     @Override
     public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
         String name = method.getName();
@@ -136,7 +153,7 @@ public final class StandIn<T extends IInterface> implements InvocationHandler {
         if (name.equals("asBinder") && method.getParameterCount() == 0) {
             return mBinder;
         }
-        Method m = mImpl.getClass().getMethod(name, method.getParameterTypes());
+        Method m = implementation(method);
         if (m.getDeclaringClass() == mDefault || m.getDeclaringClass() == mInterface) {
             boolean first;
             synchronized (mReported) {

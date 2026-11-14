@@ -25,14 +25,18 @@
 #include "../player/extractor.h"
 #include "../video/video_decoder.h"
 #include "jni_util.h"
+#include "java_data_source.h"
+#include "receiver_lease.h"
 #include "media_jni.h"
 
 namespace gesher::media {
 namespace {
 
 jfieldID gContext;  // long mNativeContext
+std::mutex gExtractorContextLock;
 
-struct JniExtractor {
+struct JniExtractor : ReceiverState {
+  bool opening = false;
   std::shared_ptr<DataSource> source;
   std::unique_ptr<Extractor> extractor;
   struct Selected {
@@ -65,14 +69,14 @@ struct JniExtractor {
   }
 };
 
-JniExtractor* Get(JNIEnv* env, jobject thiz) {
-  auto* e = reinterpret_cast<JniExtractor*>(env->GetLongField(thiz, gContext));
+ReceiverLease<JniExtractor> Get(JNIEnv* env, jobject thiz) {
+  auto e = ReceiverLease<JniExtractor>::Acquire(env, thiz, gContext, gExtractorContextLock);
   if (e == nullptr) jniThrow(env, "java/lang/IllegalStateException", nullptr);
   return e;
 }
 
-JniExtractor* GetOpened(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = Get(env, thiz);
+ReceiverLease<JniExtractor> GetOpened(JNIEnv* env, jobject thiz) {
+  auto e = Get(env, thiz);
   if (e != nullptr && e->extractor == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException", "no data source");
     return nullptr;
@@ -176,9 +180,9 @@ Format TrackFormatForJava(Extractor* ex, size_t index) {
   return f;
 }
 
-JniExtractor* GetForDataSource(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = Get(env, thiz);
-  if (e != nullptr && e->extractor != nullptr) {
+ReceiverLease<JniExtractor> GetForDataSource(JNIEnv* env, jobject thiz) {
+  auto e = Get(env, thiz);
+  if (e != nullptr && (e->extractor != nullptr || e->opening)) {
     // NuMediaExtractor accepts one successful setDataSource per instance.
     // Selected readers belong to that extractor and retain its source adapter.
     jniThrow(env, "java/io/IOException", "Data source is already set.");
@@ -188,13 +192,17 @@ JniExtractor* GetForDataSource(JNIEnv* env, jobject thiz) {
 }
 
 void Open(JNIEnv* env, jobject thiz, std::unique_ptr<DataSource> source, const std::string& error) {
-  JniExtractor* e = GetForDataSource(env, thiz);
+  auto e = GetForDataSource(env, thiz);
   if (e == nullptr) return;
   std::string err = error;
   std::shared_ptr<DataSource> owner = std::move(source);
   std::unique_ptr<Extractor> extractor;
+  e->opening = true;
   if (owner != nullptr) extractor = Extractor::Open(owner, &err);
+  e->opening = false;
   if (extractor == nullptr) {
+    owner.reset();  // MediaDataSource.close runs before the public exception.
+    CheckException(env, "MediaExtractor failed source close");
     MEDIA_LOGE("MediaExtractor: %s", err.c_str());
     jniThrow(env, "java/io/IOException", "Failed to instantiate extractor.");
     return;
@@ -234,13 +242,20 @@ void JNICALL ME_setDataSourceFD(JNIEnv* env, jobject thiz, jobject fileDescripto
   Open(env, thiz, OpenFdSource(fd, offset, length >= 0x7fffffffffffffLL ? -1 : length, &error), error);
 }
 
+void JNICALL ME_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject data_source) {
+  if (Get(env, thiz) == nullptr) return;
+  auto source = OpenJavaDataSource(env, data_source);
+  if (source == nullptr) return;
+  Open(env, thiz, std::move(source), "MediaDataSource");
+}
+
 jint JNICALL ME_getTrackCount(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   return e != nullptr ? static_cast<jint>(e->extractor->TrackCount()) : 0;
 }
 
 jobject JNICALL ME_getTrackFormat(JNIEnv* env, jobject thiz, jint index) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return nullptr;
   if (index < 0 || static_cast<size_t>(index) >= e->extractor->TrackCount()) {
     jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
@@ -250,12 +265,12 @@ jobject JNICALL ME_getTrackFormat(JNIEnv* env, jobject thiz, jint index) {
 }
 
 jobject JNICALL ME_getFileFormat(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   return e != nullptr ? ToMap(env, e->extractor->FileFormat()) : nullptr;
 }
 
 void JNICALL ME_selectTrack(JNIEnv* env, jobject thiz, jint index) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return;
   if (index < 0 || static_cast<size_t>(index) >= e->extractor->TrackCount()) {
     jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
@@ -272,11 +287,11 @@ void JNICALL ME_selectTrack(JNIEnv* env, jobject thiz, jint index) {
 }
 
 void JNICALL ME_unselectTrack(JNIEnv* env, jobject thiz, jint index) {
-  if (JniExtractor* e = GetOpened(env, thiz)) e->selected.erase(static_cast<size_t>(index));
+  if (auto e = GetOpened(env, thiz)) e->selected.erase(static_cast<size_t>(index));
 }
 
 void JNICALL ME_seekTo(JNIEnv* env, jobject thiz, jlong time_us, jint mode) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return;
   for (auto& [index, s] : e->selected) {
     int r = s.reader->Read(&s.sample, std::max<jlong>(time_us, 0), static_cast<SeekMode>(mode));
@@ -286,7 +301,7 @@ void JNICALL ME_seekTo(JNIEnv* env, jobject thiz, jlong time_us, jint mode) {
 }
 
 jboolean JNICALL ME_advance(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return JNI_FALSE;
   long cur = e->Current();
   if (cur < 0) return JNI_FALSE;
@@ -295,7 +310,7 @@ jboolean JNICALL ME_advance(JNIEnv* env, jobject thiz) {
 }
 
 jint JNICALL ME_readSampleData(JNIEnv* env, jobject thiz, jobject buffer, jint offset) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return -1;
   long cur = e->Current();
   if (cur < 0) return -1;
@@ -332,26 +347,26 @@ jint JNICALL ME_readSampleData(JNIEnv* env, jobject thiz, jobject buffer, jint o
 }
 
 jint JNICALL ME_getSampleTrackIndex(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   return e != nullptr ? static_cast<jint>(e->Current()) : -1;
 }
 
 jlong JNICALL ME_getSampleTime(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return -1;
   long cur = e->Current();
   return cur >= 0 ? e->selected[static_cast<size_t>(cur)].sample.time_us : -1;
 }
 
 jlong JNICALL ME_getSampleSize(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return -1;
   long cur = e->Current();
   return cur >= 0 ? static_cast<jlong>(e->selected[static_cast<size_t>(cur)].sample.data.size()) : -1;
 }
 
 jint JNICALL ME_getSampleFlags(JNIEnv* env, jobject thiz) {
-  JniExtractor* e = GetOpened(env, thiz);
+  auto e = GetOpened(env, thiz);
   if (e == nullptr) return -1;
   long cur = e->Current();
   if (cur < 0) return -1;
@@ -365,11 +380,10 @@ void JNICALL ME_init(JNIEnv* env, jclass) {
   gContext = env->GetFieldID(env->FindClass("android/media/MediaExtractor"), "mNativeContext", "J");
 }
 void JNICALL ME_setup(JNIEnv* env, jobject thiz) {
-  env->SetLongField(thiz, gContext, reinterpret_cast<jlong>(new JniExtractor));
+  ReceiverLease<JniExtractor>::Setup(env, thiz, gContext, gExtractorContextLock);
 }
 void JNICALL ME_release(JNIEnv* env, jobject thiz) {
-  delete reinterpret_cast<JniExtractor*>(env->GetLongField(thiz, gContext));
-  env->SetLongField(thiz, gContext, 0);
+  ReceiverLease<JniExtractor>::Release(env, thiz, gContext, gExtractorContextLock);
 }
 
 jobject JNICALL ME_getAudioPresentations(JNIEnv* env, jobject, jint) {
@@ -382,6 +396,7 @@ const JNINativeMethod kMethods[] = {
      "(Landroid/os/IBinder;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",
      GESHER_NATIVE(ME_setDataSourcePath)},
     {"setDataSource", "(Ljava/io/FileDescriptor;JJ)V", GESHER_NATIVE(ME_setDataSourceFD)},
+    {"setDataSource", "(Landroid/media/MediaDataSource;)V", GESHER_NATIVE(ME_setDataSourceCallback)},
     {"getTrackCount", "()I", GESHER_NATIVE(ME_getTrackCount)},
     {"getTrackFormatNative", "(I)Ljava/util/Map;", GESHER_NATIVE(ME_getTrackFormat)},
     {"getFileFormatNative", "()Ljava/util/Map;", GESHER_NATIVE(ME_getFileFormat)},

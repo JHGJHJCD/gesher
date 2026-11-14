@@ -65,6 +65,7 @@ static void check_str(const char* what, const char* got, const char* want) {
 #include "memfd_contract_test.inc"
 #include "utc_time_contract_test.inc"
 #include "pthread_key_contract_test.inc"
+#include "pthread_clock_contract_test.inc"
 #include "poll_timeout_contract_test.inc"
 #include "addrinfo_contract_test.inc"
 #include "ordinary_os_contract_test.inc"
@@ -664,6 +665,7 @@ __attribute__((visibility("default"))) int gesher_selftest(void) {
   test_qsort();
   test_search();
   test_pthread();
+  test_pthread_clock_contracts();
   test_pthread_cleanup();
   test_tgnet_event_loop();
   test_epoll_nested();

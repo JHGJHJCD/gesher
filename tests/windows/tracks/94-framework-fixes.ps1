@@ -74,6 +74,20 @@ Check 'media: extractor source ownership and cropped YUV JPEG pixels' {
   $mediaDataOut
 } @('MediaDataContractTest all passed:')
 
+$mediaSourceCallbacksOut = FixesRun ($dvmFixes + 'gesher.services.MediaDataSourceContractTest') 90
+$mediaSourceCallbacksCode = $LASTEXITCODE
+Check 'media: callback data sources through extractor, retriever and player JNI' {
+  $global:LASTEXITCODE = $mediaSourceCallbacksCode
+  $mediaSourceCallbacksOut
+} @('MediaDataSourceContractTest all passed:')
+
+$nsdValuesOut = FixesRun ($dvmFixes + 'gesher.services.NsdValueContractTest') 90
+$nsdValuesCode = $LASTEXITCODE
+Check 'network: NSD TXT limits and actual Parcel address/value round trips' {
+  $global:LASTEXITCODE = $nsdValuesCode
+  $nsdValuesOut
+} @('NsdValueContractTest all passed:', 'parcel=true')
+
 $bitmapCapacityOut = FixesRun ($dvmFixes + 'gesher.services.BitmapParcelCapacityTest') 90
 $bitmapCapacityCode = $LASTEXITCODE
 Check 'graphics: Bitmap Parcel pixels and actual SharedMemory capacity' {
@@ -87,6 +101,13 @@ Check 'installer: native library filenames and failed extraction preservation' {
   $global:LASTEXITCODE = $nativePathsCode
   $nativePathsOut
 } @('NativeLibraryPathsTest all passed:')
+
+$standInDispatchOut = FixesRun ($dvmFixes + 'gesher.services.StandInDispatchTest') 90
+$standInDispatchCode = $LASTEXITCODE
+Check 'services: cached dispatch preserves overloads, defaults, strict mode and concurrent calls' {
+  $global:LASTEXITCODE = $standInDispatchCode
+  $standInDispatchOut
+} @('StandInDispatchTest all passed:')
 
 $webviewPathsOut = FixesRun ($dvmFixes + 'gesher.services.WebViewUploadPathsTest') 90
 $webviewPathsCode = $LASTEXITCODE
@@ -318,6 +339,11 @@ Check 'services: Binder Debug counters use actual native objects and report unav
   $global:LASTEXITCODE = $fixesCode
   $fixesOut
 } @('FrameworkFixesTest: Binder Debug counters track native local objects and Parcel release; proxy/death counts resolve, transaction totals unavailable',
+  'FrameworkFixesTest all passed')
+Check 'services: android.os.Debug memory accounting (getMemoryInfo, getPss, getRss, getMemInfo) from the Windows working set' {
+  $global:LASTEXITCODE = $fixesCode
+  $fixesOut
+} @('FrameworkFixesTest: Debug.getMemoryInfo, getPss, getRss and getMemInfo report the process working set and system memory',
   'FrameworkFixesTest all passed')
 Check 'services: libphonenumber (the ext boot jar''s, in framework.jar with its metadata) parses and formats numbers' {
   $global:LASTEXITCODE = $fixesCode

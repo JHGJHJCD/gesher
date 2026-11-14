@@ -269,18 +269,41 @@ void LockWord(Word* s) {
   }
 }
 
-// Like LockWord, with a deadline; false on timeout.
-bool LockWordTimed(Word* s, const LinuxTimespec* abstime, bool monotonic) {
-  int32_t c = 0;
-  if (s->compare_exchange_strong(c, 1, std::memory_order_acquire)) return true;
-  if (c != 2) c = s->exchange(2, std::memory_order_acquire);
-  while (c != 0) {
+// Android permits a null pthread deadline (an unbounded wait). Mutexes and
+// rwlocks check a deadline only after their immediate acquisition fails;
+// condition variables check it before releasing their mutex.
+int CheckPthreadDeadline(const LinuxTimespec* abstime) {
+  if (abstime == nullptr) return 0;
+  if (abstime->tv_nsec < 0 || abstime->tv_nsec >= 1000000000) return kEINVAL;
+  return abstime->tv_sec < 0 ? kETIMEDOUT : 0;
+}
+
+// A finite Windows wait is only a slice of an absolute Android deadline.
+// Re-read the selected clock after a slice times out, including deadlines
+// beyond DWORD milliseconds. Short realtime slices also observe wall-clock
+// adjustments; a timeout from WaitOnAddress alone never ends an early wait.
+bool WaitWordUntil(Word* s, int32_t expected, const LinuxTimespec* abstime, bool monotonic) {
+  if (abstime == nullptr) return FutexWait(s, expected);
+  for (;;) {
     uint32_t ms = MillisUntil(abstime, monotonic);
     if (ms == 0) return false;
-    FutexWait(s, 2, ms);
+    if (!monotonic && ms > 1000) ms = 1000;
+    if (FutexWait(s, expected, ms)) return true;
+  }
+}
+
+// Like LockWord, with Android's immediate-acquisition/validation order.
+int LockWordTimed(Word* s, const LinuxTimespec* abstime, bool monotonic) {
+  int32_t c = 0;
+  if (s->compare_exchange_strong(c, 1, std::memory_order_acquire)) return 0;
+  int result = CheckPthreadDeadline(abstime);
+  if (result != 0) return result;
+  if (c != 2) c = s->exchange(2, std::memory_order_acquire);
+  while (c != 0) {
+    if (!WaitWordUntil(s, 2, abstime, monotonic)) return kETIMEDOUT;
     c = s->exchange(2, std::memory_order_acquire);
   }
-  return true;
+  return 0;
 }
 
 void UnlockWord(Word* s) {
@@ -308,6 +331,15 @@ void MutexTaken(bionic_pthread_mutex_t* m) {
   if (MutexType(m) == kMutexNormal) return;
   W(m, 2)->store(SelfTid(), std::memory_order_relaxed);
   W(m, 3)->store(1, std::memory_order_relaxed);
+}
+
+int MutexTimedLock(bionic_pthread_mutex_t* m, const LinuxTimespec* abstime, bool monotonic) {
+  int result = MutexPreLock(m);
+  if (result >= 0) return result;
+  result = LockWordTimed(W(m, 1), abstime, monotonic);
+  if (result != 0) return result;
+  MutexTaken(m);
+  return 0;
 }
 
 }  // namespace
@@ -541,11 +573,16 @@ int BIONIC_SYSV gesher_bionic_pthread_mutex_trylock(bionic_pthread_mutex_t* m) {
 
 int BIONIC_SYSV gesher_bionic_pthread_mutex_timedlock(bionic_pthread_mutex_t* m,
                                                      const LinuxTimespec* abstime) {
-  int r = MutexPreLock(m);
-  if (r >= 0) return r;
-  if (!LockWordTimed(W(m, 1), abstime, false)) return kETIMEDOUT;
-  MutexTaken(m);
-  return 0;
+  return MutexTimedLock(m, abstime, false);
+}
+int BIONIC_SYSV gesher_bionic_pthread_mutex_timedlock_monotonic_np(
+    bionic_pthread_mutex_t* m, const LinuxTimespec* abstime) {
+  return MutexTimedLock(m, abstime, true);
+}
+int BIONIC_SYSV gesher_bionic_pthread_mutex_clocklock(
+    bionic_pthread_mutex_t* m, int clock, const LinuxTimespec* abstime) {
+  if (clock != 0 && clock != 1) return kEINVAL;
+  return MutexTimedLock(m, abstime, clock == 1);
 }
 
 int BIONIC_SYSV gesher_bionic_pthread_mutex_unlock(bionic_pthread_mutex_t* m) {
@@ -572,6 +609,7 @@ int BIONIC_SYSV gesher_bionic_pthread_condattr_init(bionic_pthread_condattr_t* a
 }
 int BIONIC_SYSV gesher_bionic_pthread_condattr_destroy(bionic_pthread_condattr_t*) { return 0; }
 int BIONIC_SYSV gesher_bionic_pthread_condattr_setclock(bionic_pthread_condattr_t* a, int clock) {
+  if (clock != 0 && clock != 1) return kEINVAL;
   *a = clock;
   return 0;
 }
@@ -588,16 +626,12 @@ int BIONIC_SYSV gesher_bionic_pthread_cond_destroy(bionic_pthread_cond_t*) { ret
 namespace {
 int CondWait(bionic_pthread_cond_t* c, bionic_pthread_mutex_t* m, const LinuxTimespec* abstime,
              bool monotonic) {
+  int result = CheckPthreadDeadline(abstime);
+  if (result != 0) return result;
   Word* seq = W(c, 0);
   int32_t observed = seq->load(std::memory_order_relaxed);
   gesher_bionic_pthread_mutex_unlock(m);
-  bool timed_out = false;
-  if (abstime == nullptr) {
-    FutexWait(seq, observed);
-  } else {
-    uint32_t ms = MillisUntil(abstime, monotonic);
-    timed_out = ms == 0 || !FutexWait(seq, observed, ms);
-  }
+  bool timed_out = !WaitWordUntil(seq, observed, abstime, monotonic);
   gesher_bionic_pthread_mutex_lock(m);
   return timed_out ? kETIMEDOUT : 0;
 }
@@ -617,6 +651,13 @@ int BIONIC_SYSV gesher_bionic_pthread_cond_timedwait_monotonic_np(bionic_pthread
                                                                  const LinuxTimespec* abstime) {
   return CondWait(c, m, abstime, true);
 }
+int BIONIC_SYSV gesher_bionic_pthread_cond_clockwait(
+    bionic_pthread_cond_t* c, bionic_pthread_mutex_t* m, int clock,
+    const LinuxTimespec* abstime) {
+  if (clock != 0 && clock != 1) return kEINVAL;
+  // An explicit clock overrides the condvar attribute without mutating it.
+  return CondWait(c, m, abstime, clock == 1);
+}
 int BIONIC_SYSV gesher_bionic_pthread_cond_signal(bionic_pthread_cond_t* c) {
   W(c, 0)->fetch_add(1, std::memory_order_release);
   FutexWake(W(c, 0), false);
@@ -628,49 +669,93 @@ int BIONIC_SYSV gesher_bionic_pthread_cond_broadcast(bionic_pthread_cond_t* c) {
   return 0;
 }
 
-// Read-write locks: word 0 is -1 (a writer), 0 (free) or the reader count.
+// Read-write locks: word 0 is -1 (a writer), 0 (free) or the reader count;
+// word 1 records the writer's thread id. Both fit the existing LP64 object.
+// Android reserves 29 bits for readers; reject exhaustion before addition.
+constexpr int32_t kRwlockMaxReaders = (1 << 29) - 1;
 
 int BIONIC_SYSV gesher_bionic_pthread_rwlock_init(bionic_pthread_rwlock_t* rw,
                                                  const bionic_pthread_rwlockattr_t*) {
   std::memset(rw, 0, sizeof(*rw));
   return 0;
 }
-int BIONIC_SYSV gesher_bionic_pthread_rwlock_destroy(bionic_pthread_rwlock_t*) { return 0; }
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_destroy(bionic_pthread_rwlock_t* rw) {
+  return W(rw, 0)->load(std::memory_order_relaxed) == 0 ? 0 : kEBUSY;
+}
 int BIONIC_SYSV gesher_bionic_pthread_rwlock_tryrdlock(bionic_pthread_rwlock_t* rw) {
   Word* s = W(rw, 0);
   int32_t v = s->load(std::memory_order_relaxed);
   while (v >= 0) {
+    if (v >= kRwlockMaxReaders) return kEAGAIN;
     if (s->compare_exchange_weak(v, v + 1, std::memory_order_acquire)) return 0;
   }
   return kEBUSY;
 }
-int BIONIC_SYSV gesher_bionic_pthread_rwlock_rdlock(bionic_pthread_rwlock_t* rw) {
-  Word* s = W(rw, 0);
-  for (;;) {
-    int32_t v = s->load(std::memory_order_relaxed);
-    if (v >= 0) {
-      if (s->compare_exchange_weak(v, v + 1, std::memory_order_acquire)) return 0;
-      continue;
-    }
-    FutexWait(s, v);
-  }
-}
 int BIONIC_SYSV gesher_bionic_pthread_rwlock_trywrlock(bionic_pthread_rwlock_t* rw) {
   int32_t v = 0;
-  return W(rw, 0)->compare_exchange_strong(v, -1, std::memory_order_acquire) ? 0 : kEBUSY;
+  if (!W(rw, 0)->compare_exchange_strong(v, -1, std::memory_order_acquire)) return kEBUSY;
+  W(rw, 1)->store(SelfTid(), std::memory_order_relaxed);
+  return 0;
 }
-int BIONIC_SYSV gesher_bionic_pthread_rwlock_wrlock(bionic_pthread_rwlock_t* rw) {
+
+namespace {
+int RwlockTimedLock(bionic_pthread_rwlock_t* rw, const LinuxTimespec* abstime,
+                    bool monotonic, bool writer) {
+  if (W(rw, 1)->load(std::memory_order_relaxed) == SelfTid()) return kEDEADLK;
   Word* s = W(rw, 0);
   for (;;) {
-    int32_t v = 0;
-    if (s->compare_exchange_weak(v, -1, std::memory_order_acquire)) return 0;
-    if (v != 0) FutexWait(s, v);
+    int result = writer ? gesher_bionic_pthread_rwlock_trywrlock(rw)
+                        : gesher_bionic_pthread_rwlock_tryrdlock(rw);
+    if (result != kEBUSY) return result;
+    result = CheckPthreadDeadline(abstime);
+    if (result != 0) return result;
+    int32_t observed = s->load(std::memory_order_relaxed);
+    // An unlock can have raced the try call. Do not wait on a free/readable
+    // state and lose the wake that happened before this snapshot.
+    if (writer ? observed == 0 : observed >= 0) continue;
+    if (!WaitWordUntil(s, observed, abstime, monotonic)) return kETIMEDOUT;
   }
+}
+}  // namespace
+
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_rdlock(bionic_pthread_rwlock_t* rw) {
+  return RwlockTimedLock(rw, nullptr, true, false);
+}
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_wrlock(bionic_pthread_rwlock_t* rw) {
+  return RwlockTimedLock(rw, nullptr, true, true);
+}
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_timedrdlock(
+    bionic_pthread_rwlock_t* rw, const LinuxTimespec* abstime) {
+  return RwlockTimedLock(rw, abstime, false, false);
+}
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_timedwrlock(
+    bionic_pthread_rwlock_t* rw, const LinuxTimespec* abstime) {
+  return RwlockTimedLock(rw, abstime, false, true);
+}
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_timedrdlock_monotonic_np(
+    bionic_pthread_rwlock_t* rw, const LinuxTimespec* abstime) {
+  return RwlockTimedLock(rw, abstime, true, false);
+}
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_timedwrlock_monotonic_np(
+    bionic_pthread_rwlock_t* rw, const LinuxTimespec* abstime) {
+  return RwlockTimedLock(rw, abstime, true, true);
+}
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_clockrdlock(
+    bionic_pthread_rwlock_t* rw, int clock, const LinuxTimespec* abstime) {
+  if (clock != 0 && clock != 1) return kEINVAL;
+  return RwlockTimedLock(rw, abstime, clock == 1, false);
+}
+int BIONIC_SYSV gesher_bionic_pthread_rwlock_clockwrlock(
+    bionic_pthread_rwlock_t* rw, int clock, const LinuxTimespec* abstime) {
+  if (clock != 0 && clock != 1) return kEINVAL;
+  return RwlockTimedLock(rw, abstime, clock == 1, true);
 }
 int BIONIC_SYSV gesher_bionic_pthread_rwlock_unlock(bionic_pthread_rwlock_t* rw) {
   Word* s = W(rw, 0);
   int32_t v = s->load(std::memory_order_relaxed);
   if (v == -1) {
+    if (W(rw, 1)->load(std::memory_order_relaxed) != SelfTid()) return kEPERM;
+    W(rw, 1)->store(0, std::memory_order_relaxed);
     s->store(0, std::memory_order_release);
     FutexWake(s, true);
   } else if (v > 0) {
@@ -911,6 +996,8 @@ void RegisterPthread(SymbolTable& t) {
   P(pthread_mutex_lock);
   P(pthread_mutex_trylock);
   P(pthread_mutex_timedlock);
+  P(pthread_mutex_timedlock_monotonic_np);
+  P(pthread_mutex_clocklock);
   P(pthread_mutex_unlock);
   P(pthread_condattr_init);
   P(pthread_condattr_destroy);
@@ -920,6 +1007,7 @@ void RegisterPthread(SymbolTable& t) {
   P(pthread_cond_wait);
   P(pthread_cond_timedwait);
   P(pthread_cond_timedwait_monotonic_np);
+  P(pthread_cond_clockwait);
   P(pthread_cond_signal);
   P(pthread_cond_broadcast);
   P(pthread_rwlock_init);
@@ -928,6 +1016,12 @@ void RegisterPthread(SymbolTable& t) {
   P(pthread_rwlock_tryrdlock);
   P(pthread_rwlock_wrlock);
   P(pthread_rwlock_trywrlock);
+  P(pthread_rwlock_timedrdlock);
+  P(pthread_rwlock_timedwrlock);
+  P(pthread_rwlock_timedrdlock_monotonic_np);
+  P(pthread_rwlock_timedwrlock_monotonic_np);
+  P(pthread_rwlock_clockrdlock);
+  P(pthread_rwlock_clockwrlock);
   P(pthread_rwlock_unlock);
   P(pthread_once);
   P(pthread_key_create);
