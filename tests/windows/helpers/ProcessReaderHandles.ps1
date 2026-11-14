@@ -7,23 +7,90 @@ using System.IO;
 using System.Runtime.InteropServices;
 using Microsoft.Win32.SafeHandles;
 public static class GtestProcessNativeHandles {
+  const int ErrorInvalidHandle = 6;
+  const int ErrorNotSameObject = 1656;
+  const uint DuplicateSameAccess = 2;
+  [ThreadStatic] static string lastDiagnostic;
+  public static string LastDiagnostic { get { return lastDiagnostic ?? "no close observation"; } }
+
+  [DllImport("kernel32.dll")]
+  static extern IntPtr GetCurrentProcess();
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool DuplicateHandle(IntPtr process, SafeFileHandle source,
+      IntPtr target, out IntPtr duplicate, uint access, bool inherit, uint options);
   [DllImport("kernel32.dll", SetLastError = true)]
   static extern bool GetHandleInformation(IntPtr handle, out uint flags);
-  static GtestProcessNativeHandles() {
-    // Resolve/JIT the P/Invoke before the first close/probe interval.
-    uint flags;
-    GetHandleInformation(IntPtr.Zero, out flags);
-  }
+  [DllImport("kernelbase.dll", SetLastError = true)]
+  static extern bool CompareObjectHandles(IntPtr first, IntPtr second);
+  [DllImport("kernel32.dll", SetLastError = true)]
+  static extern bool CloseHandle(IntPtr handle);
+
   public static bool CloseOwnedReader(StreamReader reader, SafeFileHandle owned) {
-    var file = reader.BaseStream as FileStream;
-    bool same = file != null && Object.ReferenceEquals(file.SafeFileHandle, owned);
-    IntPtr value = owned.DangerousGetHandle();
-    reader.Dispose();
-    uint flags;
-    // Pair the exact owned SafeFileHandle with its stream BEFORE disposal.
-    // No allocation/open occurs between that disposal and the native probe.
-    // A concurrently reused value that is valid is conservatively a failure.
-    return same && owned.IsClosed && !GetHandleInformation(value, out flags) && Marshal.GetLastWin32Error() == 6;
+    bool sameOwner = false, sourceOpen = false, duplicated = false, witnessValid = false;
+    bool identityBefore = false, disposed = false, safeClosed = false, sameAfter = true;
+    bool compared = false, witnessClosed = false;
+    int duplicateError = 0, witnessError = 0, identityError = 0, compareError = 0, closeError = 0;
+    IntPtr value = IntPtr.Zero, witness = IntPtr.Zero;
+    string problem = "";
+    try {
+      var file = reader == null ? null : reader.BaseStream as FileStream;
+      sameOwner = file != null && owned != null && Object.ReferenceEquals(file.SafeFileHandle, owned);
+      sourceOpen = sameOwner && !owned.IsClosed && !owned.IsInvalid;
+      if (sourceOpen) {
+        value = owned.DangerousGetHandle();
+        // The SafeFileHandle argument pins the live source during duplication.
+        // Keep the witness private: it names the exact kernel object even if
+        // another thread reuses the original numeric slot after Dispose.
+        IntPtr process = GetCurrentProcess();
+        duplicated = DuplicateHandle(process, owned, process, out witness, 0, false, DuplicateSameAccess);
+        duplicateError = Marshal.GetLastWin32Error();
+        if (duplicated) {
+          uint flags;
+          witnessValid = witness != IntPtr.Zero && witness != new IntPtr(-1) &&
+              GetHandleInformation(witness, out flags);
+          witnessError = Marshal.GetLastWin32Error();
+          if (witnessValid) {
+            identityBefore = CompareObjectHandles(value, witness);
+            identityError = Marshal.GetLastWin32Error();
+          }
+        }
+      }
+    } catch (Exception e) { problem = "capture: " + e.GetType().Name + ": " + e.Message; }
+    finally {
+      // Always attempt the actual reader cleanup, including a failed/mismatched
+      // capture. Its SafeFileHandle keeps ownership and pending-reference rules.
+      try {
+        if (reader != null) { reader.Dispose(); disposed = true; }
+      } catch (Exception e) { problem += " dispose: " + e.GetType().Name + ": " + e.Message; }
+      safeClosed = owned != null && owned.IsClosed;
+      try {
+        if (sameOwner && sourceOpen && duplicated && witnessValid && identityBefore && disposed && safeClosed) {
+          sameAfter = CompareObjectHandles(value, witness);
+          compareError = Marshal.GetLastWin32Error();
+          compared = true;
+        }
+      } catch (Exception e) { problem += " compare: " + e.GetType().Name + ": " + e.Message; }
+      finally {
+        if (duplicated && witness != IntPtr.Zero && witness != new IntPtr(-1)) {
+          // This raw duplicate is exclusively ours, with no pending I/O or
+          // SafeHandle owner. The native close result proves its release; never
+          // probe its freed numeric value or retry an uncertain close.
+          witnessClosed = CloseHandle(witness);
+          closeError = Marshal.GetLastWin32Error();
+        }
+      }
+    }
+    bool gone = compared && !sameAfter &&
+        (compareError == ErrorInvalidHandle || compareError == ErrorNotSameObject);
+    bool success = sameOwner && sourceOpen && duplicated && witnessValid && identityBefore &&
+        disposed && safeClosed && gone && witnessClosed && problem.Length == 0;
+    lastDiagnostic = "same-owner=" + sameOwner + " source-open=" + sourceOpen +
+        " duplicate=" + duplicated + "/" + duplicateError + " witness-valid=" + witnessValid + "/" + witnessError +
+        " identity-before=" + identityBefore + "/" + identityError + " disposed=" + disposed +
+        " safe-closed=" + safeClosed + " compared=" + compared + " same-after=" + sameAfter +
+        " compare-error=" + compareError + " witness-closed=" + witnessClosed + "/" + closeError +
+        (problem.Length == 0 ? "" : " problem=" + problem);
+    return success;
   }
 }
 '@

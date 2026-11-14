@@ -95,7 +95,7 @@ function Invoke-GtestProcess([string] $Executable, [string[]] $Arguments,
       if ($null -ne $pipe.Reader) {
         try {
           if ([GtestProcessNativeHandles]::CloseOwnedReader($pipe.Reader, $pipe.Handle)) { $closedPipes++ }
-          else { $problems += 'gtest owned pipe did not prove native invalidity immediately after disposal' }
+          else { $problems += "gtest owned pipe close proof failed: $([GtestProcessNativeHandles]::LastDiagnostic)" }
         } catch { $problems += "gtest reader dispose: $_" }
       }
     }
