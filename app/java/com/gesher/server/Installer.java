@@ -264,9 +264,10 @@ final class Installer {
         // lib/x86_64, or lib/arm64 for an arm64-v8a-only package (docs/arm64.md); its
         // splits count (an .xapk's libraries are in config.arm64_v8a.apk).
         String[] apks = apksOf(e.codePath);
-        String abi = NativeLibs.forApk(apks);
-        p.setNativeLibraryDir(e.codePath + "/lib/" + NativeLibs.instructionSetDir(abi));
-        p.setPrimaryCpuAbi(NativeLibs.abiFor(apks));
+        String abi = NativeLibs.abiFor(apks);
+        p.setNativeLibraryDir(e.codePath + "/lib/"
+                + NativeLibs.instructionSetDir(abi != null ? abi : NativeLibs.ABI));
+        p.setPrimaryCpuAbi(abi);
         p.setInstallTimes(e.firstInstallTime, e.lastUpdateTime);
         new File(p.dataDir()).mkdirs();
         return p;
