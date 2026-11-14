@@ -814,6 +814,18 @@ bool Track::MixInto(float* mix, size_t frames, uint32_t out_rate, uint32_t out_c
       rs.t = static_cast<double>(width);
       rs.real_end = -1;
       rs.primed = true;
+    } else if (width > rs.width) {
+      // A rate change can widen the filter beyond retained left-hand history
+      // (especially just after startup or compaction). Preserve every real
+      // sample and the absolute timeline, padding only unavailable past taps.
+      const int64_t first = static_cast<int64_t>(std::floor(rs.t)) -
+                            static_cast<int64_t>(width) + 1;
+      if (first < 0) {
+        const size_t missing = static_cast<size_t>(-first);
+        rs.hist.insert(rs.hist.begin(), missing * ch, 0.0f);
+        rs.t += static_cast<double>(missing);
+        rs.start_index -= static_cast<int64_t>(missing);
+      }
     }
     rs.width = width;
   }
