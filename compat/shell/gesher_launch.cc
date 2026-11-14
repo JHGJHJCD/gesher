@@ -33,6 +33,10 @@
 // The app's process belongs to the device. The splash then stays until the
 // app's window is up (at most kSplashAfterDetachMs more). --detach and --wait
 // in the arguments (gesher-app's) override the variable, for the splash too.
+// A control panel opened without output handles owns its own lifetime. Release
+// this executable after starting it, so its updater can replace the launcher
+// while the panel remains open to monitor Setup. Redirected invocations still
+// wait and return the PowerShell script's output and exit code.
 
 // The project defines NOGDI for AOSP code; the splash paints with GDI.
 // CommandLineToArgvW and the property store need what WIN32_LEAN_AND_MEAN
@@ -714,10 +718,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   // The splash's view of it: gesher-app's own --detach / --wait (the launcher's
   // last one wins) over the environment.
   bool detached = Env(kDetachEnv) == L"1";
+  bool control_panel = false;
   {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     if (argv != nullptr) {
+      if (argc > 1) {
+        const std::wstring command_name = Lower(argv[1]);
+        control_panel = command_name == L"control-panel" || command_name == L"settings" ||
+                        command_name == L"dashboard" || command_name == L"gui";
+      }
       for (int i = 1; i < argc; ++i) {
         if (std::wcscmp(argv[i], L"--detach") == 0) detached = true;
         if (std::wcscmp(argv[i], L"--wait") == 0) detached = false;
@@ -736,6 +746,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   if (!CreateProcessW(powershell.c_str(), mutable_command.data(), nullptr, nullptr,
                       inherit ? TRUE : FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
     return 1;
+  }
+  if (control_panel && !inherit) {
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return 0;
   }
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   if (job != nullptr) {
