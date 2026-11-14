@@ -3,8 +3,10 @@
 
 The mock Format preserves the real absent-key output contract. Callback closure
 observes the production publication/retirement order; a separate bounded thread
-checks mutex ownership without attempting a recursive blocking lock. Actual
-readers and JNI APIs are covered by MediaDataSourceContractTest on Windows.
+checks mutex ownership without attempting a recursive blocking lock. Receiver
+lookup and JNI exception reporting are declared boundaries for this state-only
+fixture. The real receiver lease and checked JNI run in the separate callback
+suite; actual readers/public APIs run in MediaDataSourceContractTest on Windows.
 The bitrate boundary group runs only on the candidate; old-source controls
 exclude it rather than execute the original signed-overflow expression.
 """
@@ -42,9 +44,39 @@ def main():
     retriever = read('compat/media/jni/media_jni_others.cc')
     player = read('compat/media/player/player.cc')
     fixture = (ROOT / 'tests/media/callback/state_host.cc.in').read_text()
-    values = {'@RETRIEVER@': function(retriever, 'struct Retriever {') + ';',
+    if 'struct RetrieverSnapshot {' in retriever:
+        receiver = ('struct ReceiverState {};\n'
+            + function(retriever, 'struct RetrieverSnapshot {') + ';\n'
+            + function(retriever, 'struct Retriever : ReceiverState {') + ';\n'
+            + 'RetrieverSnapshot& State(Retriever& r) { return r.snapshot; }\n')
+        publication = '''using JNIEnv = void;
+using jobject = void*;
+static Retriever* active_receiver;
+static bool publication_failed;
+Retriever* GetRetriever(JNIEnv*, jobject) { return active_receiver; }
+void jniThrow(JNIEnv*, const char*, const char*) { publication_failed = true; }
+#define MEDIA_LOGE(...) ((void)0)
+''' + function(retriever, 'void SetFromSource(') + '''
+bool Publish(Retriever* receiver, std::unique_ptr<DataSource> source, std::string* error) {
+  active_receiver = receiver;
+  publication_failed = false;
+  SetFromSource(nullptr, nullptr, std::move(source), *error);
+  active_receiver = nullptr;
+  return !publication_failed;
+}
+'''
+    else:
+        receiver = (function(retriever, 'struct Retriever {') + ';\n'
+            + 'Retriever& State(Retriever& r) { return r; }\n')
+        publication = '''bool Publish(Retriever* receiver, std::unique_ptr<DataSource> source,
+             std::string* error) {
+  return Fill(receiver, std::move(source), error);
+}
+'''
+    values = {'@RETRIEVER@': receiver,
         '@KEYS@': retriever[retriever.index('const struct {'):retriever.index('\nbool Fill(')],
         '@FILL@': function(retriever, 'bool Fill('),
+        '@PUBLISH@': publication,
         '@RESET@': function(player, 'int Player::Reset()')}
     for marker, value in values.items():
         if fixture.count(marker) != 1: raise ValueError(marker)

@@ -67,6 +67,7 @@ struct Extractor {
 @RETRIEVER@
 @KEYS@
 @FILL@
+@PUBLISH@
 struct Playback {
   std::shared_ptr<DataSource> source;
   bool* stopped;
@@ -87,29 +88,27 @@ void metadata() {
   Retriever r;
   std::string error;
   int firstClosed = 0, secondClosed = 0, failedClosed = 0;
-  auto first = std::make_shared<Source>('a');
+  auto first = std::make_unique<Source>('a');
   first->closing = [&] {
     ++firstClosed;
-    check(r.metadata[7] == "b" && r.album_art.empty(), "old close sees fully published new metadata");
+    check(State(r).metadata[7] == "b" && State(r).album_art.empty(), "old close sees fully published new metadata");
   };
-  check(Fill(&r, first, &error), "first metadata source");
-  first.reset();
-  check(r.album_art == std::vector<uint8_t>({4, 5, 6}), "first source art");
-  auto second = std::make_shared<Source>('b');
+  check(Publish(&r, std::move(first), &error), "first metadata source");
+  check(State(r).album_art == std::vector<uint8_t>({4, 5, 6}), "first source art");
+  auto second = std::make_unique<Source>('b');
   second->closing = [&] { ++secondClosed; };
-  check(Fill(&r, second, &error), "second metadata source");
-  second.reset();
-  check(r.album_art.empty(), "source without picture clears prior art");
-  check(r.metadata[7] == "b" && r.metadata[9] == "2000", "replacement metadata fields");
+  check(Publish(&r, std::move(second), &error), "second metadata source");
+  check(State(r).album_art.empty(), "source without picture clears prior art");
+  check(State(r).metadata[7] == "b" && State(r).metadata[9] == "2000", "replacement metadata fields");
   check(firstClosed == 1 && secondClosed == 0, "only replaced source closes");
-  auto bad = std::make_shared<Source>('x');
+  auto bad = std::make_unique<Source>('x');
   bad->closing = [&] { ++failedClosed; };
-  check(!Fill(&r, std::move(bad), &error), "bad replacement fails");
+  check(!Publish(&r, std::move(bad), &error), "bad replacement fails");
   check(failedClosed == 1 && secondClosed == 0, "bad replacement retires candidate only");
-  char tag = 0; r.source->ReadAt(0, &tag, 1);
-  check(tag == 'b' && r.metadata[7] == "b", "failed replacement preserves matching source and metadata");
-  check(Fill(&r, std::make_shared<Source>('a'), &error), "art may return on another source");
-  check(r.album_art == std::vector<uint8_t>({4, 5, 6}), "new art remains present");
+  char tag = 0; State(r).source->ReadAt(0, &tag, 1);
+  check(tag == 'b' && State(r).metadata[7] == "b", "failed replacement preserves matching source and metadata");
+  check(Publish(&r, std::make_unique<Source>('a'), &error), "art may return on another source");
+  check(State(r).album_art == std::vector<uint8_t>({4, 5, 6}), "new art remains present");
   check(secondClosed == 1, "successful third source retires second");
 }
 void reset() {
@@ -142,15 +141,15 @@ void reset() {
 void bitrate() {
   Retriever r;
   std::string error;
-  check(Fill(&r, std::make_shared<Source>('r', 17), &error), "fractional bitrate source opens");
-  check(r.metadata[20] == "45", "average bitrate truncates toward zero");
-  check(Fill(&r, std::make_shared<Source>('b', 2000000000000LL), &error), "large virtual source opens");
-  check(r.metadata[20] == "8000000000000", "large source bitrate avoids overflowing an integer intermediate");
-  check(Fill(&r, std::make_shared<Source>('a', int64_t{1} << 60), &error), "conversion-boundary source opens");
-  check(r.metadata.count(20) == 0, "average equal to two-to-63 is not converted to signed int64");
-  check(Fill(&r, std::make_shared<Source>('b', std::numeric_limits<int64_t>::max()), &error),
+  check(Publish(&r, std::make_unique<Source>('r', 17), &error), "fractional bitrate source opens");
+  check(State(r).metadata[20] == "45", "average bitrate truncates toward zero");
+  check(Publish(&r, std::make_unique<Source>('b', 2000000000000LL), &error), "large virtual source opens");
+  check(State(r).metadata[20] == "8000000000000", "large source bitrate avoids overflowing an integer intermediate");
+  check(Publish(&r, std::make_unique<Source>('a', int64_t{1} << 60), &error), "conversion-boundary source opens");
+  check(State(r).metadata.count(20) == 0, "average equal to two-to-63 is not converted to signed int64");
+  check(Publish(&r, std::make_unique<Source>('b', std::numeric_limits<int64_t>::max()), &error),
         "out-of-range bitrate source opens");
-  check(r.metadata.count(20) == 0, "unrepresentable average bitrate remains unavailable");
+  check(State(r).metadata.count(20) == 0, "unrepresentable average bitrate remains unavailable");
 }
 int main(int argc, char** argv) {
   if (argc != 2) return 2;

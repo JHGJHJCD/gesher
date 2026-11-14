@@ -183,9 +183,9 @@ void JNICALL MP_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject dataSou
     return;
   }
   std::shared_ptr<DataSource> source = OpenJavaDataSource(env, dataSource);
-  if (source == nullptr) return;  // preserve constructor/allocation exceptions
+  if (source == nullptr) return;
   const int status = mp->SetDataSource(source);
-  // A rejected source calls Java close before Process creates an exception.
+  // Close a rejected candidate before the public error mapper invokes JNI.
   source.reset();
   if (status != kPlayerOk) CheckException(env, "MediaPlayer rejected source close");
   Process(env, mp, status, "java/lang/RuntimeException", "setDataSourceCallback failed.");

@@ -26,6 +26,13 @@ bool CheckException(JNIEnv* env, const char*) {
   env->ExceptionClear();
   return true;
 }
+void jniThrow(JNIEnv* env, const char* type, const char* message) {
+  jclass cls = env->FindClass(type);
+  if (cls != nullptr) {
+    env->ThrowNew(cls, message);
+    env->DeleteLocalRef(cls);
+  }
+}
 @ADAPTER@
 }  // namespace gesher::media
 

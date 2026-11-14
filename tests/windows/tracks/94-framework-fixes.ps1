@@ -333,6 +333,11 @@ Check 'services: Binder Debug counters use actual native objects and report unav
   $fixesOut
 } @('FrameworkFixesTest: Binder Debug counters track native local objects and Parcel release; proxy/death counts resolve, transaction totals unavailable',
   'FrameworkFixesTest all passed')
+Check 'services: android.os.Debug memory accounting (getMemoryInfo, getPss, getRss, getMemInfo) from the Windows working set' {
+  $global:LASTEXITCODE = $fixesCode
+  $fixesOut
+} @('FrameworkFixesTest: Debug.getMemoryInfo, getPss, getRss and getMemInfo report the process working set and system memory',
+  'FrameworkFixesTest all passed')
 Check 'services: libphonenumber (the ext boot jar''s, in framework.jar with its metadata) parses and formats numbers' {
   $global:LASTEXITCODE = $fixesCode
   $fixesOut

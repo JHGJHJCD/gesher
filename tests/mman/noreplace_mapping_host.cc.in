@@ -1,0 +1,223 @@
+// Copyright (C) 2026 The Gesher Authors; SPDX-License-Identifier: Apache-2.0
+// Production placeholder bookkeeping and admission with recording Win32 calls.
+// No physical memory behavior, address selection or file mapping is simulated.
+#include <algorithm>
+#include <cerrno>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <iterator>
+#include <map>
+#include <mutex>
+#include <sstream>
+#include <string>
+#include <vector>
+
+namespace {
+using DWORD = uint32_t;
+using ULONG = uint32_t;
+using HANDLE = void*;
+constexpr DWORD PAGE_NOACCESS = 1, PAGE_READONLY = 2, PAGE_READWRITE = 4,
+    PAGE_EXECUTE_READ = 32, PAGE_EXECUTE_READWRITE = 64;
+constexpr DWORD MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000, MEM_RELEASE = 0x8000,
+    MEM_REPLACE_PLACEHOLDER = 0x4000, MEM_RESERVE_PLACEHOLDER = 0x40000,
+    MEM_PRESERVE_PLACEHOLDER = 2, MEM_COALESCE_PLACEHOLDERS = 1;
+constexpr int PROT_NONE = 0, PROT_READ = 1, PROT_WRITE = 2, PROT_EXEC = 4;
+constexpr int MAP_SHARED = 1, MAP_PRIVATE = 2, MAP_FIXED = 0x10,
+    MAP_ANONYMOUS = 0x20, MAP_FIXED_NOREPLACE = 0x100000;
+void* const MAP_FAILED = reinterpret_cast<void*>(~uintptr_t{0});
+constexpr size_t kPage = 4096;
+constexpr uintptr_t kBase = 0x10000000;
+int checks = 0, failures = 0;
+void Check(bool value, const char* name) {
+  ++checks;
+  if (!value) { ++failures; std::fprintf(stderr, "FAIL %s\n", name); }
+}
+struct SYSTEM_INFO { DWORD dwPageSize; DWORD dwAllocationGranularity; };
+void GetSystemInfo(SYSTEM_INFO* info) { *info = {kPage, 65536}; }
+int GetCurrentProcess() { return 1; }
+struct NativeCall {
+  std::string operation;
+  uintptr_t address;
+  size_t length;
+  DWORD flags;
+  DWORD protection;
+};
+std::vector<NativeCall> calls;
+bool fail_reserve = false, fail_replace = false;
+bool VirtualFree(void* address, size_t length, DWORD flags) {
+  calls.push_back({"free", reinterpret_cast<uintptr_t>(address), length, flags, 0});
+  return true;
+}
+bool CloseHandle(HANDLE handle) {
+  calls.push_back({"close", reinterpret_cast<uintptr_t>(handle), 0, 0, 0});
+  return true;
+}
+struct PlaceholderBoundary {
+  void* alloc2(int, void* address, size_t length, DWORD flags, DWORD protection, void*, int) const {
+    calls.push_back({"alloc", reinterpret_cast<uintptr_t>(address), length, flags, protection});
+    bool replacement = (flags & MEM_REPLACE_PLACEHOLDER) != 0;
+    if (replacement ? fail_replace : fail_reserve) return nullptr;
+    return address != nullptr ? address : reinterpret_cast<void*>(kBase);
+  }
+  bool unmap2(int, void* address, DWORD flags) const {
+    calls.push_back({"unmap", reinterpret_cast<uintptr_t>(address), 0, flags, 0});
+    return true;
+  }
+};
+const PlaceholderBoundary& Placeholders() { static PlaceholderBoundary boundary; return boundary; }
+
+@TYPES@
+
+// Partial file-view remapping is outside this anonymous fixture. A NOREPLACE
+// collision must fail admission before this boundary can ever be reached.
+std::map<uintptr_t, Region>::iterator PunchView(State& s,
+    std::map<uintptr_t, Region>::iterator, uintptr_t, uintptr_t) {
+  Check(false, "NOREPLACE cannot punch a partial live file view");
+  return s.regions.end();
+}
+
+@PRODUCTION@
+
+std::string Snapshot(const State& state) {
+  std::ostringstream out;
+  for (const auto& [address, region] : state.regions) {
+    out << address << ':' << region.size << ':' << static_cast<int>(region.kind)
+        << ':' << region.group << ':' << region.live_pages << ':' << region.offset << ':';
+    for (bool live : region.live) out << live;
+    out << ':';
+    for (Origin origin : region.origins) out << static_cast<int>(origin) << ',';
+    out << ';';
+  }
+  for (const auto& [address, length] : state.groups) out << 'g' << address << ':' << length << ';';
+  return out.str();
+}
+void ResetBoundary() { calls.clear(); fail_reserve = fail_replace = false; errno = 0; }
+void Prepare(State& state, int protection = PROT_READ | PROT_WRITE) {
+  ResetBoundary();
+  void* value = GroupAnonymous(state, reinterpret_cast<void*>(kBase), 4 * kPage,
+                              protection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE);
+  Check(value == reinterpret_cast<void*>(kBase), "initial exact placeholder group created");
+  calls.clear();
+}
+bool AllPages(const Region& region, bool live, Origin origin) {
+  return region.live.size() == region.origins.size() &&
+      std::all_of(region.live.begin(), region.live.end(), [live](bool value) { return value == live; }) &&
+      std::all_of(region.origins.begin(), region.origins.end(), [origin](Origin value) { return value == origin; });
+}
+void RejectUnchanged(State& state, uintptr_t address, size_t length, int flags, const char* name) {
+  const std::string before = Snapshot(state);
+  calls.clear(); errno = 0;
+  void* value = GroupAnonymous(state, reinterpret_cast<void*>(address), length, PROT_NONE, flags);
+  Check(value == MAP_FAILED && errno == EEXIST, name);
+  Check(Snapshot(state) == before && calls.empty(), "collision rejects entire request before native or registry mutation");
+}
+void ArtFallback() {
+  State state;
+  Prepare(state);
+  // mremap without DONTUNMAP retires a prefix; its group's live tail remains.
+  // munmap uses this exact production Punch operation for grouped allocations.
+  Punch(state, kBase, kBase + 2 * kPage);
+  Check(state.regions.at(kBase).kind == Kind::kHole &&
+        state.regions.at(kBase + 2 * kPage).kind == Kind::kAnon,
+        "partial retirement leaves logical hole and live group tail");
+  const Region tail = state.regions.at(kBase + 2 * kPage);
+  calls.clear(); errno = 0;
+  void* restored = GroupAnonymous(state, reinterpret_cast<void*>(kBase), 2 * kPage, PROT_NONE,
+                                  MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE);
+  Check(restored == reinterpret_cast<void*>(kBase), "ART fallback reserves vacated source exactly");
+  Check(calls.size() == 1 && calls[0].operation == "alloc" && calls[0].address == kBase &&
+        calls[0].length == 2 * kPage && calls[0].flags == (MEM_RESERVE | MEM_REPLACE_PLACEHOLDER) &&
+        calls[0].protection == PAGE_NOACCESS, "vacated source becomes reserved PROT_NONE without a new allocation");
+  const Region& replacement = state.regions.at(kBase);
+  Check(replacement.kind == Kind::kAnon && AllPages(replacement, true, Origin::kPrivateAnonymous),
+        "PROT_NONE replacement is a live anonymous Linux mapping");
+  const Region& retained = state.regions.at(kBase + 2 * kPage);
+  Check(retained.kind == tail.kind && retained.size == tail.size && retained.live == tail.live &&
+        retained.origins == tail.origins, "ART fallback preserves remaining group tail");
+  RejectUnchanged(state, kBase, 2 * kPage, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                  "newly reserved PROT_NONE mapping prevents a second NOREPLACE");
+}
+void Collisions() {
+  for (int protection : {PROT_NONE, PROT_READ | PROT_WRITE}) {
+    for (int fixed : {MAP_FIXED_NOREPLACE, MAP_FIXED | MAP_FIXED_NOREPLACE}) {
+      State state; Prepare(state, protection);
+      RejectUnchanged(state, kBase, 2 * kPage, MAP_PRIVATE | MAP_ANONYMOUS | fixed,
+                      "live mapping rejects NOREPLACE including combined FIXED flags");
+      Punch(state, kBase, kBase + kPage);
+      RejectUnchanged(state, kBase, 2 * kPage, MAP_PRIVATE | MAP_ANONYMOUS | fixed,
+                      "mixed hole/live range rejects atomically");
+      RejectUnchanged(state, kBase + kPage, 3 * kPage, MAP_PRIVATE | MAP_ANONYMOUS | fixed,
+                      "live suffix rejects NOREPLACE");
+    }
+  }
+  State view; Prepare(view);
+  view.regions.at(kBase).kind = Kind::kView;
+  RejectUnchanged(view, kBase + kPage, kPage, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                  "live file-view collision rejects before PunchView");
+}
+void FragmentedHoles() {
+  for (int fixed : {MAP_FIXED_NOREPLACE, MAP_FIXED | MAP_FIXED_NOREPLACE}) {
+    State state; Prepare(state);
+    Punch(state, kBase, kBase + kPage);
+    Punch(state, kBase + kPage, kBase + 2 * kPage);
+    calls.clear();
+    void* value = GroupAnonymous(state, reinterpret_cast<void*>(kBase), 2 * kPage, PROT_READ,
+                                MAP_PRIVATE | MAP_ANONYMOUS | fixed);
+    Check(value == reinterpret_cast<void*>(kBase), "adjacent unmapped fragments accept exact NOREPLACE");
+    Check(state.regions.size() == 2 && state.regions.at(kBase).size == 2 * kPage,
+          "actual Punch coalesces accepted hole fragments");
+    Check(calls.size() == 2 && calls[0].operation == "free" &&
+          calls[0].flags == (MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS) &&
+          calls[1].operation == "alloc", "coalesce precedes replacement only after complete admission");
+  }
+  State inside; Prepare(inside);
+  Punch(inside, kBase, kBase + 3 * kPage);
+  void* value = GroupAnonymous(inside, reinterpret_cast<void*>(kBase + kPage), kPage, PROT_READ,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE);
+  Check(value == reinterpret_cast<void*>(kBase + kPage), "interior portion of a hole maps at the requested address");
+  Check(inside.regions.at(kBase).kind == Kind::kHole &&
+        inside.regions.contains(kBase + 2 * kPage) &&
+        inside.regions.at(kBase + 2 * kPage).kind == Kind::kHole &&
+        inside.regions.at(kBase + 3 * kPage).kind == Kind::kAnon,
+        "interior hole split preserves both unmapped neighbors and live tail");
+}
+void ExistingBehaviorAndFailure() {
+  State replace; Prepare(replace, PROT_NONE);
+  calls.clear();
+  void* value = GroupAnonymous(replace, reinterpret_cast<void*>(kBase), 2 * kPage,
+                              PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED);
+  Check(value == reinterpret_cast<void*>(kBase) && calls.size() == 2 &&
+        calls[0].operation == "free" && calls[1].operation == "alloc",
+        "ordinary MAP_FIXED still replaces existing live pages");
+
+  State external;
+  ResetBoundary(); fail_reserve = true;
+  value = GroupAnonymous(external, reinterpret_cast<void*>(kBase), kPage, PROT_READ,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE);
+  Check(value == MAP_FAILED && errno == EEXIST && external.regions.empty(),
+        "native reservation collision returns EEXIST without publication");
+  Check(calls.size() == 1 && calls[0].address == kBase,
+        "native reservation collision cannot fall back to another address");
+
+  State failure; Prepare(failure);
+  Punch(failure, kBase, kBase + 2 * kPage);
+  const std::string before = Snapshot(failure);
+  calls.clear(); fail_replace = true;
+  value = GroupAnonymous(failure, reinterpret_cast<void*>(kBase), 2 * kPage, PROT_READ,
+                         MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE);
+  Check(value == MAP_FAILED && errno == ENOMEM && Snapshot(failure) == before,
+        "failed replacement retains hole and live group tail without publication");
+  Check(calls.size() == 1 && calls[0].operation == "alloc", "failed replacement cannot release a live group");
+  ResetBoundary();
+}
+}  // namespace
+
+int main() {
+  ArtFallback();
+  Collisions();
+  FragmentedHoles();
+  ExistingBehaviorAndFailure();
+  std::printf("mmap NOREPLACE placeholder contracts: %d checks, %d failures\n", checks, failures);
+  return failures == 0 ? 0 : 1;
+}

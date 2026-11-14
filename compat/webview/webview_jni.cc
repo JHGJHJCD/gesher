@@ -423,6 +423,11 @@ jboolean JNICALL WebView2Host_clearBrowsingData(JNIEnv*, jclass, jint kinds, jlo
   return Host::ClearBrowsingData(kinds, cb) ? JNI_TRUE : JNI_FALSE;
 }
 
+jboolean JNICALL WebView2Host_clearOriginData(JNIEnv* env, jclass, jstring origin, jlong cb) {
+  if (origin == nullptr) return JNI_FALSE;
+  return Host::ClearOriginData(Str(env, origin), cb) ? JNI_TRUE : JNI_FALSE;
+}
+
 const JNINativeMethod kMethods[] = {
     {"nRuntimeVersion", "()Ljava/lang/String;", reinterpret_cast<void*>(&WebView2Host_runtimeVersion)},
     {"nLoaderKind", "()Ljava/lang/String;", reinterpret_cast<void*>(&WebView2Host_loaderKind)},
@@ -482,6 +487,7 @@ const JNINativeMethod kMethods[] = {
     {"nGetCookies", "(Ljava/lang/String;J)Z", reinterpret_cast<void*>(&WebView2Host_getCookies)},
     {"nDeleteCookies", "(IJ)Z", reinterpret_cast<void*>(&WebView2Host_deleteCookies)},
     {"nClearBrowsingData", "(IJ)Z", reinterpret_cast<void*>(&WebView2Host_clearBrowsingData)},
+    {"nClearOriginData", "(Ljava/lang/String;J)Z", reinterpret_cast<void*>(&WebView2Host_clearOriginData)},
 };
 
 }  // namespace

@@ -1,102 +1,75 @@
 #!/usr/bin/env python3
-"""Run the production MediaDataSource adapter on a real checked host JVM/JNI.
+"""Production callback adapter and receiver JNI on a real host JVM.
 
-Only VM attachment/logging and the abstract Android callback type are declared
-host boundaries. The entire production adapter is compiled unchanged; Windows
-MediaDataSourceContractTest supplies actual ART, media readers and public APIs.
---source-ref safely exercises the former production adapter without invoking
-its known invalid-JNI cleanup path. An extra bounded destination suffix keeps
-invalid callback-count controls from writing outside an allocated object.
+The parser is a declared deterministic boundary, not an AOSP/Windows decoder.
+MediaCallbackContractTest separately exercises real containers on ART/Windows.
+--negative-control disables one production safeguard in a disposable copy;
+it must make the unchanged assertions fail. No mutation is written to the repo.
 """
 from __future__ import annotations
 import argparse
 import hashlib
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
 import tempfile
-
 ROOT = Path(__file__).resolve().parents[1]
-GROUPS = ('valid', 'negative', 'exception', 'overcount', 'known-size', 'unknown-size',
-          'size-error', 'serialized', 'close-error', 'pending')
 
-
-def section(text: str, start: str, end: str) -> str:
+def section(text, start, end):
     if text.count(start) != 1 or text.count(end) != 1:
-        raise ValueError('production adapter boundary changed')
-    return text[text.index(start):text.index(end, text.index(start))]
+        raise ValueError("production section boundary changed: " + start)
+    begin = text.index(start)
+    return text[begin:text.index(end, begin)]
 
-
-def main() -> int:
-    p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--source-ref')
-    p.add_argument('--group', action='append', choices=GROUPS)
-    p.add_argument('--java-home', type=Path, default=os.environ.get('JAVA_HOME'))
-    p.add_argument('--cxx', default=os.environ.get('CXX', 'c++'))
-    args = p.parse_args()
-    java_home = args.java_home
-    if java_home is None:
-        javac = shutil.which('javac')
-        if javac is None: p.error('a full JDK is required')
-        java_home = Path(javac).resolve().parent.parent
-    groups = args.group or list(GROUPS)
-    if args.source_ref:
-        groups = [g for g in groups if g != 'pending']
-        if not groups: p.error('old-source controls do not invoke invalid-JNI cleanup')
-    def read(path):
-        return subprocess.check_output(['git', 'show', args.source_ref + ':' + path],
-            cwd=ROOT, text=True) if args.source_ref else (ROOT / path).read_text()
-    fixture = (ROOT / 'tests/media/callback/adapter_host.cc.in').read_text()
-    adapter_source = ROOT / 'compat/media/jni/java_data_source.cc'
-    other_sources = []
-    if args.source_ref:
-        player = read('compat/media/jni/media_player_jni.cc')
-        if 'class JavaDataSource :' not in player:
-            p.error('this negative control expects the original private JavaDataSource')
-        old = section(player, 'class JavaDataSource :', '// --- Natives ')
-        common = read('compat/media/jni/media_jni.h')
-        refs = section(common, 'class GlobalRef {', '// A weak global reference')
-        adapter = refs + old + '''
-std::unique_ptr<DataSource> OpenJavaDataSource(JNIEnv* env, jobject source) {
-  return std::make_unique<JavaDataSource>(env, source);
-}
-'''
-        fixture = fixture.replace('@ADAPTER@', adapter)
-        print('old adapter SHA256', hashlib.sha256(old.encode()).hexdigest(), flush=True)
-    else:
-        fixture = fixture.replace('@ADAPTER@', '')
-        other_sources = [str(adapter_source)]
-        print('adapter SHA256', hashlib.sha256(adapter_source.read_bytes()).hexdigest(), flush=True)
-    failed = []
-    with tempfile.TemporaryDirectory(prefix='gesher-media-callback-') as tmp:
-        work = Path(tmp)
-        cpp = work / 'host.cc'; cpp.write_text(fixture)
-        lib = work / 'libmedia_callback.so'
-        command = shlex.split(args.cxx) + ['-std=c++20', '-O1', '-g', '-Wall', '-Wextra',
-            '-Werror', '-shared', '-fPIC', '-pthread', '-fsanitize=undefined',
-            '-fno-sanitize-recover=undefined', '-I', str(ROOT),
-            '-I', str(java_home / 'include'), '-I', str(java_home / 'include/linux'),
-            str(cpp), *other_sources, '-o', str(lib)]
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--java-home", type=Path, default=os.environ.get("JAVA_HOME"))
+    parser.add_argument("--cxx", default=os.environ.get("CXX", "c++"))
+    parser.add_argument("--negative-control", choices=("stale-art", "unavailable-callback", "reentrant-admission"))
+    args = parser.parse_args()
+    java = args.java_home or Path(shutil.which("javac") or "missing-javac").resolve().parent.parent
+    retriever = (ROOT / "compat/media/jni/media_jni_others.cc").read_text()
+    extractor = (ROOT / "compat/media/jni/media_extractor_jni.cc").read_text()
+    sections = {
+        "RETRIEVER": "\n".join((section(retriever, "jfieldID gRetrieverContext;", "void JNICALL MMR_setDataSourcePath("),
+                                  section(retriever, "void JNICALL MMR_setDataSourceCallback(", "// FrameDecoder keeps"),
+                                  section(retriever, "void JNICALL MMR_setup(", "const JNINativeMethod kRetrieverMethods[]"))),
+        "EXTRACTOR": "\n".join((section(extractor, "jfieldID gContext;", "jobject Boxed("),
+                                  section(extractor, "ReceiverLease<JniExtractor> GetForDataSource(", "void JNICALL ME_setDataSourcePath("),
+                                  section(extractor, "void JNICALL ME_setDataSourceCallback(", "jobject JNICALL ME_getTrackFormat("),
+                                  section(extractor, "void JNICALL ME_selectTrack(", "jboolean JNICALL ME_advance("),
+                                  section(extractor, "jlong JNICALL ME_getSampleTime(", "jlong JNICALL ME_getSampleSize("),
+                                  section(extractor, "void JNICALL ME_setup(", "jobject JNICALL ME_getAudioPresentations("))),
+    }
+    if args.negative_control == "stale-art":
+        sections["RETRIEVER"] = sections["RETRIEVER"].replace("RetrieverSnapshot next;", "RetrieverSnapshot next = r->snapshot;")
+    elif args.negative_control == "unavailable-callback":
+        sections["EXTRACTOR"] = sections["EXTRACTOR"].replace('Open(env, thiz, std::move(source), "MediaDataSource");', '(void)thiz;')
+    template = (ROOT / "tests/media/media_callback_host.cc.in").read_text()
+    for name, code in sections.items():
+        print(name + " production section SHA256 " + hashlib.sha256(code.encode()).hexdigest(), flush=True)
+        template = template.replace("@" + name + "@", code)
+    failed = False
+    with tempfile.TemporaryDirectory(prefix="gesher-media-callback-") as tmp:
+        folder = Path(tmp); cpp = folder / "callback.cc"; cpp.write_text(template)
+        library = folder / "libmedia_callback.so"
+        if args.negative_control == "reentrant-admission":
+            header = folder / "compat/media/jni/receiver_lease.h"
+            header.parent.mkdir(parents=True)
+            text = (ROOT / "compat/media/jni/receiver_lease.h").read_text()
+            header.write_text(text.replace("if (receiver_->operation_active)", "if (false)"))
+        command = shlex.split(args.cxx) + ["-std=c++20", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-pthread",
+                    "-shared", "-fPIC", "-fsanitize=undefined", "-fno-sanitize-recover=undefined",
+                    "-I", str(folder), "-I", str(ROOT), "-I", str(java / "include"), "-I", str(java / "include/linux"), str(cpp), str(ROOT / "compat/media/jni/java_data_source.cc"), "-o", str(library)]
         subprocess.run(command, check=True, timeout=120)
-        subprocess.run([str(java_home / 'bin/javac'), '-d', str(work),
-            str(ROOT / 'tests/media/callback/MediaDataSource.java'),
-            str(ROOT / 'tests/media/callback/MediaCallbackHost.java')], check=True, timeout=60)
-        for group in groups:
-            r = subprocess.run([str(java_home / 'bin/java'), '-Xcheck:jni',
-                '-XX:-CreateCoredumpOnCrash', '-XX:-UsePerfData', '-cp', str(work),
-                'MediaCallbackHost', str(lib), group], text=True, capture_output=True, timeout=30)
-            print(r.stdout, end='', flush=True)
-            bad_jni = re.search(r'WARNING in native method|FATAL ERROR in native method|runtime error:',
-                                r.stdout + r.stderr)
-            if r.returncode or bad_jni:
-                failed.append(group)
-                print('FAIL', group, 'exit', r.returncode, r.stderr[:4000], flush=True)
-        print('MediaDataSource groups:', len(groups) - len(failed), '/', len(groups), flush=True)
-    return int(bool(failed))
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())
+        subprocess.run([str(java / "bin/javac"), "-d", str(folder), str(ROOT / "tests/media/MediaCallbackHostTest.java")], check=True, timeout=60)
+        cases = ("retriever",) if args.negative_control == "stale-art" else (("extractor",) if args.negative_control == "unavailable-callback" else (("reentrant",) if args.negative_control else ("adapter", "retriever", "extractor", "release", "reentrant")))
+        for case in cases:
+            run = subprocess.run([str(java / "bin/java"), "-Xcheck:jni", "-XX:-CreateCoredumpOnCrash", "-cp", str(folder),
+                                  "MediaCallbackHostTest", str(library), case], capture_output=True, text=True, timeout=30)
+            print(run.stdout, end=""); print(run.stderr, end="")
+            failed |= run.returncode != 0 or "WARNING in native method" in run.stdout
+    return int(failed)
+if __name__ == "__main__": raise SystemExit(main())

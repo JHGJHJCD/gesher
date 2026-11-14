@@ -143,6 +143,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         volatile boolean exiting;
         /** Removed by physical-death cleanup; checked by provider admission after authentication. */
         volatile boolean dead;
+        /** A later attachment claimed this PID; it can never belong to this record again. Guarded by ATM. */
+        boolean pidSuperseded;
+        /** PID replacement is not an intentional stop of a previously running process. */
+        volatile boolean recoverAfterPidSupersession;
         /** Ended by the idle reaper: its services bound by others start again (ActiveServices). */
         volatile boolean reaped;
         boolean spawned;     // started by this server (startProcess), not by itself
@@ -766,23 +770,26 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     public List<ActivityManager.RunningTaskInfo> getTasks(int maxNum,
             boolean filterOnlyVisibleRecents, boolean keepIntentExtra, int displayId) {
         List<ActivityManager.RunningTaskInfo> tasks = new ArrayList<>();
+        if (maxNum <= 0 || (displayId != Display.INVALID_DISPLAY
+                && displayId != Display.DEFAULT_DISPLAY)) return tasks;
+        Map<Integer, ActivityManager.RunningTaskInfo> selected = new HashMap<>();
         synchronized (this) {
-            // Most recent first, as RunningTasks orders them.
-            for (int i = mActivities.size() - 1; i >= 0 && tasks.size() < maxNum; i--) {
+            // Select tasks by recency, but keep visiting the older activities of
+            // selected tasks after the result cap is reached. Otherwise asking for
+            // one task incorrectly makes its top activity its base and sole activity.
+            for (int i = mActivities.size() - 1; i >= 0; i--) {
                 ActivityRecord r = mActivities.get(i);
                 if (r.state == State.DESTROYED) continue;
-                boolean seen = false;
-                for (ActivityManager.RunningTaskInfo t : tasks) {
-                    if (t.taskId == r.taskId) {
-                        t.numActivities++;
-                        t.baseActivity = r.component();
-                        t.baseIntent = keepIntentExtra ? new Intent(r.intent)
-                                : new Intent(r.intent).replaceExtras((Bundle) null);
-                        seen = true;
-                    }
+                ActivityManager.RunningTaskInfo t = selected.get(r.taskId);
+                if (t != null) {
+                    t.numActivities++;
+                    t.baseActivity = r.component();
+                    t.baseIntent = keepIntentExtra ? new Intent(r.intent)
+                            : new Intent(r.intent).replaceExtras((Bundle) null);
+                    continue;
                 }
-                if (seen) continue;
-                ActivityManager.RunningTaskInfo t = new ActivityManager.RunningTaskInfo();
+                if (tasks.size() >= maxNum) continue;
+                t = new ActivityManager.RunningTaskInfo();
                 t.taskId = r.taskId;
                 t.id = r.taskId;
                 t.baseActivity = r.component();
@@ -796,6 +803,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 t.configuration.setTo(LocaleManagerService.configurationFor(r.info.packageName));
                 t.token = r.taskToken;  // the task's window container (none of its own)
                 tasks.add(t);
+                selected.put(r.taskId, t);
             }
         }
         return tasks;
@@ -1418,14 +1426,20 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         return null;
     }
 
-    /** Only a package assigned to a live, attached Binder PID can act as that app. */
+    /**
+     * The package of the attached process that owns {@code pid}, until that process dies.
+     * A process told to exit (idle exit, a closed last window, force-stop) still runs
+     * app code until it is gone: Application.onTerminate, queued main-looper work,
+     * listeners. On Android its calls keep their Binder UID identity until the kernel
+     * reaps it, so system services answer them instead of failing with a
+     * SecurityException that the app would turn into a crash. Lifecycle admission
+     * (new work for an exiting process) is decided elsewhere, through
+     * {@link #callerProcess}. Only the latest accepted attachment owns the PID: its
+     * exit, death or removal must never restore an older record's package identity.
+     */
     synchronized String authenticatedPackageForPid(int pid) {
-        for (ProcessRecord app : mProcesses) {
-            if (app.pid == pid && !app.exiting && app.packageName != null) {
-                return app.packageName;
-            }
-        }
-        return null;
+        ProcessRecord app = attachedProcessByPid(pid);
+        return app != null && !app.dead ? app.packageName : null;
     }
 
     /** One-time enrollment in a mode that already permits real self-attachment. */
@@ -1463,7 +1477,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     private ProcessRecord unassignedProcess(int preferredPid) {
         ProcessRecord first = null;
         for (ProcessRecord p : mProcesses) {
-            if (p.packageName != null) continue;
+            if (p.packageName != null || p.pidSuperseded || p.exiting || p.dead) continue;
             if (p.pid == preferredPid) return p;
             if (first == null) first = p;
         }
@@ -1857,6 +1871,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     private void endProcesses(List<ProcessRecord> processes, long waitMs) {
         for (ProcessRecord p : processes) {
             synchronized (this) {
+                p.recoverAfterPidSupersession = false;
                 p.exiting = true;
             }
             if (p.spawned) {
@@ -1895,6 +1910,21 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
     // --- processes (from ActivityManagerService) ---------------------------------------
 
+    /** Records an attachment after all start-sequence and UID checks. Guarded by this. */
+    private void registerAttachedProcess(ProcessRecord app) {
+        for (ProcessRecord previous : mProcesses) {
+            if (previous.pid != app.pid) continue;
+            if (!previous.pidSuperseded) {
+                previous.recoverAfterPidSupersession = !previous.exiting;
+            }
+            previous.pidSuperseded = true;
+            previous.exiting = true;
+        }
+        // Keep superseded records until their own death callbacks retire their work.
+        // The permanent flag prevents their identity from reviving after app is removed.
+        mProcesses.add(app);
+    }
+
     /**
      * IActivityManager.attachApplication: a process this server started for a package
      * ({@code startSeq}), or one that offers itself.
@@ -1926,7 +1956,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             } else if (GmsSignatureSpoofing.isEnabled() && mStarter != null) {
                 throw new SecurityException("Protected app processes must be started by the server");
             }
-            mProcesses.add(app);
+            registerAttachedProcess(app);
             updateIdle();
             String waiting = null;
             String waitingProcess = null;
@@ -2120,11 +2150,18 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
     }
 
-    private ProcessRecord processByPid(int pid) {
-        for (ProcessRecord p : mProcesses) {
-            if (p.pid == pid && !p.exiting) return p;
+    /** Current PID ownership, independent of lifecycle admission. Guarded by this. */
+    private ProcessRecord attachedProcessByPid(int pid) {
+        for (int i = mProcesses.size() - 1; i >= 0; i--) {
+            ProcessRecord app = mProcesses.get(i);
+            if (app.pid == pid && !app.pidSuperseded) return app;
         }
         return null;
+    }
+
+    private ProcessRecord processByPid(int pid) {
+        ProcessRecord app = attachedProcessByPid(pid);
+        return app != null && !app.dead && !app.exiting ? app : null;
     }
 
     // --- the client transactions -------------------------------------------------------

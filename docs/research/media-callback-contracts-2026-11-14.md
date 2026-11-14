@@ -25,18 +25,22 @@ An initialized source owns its callback until the last native owner retires.
 Cleanup invokes `close` once. An ordinary close preserves a callback exception
 for its JNI caller; this includes the IOException contract documented by
 `MediaMetadataRetriever.release`. A preexisting exception is saved and restored
-across cleanup instead. Rejected or failed setup disposes of its source before
-translating the setup error, consuming any cleanup exception at that boundary.
-The distinction prevents a cleanup failure from replacing an earlier failure,
-without silently swallowing ordinary release errors.
+across cleanup instead. Rejected or failed setup retains its setup error across
+source cleanup: an earlier close failure is consumed before error translation,
+or the already-published setup exception is restored after close. This prevents
+a cleanup failure from replacing an earlier failure, without silently swallowing
+ordinary release errors.
 
-Extractor and retriever native contexts now use retained holders acquired under
-a short context lock. Release publishes the empty Java context before destroying
-the holder, and admitted JNI methods keep their receiver alive. Java callbacks
+Extractor and retriever native contexts now use retained references acquired under
+a short context lock. Release publishes the empty Java context before dropping
+its reference, and admitted JNI methods keep their receiver alive. Java callbacks
 can therefore release a receiver during an admitted read, or reenter release
 from close, without invalidating that operation's native context. The context
-lock is never held while closing a source. This guards receiver lifetime; it
-does not serialize every concurrent extractor/retriever operation.
+lock is never held while closing a source. Integration with the independent
+[Android/Windows audit](../audits/native-media-2026-11-14.md) also retains its
+`ReceiverLease`: operations on one receiver serialize, and callback reentry into
+an active receiver operation is rejected before it can change selected readers
+or a metadata snapshot. Release remains allowed during an admitted callback.
 
 `Player::Reset` detaches both the playback object and source under its state
 lock, publishes idle state, and then shuts down and destroys those owners
@@ -60,10 +64,10 @@ integer conversion. The existing positive size/duration conditions remain.
 
 ## Evidence and validation boundaries
 
-`tools/test_media_callback_contracts.py` compiles the complete production
+`tools/test_media_callback_adapter.py` compiles the complete production
 `java_data_source.cc` into a JNI library and calls it from a real host JVM with
-`-Xcheck:jni` and UBSan. Only VM attachment/logging and the abstract Android
-callback type are host seams. The candidate passes **42 assertions in 10
+`-Xcheck:jni` and UBSan. VM attachment/logging, JNI exception reporting and the
+abstract Android callback type are host seams. The candidate passes **42 assertions in 10
 groups**, with no checked-JNI or UBSan diagnostic. Cases cover short reads across
 the buffer boundary, zero length, EOF, sticky read/size errors, bounded count
 validation, cached known/unknown size, concurrent callback serialization,
@@ -77,9 +81,10 @@ byte remains inside an allocated object. The control runner excludes `pending`
 against the old implementation, which would make an invalid JNI call during
 cleanup.
 
-`tools/test_media_callback_state.py` compiles the exact production `Fill` and
-`Player::Reset` bodies, with declared container and playback-worker seams. Its
-Format seam retains the real missing-key behavior. The candidate passes **35
+`tools/test_media_callback_state.py` compiles the exact production `Fill`,
+`SetFromSource` and `Player::Reset` bodies, with declared container,
+receiver-acquisition, JNI-exception and playback-worker seams. Its Format seam
+retains the real missing-key behavior. The candidate passes **35
 assertions with ASan/UBSan**. The baseline fails six of the original 27 assertions: stale art,
 replacement publication and retirement, failed-candidate state, and player
 reset's lock/state publication. A separate observer thread uses a bounded
@@ -88,6 +93,15 @@ Eight candidate-only bitrate checks cover fractional truncation, a two-terabyte
 source with a representable average, the exact `2^63` conversion boundary and
 an unrepresentable average. Old-source mode excludes this group rather than
 executing its original signed-overflow expression.
+
+`tools/test_media_callback_contracts.py` retains the independent receiver suite
+from the Android/Windows audit. It compiles the same adapter translation unit
+alongside the actual receiver lease and extracted JNI entrypoints, passing
+**66 checked-JNI/UBSan assertions**. The adapter suite above has a separate name
+so both original suites remain mandatory in CI. Their assertions, concurrency
+barriers and deadlines are preserved. Disabling receiver reentry admission in
+the disposable negative control still fails the intended assertion; the old
+publication/reset source still fails six of the original 27 state assertions.
 
 The SDK36-only `MediaDataSourceContractTest` compiles successfully. Its Windows
 track exercises the public APIs on ART with actual AOSP readers: generated WAV
@@ -121,7 +135,7 @@ the executor's ptrace environment; CI keeps its sanitizer defaults.
 ## Reproduce
 
 ```sh
-python3 tools/test_media_callback_contracts.py --java-home /path/to/jdk21
+python3 tools/test_media_callback_adapter.py --java-home /path/to/jdk21
 python3 tools/test_media_callback_state.py --sanitize
 ```
 

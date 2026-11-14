@@ -21,6 +21,10 @@ def main():
     with tempfile.TemporaryDirectory(prefix='gesher-traversal-') as d:
         d = Path(d)
         (d / 'ftw.h').write_text((ROOT / 'compat/posix/include/ftw.h').read_text())
+        # Copy only the portable dependency; keep the real host filesystem headers.
+        (d / 'gesher').mkdir()
+        (d / 'gesher/reserved_names.h').write_text(
+            (ROOT / 'compat/posix/include/gesher/reserved_names.h').read_text())
         (d / 'test.cc').write_text('''#define _GNU_SOURCE 1
 // MinGW retains a 16-bit ino_t even though Gesher's stat has a 64-bit inode.
 // Load the real headers first, then model that typedef width in the exact walker.

@@ -4,6 +4,22 @@ Baseline: `e0dbabf8932df2c101d8ed3d28a8c560df771dc0` (`main`).
 Reference: Android 16 release 4 (`android-16.0.0_r4`) and official SDK36.
 GitHub publication account: `palmoni5`.
 
+## Integration provenance — November 15
+
+The repository map, inventories, input counts and source hashes below remain the
+original audit snapshot at PR27 commit
+`6e4d47b4be36e01364098e32b47364e46c05a72a`; they are not a fresh inventory of the
+combined branch. Integration includes corrected PR30 source through published
+commit `2e506fd43ad78a612dbaa70637574bdd8470b238`, including the preceding PR24–26
+changes. Both audits and their mandatory tests are retained. The focused
+[media report](media-callback-contracts-2026-11-14.md) documents the shared adapter,
+receiver protection and the two independent checked-JNI suites after integration.
+
+The combined application and complete service-test DEX were rebuilt against
+the complete pinned Android core/framework inputs; this build generated all 300
+compatibility-change entries. These integration builds do not replace the
+historical inventory's documented inputs or establish Windows runtime results.
+
 This pass maps the repository, refreshes actual boot-class/member and source
 service/JNI inventories, and repairs five contract families with separate
 implementation and QA reviews. Every baseline tracked path is mapped. The

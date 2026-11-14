@@ -46,7 +46,9 @@ def main() -> int:
     yuv = read("compat/hwui/surfaces/yuv_image.cc")
     audio_start = ("int64_t StreamDeadline(" if "int64_t StreamDeadline(" in audio
                    else "aaudio_result_t SYSV WaitForStateChange(")
-    extractor_start = ("JniExtractor* GetForDataSource(" if "JniExtractor* GetForDataSource(" in extractor
+    extractor_start = ("ReceiverLease<JniExtractor> GetForDataSource(" if
+                       "ReceiverLease<JniExtractor> GetForDataSource(" in extractor else
+                       "JniExtractor* GetForDataSource(" if "JniExtractor* GetForDataSource(" in extractor
                        else "void Open(JNIEnv*")
     yuv_start = ("bool PlaneFits(" if "bool PlaneFits(" in yuv
                  else "jboolean JNICALL YuvImage_compressToJpeg(")

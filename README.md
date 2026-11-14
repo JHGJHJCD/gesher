@@ -38,6 +38,11 @@ maps every tracked path, refreshes the SDK and service/JNI review queues, and
 repairs pthread clocks, location completion, NSD values, media callbacks and
 Windows mouse-capture cancellation with independent QA and mandatory CI gates.
 
+The [Android/Windows contract audit](docs/research/android-windows-compatibility-2026-11-14.md)
+maps every repository file, records SDK36 gap candidates, and repairs ELF lookup,
+memory advice, media ownership, audio negotiation, task snapshots and services.
+It includes independent regression controls, Windows gates and remaining gaps.
+
 The [lifecycle contract audit](docs/research/android-lifecycle-contracts-2026-11-13.md)
 maps the runtime, records a fresh SDK inventory, and repairs network callbacks,
 message-port ownership, timers and media lifetimes with independent QA.

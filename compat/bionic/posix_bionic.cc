@@ -12,6 +12,8 @@
 
 #include "shim_internal.h"
 
+#include <gesher/reserved_names.h>
+
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -55,7 +57,7 @@ constexpr int kODirectory = 0200000;
 // --- paths relative to a directory fd -----------------------------------------
 
 bool IsAbsolute(const char* p) {
-  return p[0] == '/' || p[0] == '\\' || (p[0] != 0 && p[1] == ':');
+  return p[0] == '/' || p[0] == '\\' || gesher::reserved_names::DriveRoot(p);
 }
 
 // The directory an fd refers to, as a path gesher-base's calls accept.
@@ -332,6 +334,7 @@ int BIONIC_SYSV Fstatat(int dirfd, const char* path, struct stat* st, int flags)
 int PosixDelete(const char* path, bool directory) {
   if (path == nullptr) return errno = kEFAULT, -1;
   std::wstring w = Wide(path);
+  gesher::reserved_names::Encode(&w);  // as gesher-base stores the name
   HANDLE h = CreateFileW(w.c_str(), DELETE | FILE_READ_ATTRIBUTES,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                          OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,

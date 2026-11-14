@@ -70,6 +70,17 @@ public final class AudioService extends IAudioService.Default {
     private int mRingerMode = AudioManager.RINGER_MODE_NORMAL;
     private int mMode = AudioManager.MODE_NORMAL;
     private int mNextPiid = 1;
+    private final java.util.concurrent.CopyOnWriteArrayList<Runnable> mMediaVolumeListeners =
+            new java.util.concurrent.CopyOnWriteArrayList<>();
+
+    /** Internal route snapshots observe the same stream state as AudioManager. */
+    void addMediaVolumeListener(Runnable listener) { mMediaVolumeListeners.add(listener); }
+
+    private void mediaVolumeChanged(int stream) {
+        if (ALIAS[stream] == AudioSystem.STREAM_MUSIC) {
+            for (Runnable listener : mMediaVolumeListeners) listener.run();
+        }
+    }
 
     /**
      * The default sounds, as settings (RINGTONE, NOTIFICATION_SOUND, ALARM_ALERT): Gesher's
@@ -196,6 +207,7 @@ public final class AudioService extends IAudioService.Default {
             Log.i(TAG, "stream " + streamType + " volume " + index + "/" + max + " (by "
                     + callingPackage + ")");
         }
+        mediaVolumeChanged(streamType);
     }
 
     @Override
@@ -240,6 +252,7 @@ public final class AudioService extends IAudioService.Default {
             }
             apply(alias, index);
         }
+        mediaVolumeChanged(streamType);
     }
 
     @Override

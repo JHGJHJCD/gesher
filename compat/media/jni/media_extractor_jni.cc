@@ -17,7 +17,6 @@
 #include <cstring>
 #include <map>
 #include <memory>
-#include <mutex>
 #include <string>
 #include <vector>
 
@@ -27,15 +26,17 @@
 #include "../video/video_decoder.h"
 #include "jni_util.h"
 #include "java_data_source.h"
+#include "receiver_lease.h"
 #include "media_jni.h"
 
 namespace gesher::media {
 namespace {
 
 jfieldID gContext;  // long mNativeContext
-std::mutex gContextLock;
+std::mutex gExtractorContextLock;
 
-struct JniExtractor {
+struct JniExtractor : ReceiverState {
+  bool opening = false;
   std::shared_ptr<DataSource> source;
   std::unique_ptr<Extractor> extractor;
   struct Selected {
@@ -68,20 +69,13 @@ struct JniExtractor {
   }
 };
 
-using ExtractorHolder = std::shared_ptr<JniExtractor>;
-
-std::shared_ptr<JniExtractor> Get(JNIEnv* env, jobject thiz) {
-  std::shared_ptr<JniExtractor> e;
-  {
-    std::lock_guard<std::mutex> lock(gContextLock);
-    auto* holder = reinterpret_cast<ExtractorHolder*>(env->GetLongField(thiz, gContext));
-    if (holder != nullptr) e = *holder;
-  }
+ReceiverLease<JniExtractor> Get(JNIEnv* env, jobject thiz) {
+  auto e = ReceiverLease<JniExtractor>::Acquire(env, thiz, gContext, gExtractorContextLock);
   if (e == nullptr) jniThrow(env, "java/lang/IllegalStateException", nullptr);
   return e;
 }
 
-std::shared_ptr<JniExtractor> GetOpened(JNIEnv* env, jobject thiz) {
+ReceiverLease<JniExtractor> GetOpened(JNIEnv* env, jobject thiz) {
   auto e = Get(env, thiz);
   if (e != nullptr && e->extractor == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException", "no data source");
@@ -186,9 +180,9 @@ Format TrackFormatForJava(Extractor* ex, size_t index) {
   return f;
 }
 
-std::shared_ptr<JniExtractor> GetForDataSource(JNIEnv* env, jobject thiz) {
+ReceiverLease<JniExtractor> GetForDataSource(JNIEnv* env, jobject thiz) {
   auto e = Get(env, thiz);
-  if (e != nullptr && e->extractor != nullptr) {
+  if (e != nullptr && (e->extractor != nullptr || e->opening)) {
     // NuMediaExtractor accepts one successful setDataSource per instance.
     // Selected readers belong to that extractor and retain its source adapter.
     jniThrow(env, "java/io/IOException", "Data source is already set.");
@@ -198,22 +192,18 @@ std::shared_ptr<JniExtractor> GetForDataSource(JNIEnv* env, jobject thiz) {
 }
 
 void Open(JNIEnv* env, jobject thiz, std::unique_ptr<DataSource> source, const std::string& error) {
-  auto e = Get(env, thiz);
+  auto e = GetForDataSource(env, thiz);
   if (e == nullptr) return;
-  if (e->extractor != nullptr) {
-    source.reset();  // Java close must run before the new exception is pending.
-    CheckException(env, "MediaExtractor rejected source close");
-    jniThrow(env, "java/io/IOException", "Data source is already set.");
-    return;
-  }
   std::string err = error;
   std::shared_ptr<DataSource> owner = std::move(source);
   std::unique_ptr<Extractor> extractor;
+  e->opening = true;
   if (owner != nullptr) extractor = Extractor::Open(owner, &err);
+  e->opening = false;
   if (extractor == nullptr) {
-    MEDIA_LOGE("MediaExtractor: %s", err.c_str());
-    owner.reset();
+    owner.reset();  // MediaDataSource.close runs before the public exception.
     CheckException(env, "MediaExtractor failed source close");
+    MEDIA_LOGE("MediaExtractor: %s", err.c_str());
     jniThrow(env, "java/io/IOException", "Failed to instantiate extractor.");
     return;
   }
@@ -252,14 +242,11 @@ void JNICALL ME_setDataSourceFD(JNIEnv* env, jobject thiz, jobject fileDescripto
   Open(env, thiz, OpenFdSource(fd, offset, length >= 0x7fffffffffffffLL ? -1 : length, &error), error);
 }
 
-void JNICALL ME_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject callback) {
-  // Retain the receiver before invoking any callback. A callback may release
-  // its Java extractor; that retirement must not invalidate this operation.
-  auto receiver = Get(env, thiz);
-  if (receiver == nullptr) return;
-  auto source = OpenJavaDataSource(env, callback);
+void JNICALL ME_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject data_source) {
+  if (Get(env, thiz) == nullptr) return;
+  auto source = OpenJavaDataSource(env, data_source);
   if (source == nullptr) return;
-  Open(env, thiz, std::move(source), std::string());
+  Open(env, thiz, std::move(source), "MediaDataSource");
 }
 
 jint JNICALL ME_getTrackCount(JNIEnv* env, jobject thiz) {
@@ -393,19 +380,10 @@ void JNICALL ME_init(JNIEnv* env, jclass) {
   gContext = env->GetFieldID(env->FindClass("android/media/MediaExtractor"), "mNativeContext", "J");
 }
 void JNICALL ME_setup(JNIEnv* env, jobject thiz) {
-  auto* holder = new ExtractorHolder(std::make_shared<JniExtractor>());
-  std::lock_guard<std::mutex> lock(gContextLock);
-  env->SetLongField(thiz, gContext, reinterpret_cast<jlong>(holder));
+  ReceiverLease<JniExtractor>::Setup(env, thiz, gContext, gExtractorContextLock);
 }
 void JNICALL ME_release(JNIEnv* env, jobject thiz) {
-  ExtractorHolder* holder;
-  {
-    std::lock_guard<std::mutex> lock(gContextLock);
-    holder = reinterpret_cast<ExtractorHolder*>(env->GetLongField(thiz, gContext));
-    env->SetLongField(thiz, gContext, 0);
-  }
-  // The last source owner can call back into release; publish retirement first.
-  delete holder;
+  ReceiverLease<JniExtractor>::Release(env, thiz, gContext, gExtractorContextLock);
 }
 
 jobject JNICALL ME_getAudioPresentations(JNIEnv* env, jobject, jint) {
