@@ -49,6 +49,43 @@ and hwui). `compat/framework/android_runtime.cc` holds the host
 `AndroidRuntime` statics and a fixed table, registered as the builtin
 `libandroid_runtime.so` the way `compat/libcore/builtins.cc` does.
 
+## Debug memory accounting on Windows
+
+The `android.os.Debug` memory natives use the Android 16 JNI signatures and kB
+units. `getMemoryInfo` and `getPss` sample resident working-set pages;
+`getRss` reads the process working-set size. USS counts exclusive resident
+pages, and PSS apportions shared pages using the Windows share count. Windows
+caps that count at seven, so widely shared pages can make PSS an overestimate.
+Pages outside the ordinary working set, including large-page allocations, are
+not represented by this snapshot.
+
+Windows working-set protection describes permissions, not the Linux dirty bit
+or file backing. The private/shared dirty and clean split is a permission-based
+estimate. The calling process's dalvik and native categories use live Java heap
+and process-heap allocation estimates, capped by the sampled private dirty
+budget; these are not measurements of each heap's resident pages. The remainder
+is `other`, and a different process is reported entirely as `other`.
+Per-mapping `otherStats`, swappable PSS, swap PSS and graphics memtrack values
+are unavailable and remain zero; `hasSwappedOutPss` is false. A read-only page
+alone is not evidence that its contents can be discarded and read from a file.
+
+`getMemInfo` reports measured physical total and immediately available memory
+in `MEMINFO_TOTAL` and `MEMINFO_AVAILABLE`. Other Linux-specific slots are
+unsupported and zero. In particular, subtracting Windows `SystemCache` from
+`PhysicalAvailable` does not produce Linux free memory: the former includes
+the system working set as well as standby pages. Paged kernel pools do not
+identify reclaimable slab, and system commit headroom does not measure pagefile
+use. See Microsoft's [counter definitions](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-performance_information)
+and [working-set page layout](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-psapi_working_set_block).
+
+Working-set snapshots have a 64 MiB temporary-buffer limit and at most nine
+query attempts. This holds roughly 32 GiB of resident memory with 4 KiB pages.
+Allocation failure, an oversized/inconsistent snapshot, or an unreadable
+process returns false/zero without modifying caller outputs. The allocation
+path does not throw C++ exceptions. Partial process output arrays are accepted,
+and extra array slots stay unchanged. `getMemInfo` requires at least
+`MEMINFO_COUNT` entries and throws on a missing output or failed system query.
+
 ## Libraries
 
 - Already built: libbase, liblog, libziparchive, zlib, libnativehelper, ICU4C.

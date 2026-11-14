@@ -10,6 +10,8 @@
 
 #include <string>
 
+#include <gesher/reserved_names.h>
+
 #include "internal.h"
 
 namespace {
@@ -72,6 +74,7 @@ bool ReadSymlinkHandle(HANDLE h, std::string* target) {
     for (wchar_t& c : name) {
       if (c == L'\\') c = L'/';
     }
+    reserved_names::Decode(&name);
     *target = Narrow(name.c_str());
   } else {
     *target = LinuxPath(name.c_str());

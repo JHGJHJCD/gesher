@@ -531,16 +531,16 @@ static jint Debug_binderTransactionsUnavailable(JNIEnv*, jobject) { return -1; }
 //     or shared with a share count of 1). PSS: USS plus each shared page divided
 //     by its share count (Windows caps the count at 7, so PSS errs high for
 //     widely shared DLL pages).
-//   - Dirty: Linux's dirty bit has no Windows equivalent; a resident writable
-//     page counts as dirty, read-only and not-yet-written copy-on-write pages
-//     as clean. Clean pages are file-backed and can be dropped, which is what
-//     AOSP's swappable PSS reports.
+//   - Dirty/clean are estimates from page permissions, not an observed dirty
+//     bit: writable pages count as dirty, others as clean. Read-only pages
+//     can still be private anonymous memory, so this cannot identify AOSP's
+//     file-backed swappable PSS; that unsupported field stays 0.
 //   - Categories: Windows does not label mappings like "[anon:dalvik-...]".
 //     For the calling process the Java heap's live bytes (Runtime totalMemory
 //     minus freeMemory) are reported as dalvik and the process heap's
 //     allocated bytes (HeapSummary, as getNativeHeapAllocatedSize) as native:
-//     bytes in use have been written, so they are resident private dirty
-//     pages unless paged out. Each is capped by the private dirty memory left;
+//     these are allocation estimates, not a per-page residency attribution.
+//     Each is capped by the estimated private dirty memory left;
 //     the rest is "other" (on Windows that includes ART's mapped image and
 //     oat files, private clean as on Linux). Another process is reported entirely as
 //     "other". otherStats stays zero: there is no per-mapping breakdown.
@@ -593,31 +593,52 @@ bool ReadWorkingSet(HANDLE process, WorkingSetUsage* usage) {
   if (query == nullptr || process == nullptr) return false;
   SYSTEM_INFO system;
   GetSystemInfo(&system);
+  if (system.dwPageSize == 0) return false;
   const double page_kb = system.dwPageSize / 1024.0;
   // ULONG_PTR NumberOfEntries, then the entries. The working set may grow
   // between calls: retry with the reported size plus headroom.
-  std::vector<ULONG_PTR> buffer(4096);
+  // Sampling must not terminate the VM under memory pressure (-fno-exceptions)
+  // or allocate an unbounded snapshot. 64 MiB holds roughly 32 GiB of resident
+  // 4-KiB pages on a 64-bit host; larger samples report unavailable.
+  constexpr size_t kMaxBytes = 64 * 1024 * 1024;
+  constexpr size_t kMaxSlots = kMaxBytes / sizeof(ULONG_PTR);
+  static_assert(kMaxBytes <= UINT32_MAX, "QueryWorkingSet takes a DWORD byte size");
+  struct Buffer {
+    ULONG_PTR* data = nullptr;
+    ~Buffer() { free(data); }
+  } buffer;
+  size_t capacity = 4096;
+  buffer.data = static_cast<ULONG_PTR*>(malloc(capacity * sizeof(ULONG_PTR)));
+  if (buffer.data == nullptr) return false;
   for (int attempt = 0;; attempt++) {
-    DWORD bytes = static_cast<DWORD>(buffer.size() * sizeof(ULONG_PTR));
-    if (query(process, buffer.data(), bytes)) break;
+    DWORD bytes = static_cast<DWORD>(capacity * sizeof(ULONG_PTR));
+    buffer.data[0] = 0;
+    if (query(process, buffer.data, bytes)) break;
     if (GetLastError() != ERROR_BAD_LENGTH || attempt == 8) return false;
-    buffer.resize(buffer[0] + buffer[0] / 4 + 1024);
+    ULONG_PTR required = buffer.data[0];
+    if (required >= kMaxSlots || required < capacity) return false;
+    size_t needed = static_cast<size_t>(required) + 1;  // include NumberOfEntries
+    size_t headroom = needed / 4 + 1024;
+    size_t next = headroom > kMaxSlots - needed ? kMaxSlots : needed + headroom;
+    auto* grown = static_cast<ULONG_PTR*>(realloc(buffer.data, next * sizeof(ULONG_PTR)));
+    if (grown == nullptr) return false;
+    buffer.data = grown;
+    capacity = next;
   }
-  size_t count = buffer[0];
-  if (count > buffer.size() - 1) count = buffer.size() - 1;
-  double rss = 0, pss = 0, uss = 0, swappable = 0;
+  size_t count = buffer.data[0];
+  if (count >= capacity) return false;  // never report a truncated snapshot as success
+  double rss = 0, pss = 0, uss = 0;
   double private_dirty = 0, private_clean = 0, shared_dirty = 0, shared_clean = 0;
   for (size_t i = 0; i < count; i++) {
-    WorkingSetEntry page{buffer[i + 1]};
+    WorkingSetEntry page{buffer.data[i + 1]};
     unsigned access = page.protection() & 0x7;
-    // 4: read/write, 6: execute/read/write. 5 and 7 are copy-on-write pages
-    // not yet written: still the file's (clean).
+    // 4: read/write, 6: execute/read/write. Copy-on-write protection (5/7)
+    // counts as clean in this permission estimate; backing and dirtiness are unknown.
     bool dirty = access == 4 || access == 6;
     bool exclusive = !page.shared() || page.share_count() <= 1;
     double proportional = exclusive ? page_kb : page_kb / page.share_count();
     rss += page_kb;
     pss += proportional;
-    if (!dirty) swappable += proportional;
     if (exclusive) {
       uss += page_kb;
       (dirty ? private_dirty : private_clean) += page_kb;
@@ -628,7 +649,7 @@ bool ReadWorkingSet(HANDLE process, WorkingSetUsage* usage) {
   usage->rss = static_cast<jlong>(rss);
   usage->pss = static_cast<jlong>(pss);
   usage->uss = static_cast<jlong>(uss);
-  usage->swappable_pss = static_cast<jlong>(swappable);
+  usage->swappable_pss = 0;  // page permissions cannot establish file-backed clean memory
   usage->private_dirty = static_cast<jlong>(private_dirty);
   usage->private_clean = static_cast<jlong>(private_clean);
   usage->shared_dirty = static_cast<jlong>(shared_dirty);
@@ -649,8 +670,10 @@ bool CategoryFieldsFor(JNIEnv* env, jclass type, const char* prefix, CategoryFie
                      &out->shared_dirty, &out->private_clean, &out->shared_clean,
                      &out->swapped_out, &out->swapped_out_pss};
   for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
-    std::string name = std::string(prefix) + names[i];
-    *ids[i] = env->GetFieldID(type, name.c_str(), "I");
+    char name[32];
+    int length = snprintf(name, sizeof(name), "%s%s", prefix, names[i]);
+    if (length < 0 || static_cast<size_t>(length) >= sizeof(name)) return false;
+    *ids[i] = env->GetFieldID(type, name, "I");
     if (*ids[i] == nullptr) return false;
   }
   return true;
@@ -678,16 +701,34 @@ void SetCategory(JNIEnv* env, jobject info, const CategoryFields& f, const Categ
 jlong JavaHeapKb(JNIEnv* env) {
   jclass runtime = env->FindClass("java/lang/Runtime");
   if (runtime == nullptr) { env->ExceptionClear(); return 0; }
+  auto unavailable = [&]() {
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(runtime);
+    return static_cast<jlong>(0);
+  };
   jmethodID get = env->GetStaticMethodID(runtime, "getRuntime", "()Ljava/lang/Runtime;");
+  if (get == nullptr) return unavailable();
   jmethodID total = env->GetMethodID(runtime, "totalMemory", "()J");
+  if (total == nullptr) return unavailable();
   jmethodID free = env->GetMethodID(runtime, "freeMemory", "()J");
-  jobject instance = get != nullptr ? env->CallStaticObjectMethod(runtime, get) : nullptr;
-  jlong bytes = 0;
-  if (instance != nullptr && total != nullptr && free != nullptr && !env->ExceptionCheck()) {
-    bytes = env->CallLongMethod(instance, total);
-    if (!env->ExceptionCheck()) bytes -= env->CallLongMethod(instance, free);
+  if (free == nullptr) return unavailable();
+  jobject instance = env->CallStaticObjectMethod(runtime, get);
+  if (instance == nullptr || env->ExceptionCheck()) {
+    env->DeleteLocalRef(instance);
+    return unavailable();
   }
-  if (env->ExceptionCheck() || bytes < 0) { env->ExceptionClear(); bytes = 0; }
+  jlong total_bytes = env->CallLongMethod(instance, total);
+  if (env->ExceptionCheck()) {
+    env->DeleteLocalRef(instance);
+    return unavailable();
+  }
+  jlong free_bytes = env->CallLongMethod(instance, free);
+  if (env->ExceptionCheck()) {
+    env->DeleteLocalRef(instance);
+    return unavailable();
+  }
+  jlong bytes = total_bytes >= 0 && free_bytes >= 0 && free_bytes <= total_bytes
+                    ? total_bytes - free_bytes : 0;
   env->DeleteLocalRef(instance);
   env->DeleteLocalRef(runtime);
   return bytes / 1024;
@@ -707,7 +748,8 @@ static jboolean Debug_getMemoryInfoPid(JNIEnv* env, jclass, jint pid, jobject in
   CloseProcess(process);
   if (!read) return JNI_FALSE;
 
-  jclass type = env->GetObjectClass(info);
+  jclass type = env->FindClass("android/os/Debug$MemoryInfo");
+  if (type == nullptr) return JNI_FALSE;
   CategoryFields dalvik_fields, native_fields, other_fields;
   if (!CategoryFieldsFor(env, type, "dalvik", &dalvik_fields)
       || !CategoryFieldsFor(env, type, "native", &native_fields)
@@ -716,9 +758,13 @@ static jboolean Debug_getMemoryInfoPid(JNIEnv* env, jclass, jint pid, jobject in
     return JNI_FALSE;  // NoSuchFieldError pending
   }
   jfieldID has_swap_pss = env->GetFieldID(type, "hasSwappedOutPss", "Z");
+  if (has_swap_pss == nullptr) {
+    env->DeleteLocalRef(type);
+    return JNI_FALSE;
+  }
   jfieldID other_stats = env->GetFieldID(type, "otherStats", "[I");
   env->DeleteLocalRef(type);
-  if (has_swap_pss == nullptr || other_stats == nullptr) return JNI_FALSE;
+  if (other_stats == nullptr) return JNI_FALSE;
 
   // Anonymous heaps are private dirty memory: dalvik and native take their
   // share of it, capped by what is resident; the rest of every measure is other.
@@ -746,11 +792,17 @@ static jboolean Debug_getMemoryInfoPid(JNIEnv* env, jclass, jint pid, jobject in
   jintArray stats = static_cast<jintArray>(env->GetObjectField(info, other_stats));
   if (stats != nullptr) {
     jsize length = env->GetArrayLength(stats);
-    std::vector<jint> zeros(static_cast<size_t>(length), 0);
-    env->SetIntArrayRegion(stats, 0, length, zeros.data());
+    const jint zeros[32] = {};
+    for (jsize offset = 0; offset < length;) {
+      jsize count = length - offset;
+      if (count > 32) count = 32;
+      env->SetIntArrayRegion(stats, offset, count, zeros);
+      if (env->ExceptionCheck()) break;
+      offset += count;
+    }
     env->DeleteLocalRef(stats);
   }
-  return JNI_TRUE;
+  return env->ExceptionCheck() ? JNI_FALSE : JNI_TRUE;
 }
 
 static void Debug_getMemoryInfo(JNIEnv* env, jclass clazz, jobject info) {
@@ -821,9 +873,12 @@ enum {
   kMemActiveFile, kMemInactiveFile, kMemCmaTotal, kMemCmaFree, kMemSwapCached, kMemCount
 };
 
-// /proc/meminfo's counterparts from GetPerformanceInfo: physical memory, the
-// file cache, the kernel pools (as slab) and the pagefile's share of the commit
-// limit (as swap). Fields with no Windows counterpart are 0.
+// Only physical total and immediately available memory have direct documented
+// counterparts here. PhysicalAvailable includes standby/free/zero lists, while
+// SystemCache includes standby plus the system working set: subtracting them
+// does not produce Linux MemFree. Paged kernel pools are not reclaimable slab,
+// and commit-limit headroom is not actual pagefile usage. Those unsupported
+// Linux breakdowns remain 0 rather than inventing values from unlike counters.
 static void Debug_getMemInfo(JNIEnv* env, jclass, jlongArray out) {
   if (out == nullptr) {
     jniThrowNullPointerException(env, "out == null");
@@ -851,18 +906,6 @@ static void Debug_getMemInfo(JNIEnv* env, jclass, jlongArray out) {
   jlong values[kMemCount] = {};
   values[kMemTotal] = kb(p.physical_total);
   values[kMemAvailable] = kb(p.physical_available);
-  values[kMemCached] = kb(p.system_cache);
-  values[kMemFree] = p.physical_available > p.system_cache
-                         ? kb(p.physical_available - p.system_cache) : 0;
-  values[kMemSlab] = kb(p.kernel_total);
-  values[kMemSlabReclaimable] = kb(p.kernel_paged);
-  values[kMemSlabUnreclaimable] = kb(p.kernel_nonpaged);
-  values[kMemKernelReclaimable] = kb(p.kernel_paged);
-  if (p.commit_limit > p.physical_total) {
-    values[kMemSwapTotal] = kb(p.commit_limit - p.physical_total);
-    jlong free_commit = p.commit_limit > p.commit_total ? kb(p.commit_limit - p.commit_total) : 0;
-    values[kMemSwapFree] = free_commit < values[kMemSwapTotal] ? free_commit : values[kMemSwapTotal];
-  }
   env->SetLongArrayRegion(out, 0, kMemCount, values);
 }
 

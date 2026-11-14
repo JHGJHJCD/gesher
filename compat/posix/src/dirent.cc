@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "internal.h"
+#include <gesher/reserved_names.h>
 
 struct gesher_DIR {
   std::wstring path;     // the directory, as MapPath gave it
@@ -146,7 +147,9 @@ struct dirent* readdir(DIR* dir) {
     type = (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 ? DT_DIR : DT_REG;
   }
   ++dir->position;
-  Fill(e, gesher::Narrow(dir->data.cFileName), type, dir->position);
+  // A name with a character Windows reserves is stored encoded.
+  Fill(e, gesher::Narrow(gesher::reserved_names::Decoded(dir->data.cFileName).c_str()), type,
+       dir->position);
   return e;
 }
 

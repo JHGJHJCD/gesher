@@ -142,6 +142,20 @@ public final class IdentitySecurityTest {
         @Override public IBinder asBinder() { return binder; }
     }
 
+    /** Use real accepted attachment so PID ownership and death cleanup are exercised. */
+    private static Object attachProcess(Object atm, Method attach, List<Object> processes,
+            int pid, String packageName) throws Exception {
+        int before = processes.size();
+        attach.invoke(atm, new ThreadStub(), pid, 0L);
+        require(processes.size() == before + 1, "Attachment discarded a record before death cleanup");
+        Object process = processes.get(before);
+        synchronized (atm) {
+            field(process.getClass(), "packageName").set(process, packageName);
+            field(process.getClass(), "processName").set(process, packageName);
+        }
+        return process;
+    }
+
     @SuppressWarnings("unchecked")
     private static void processAuthentication(File fixtures) throws Exception {
         Class<?> apkClass = Class.forName("com.gesher.server.ApkPackage");
@@ -175,19 +189,105 @@ public final class IdentitySecurityTest {
                 "A UID mismatch registered a process or consumed a valid pending start");
 
         Class<?> processClass = Class.forName(atmClass.getName() + "$ProcessRecord");
-        Object record = construct(processClass, new Class<?>[] {atmClass, int.class, IApplicationThread.class},
-                atm, 888884, thread);
-        field(processClass, "packageName").set(record, pkg);
-        field(processClass, "processName").set(record, pkg);
-        processes.add(record);
+        Class<?> amClass = Class.forName("com.gesher.server.ActivityManagerService");
+        Class<?> notifications = Class.forName("com.gesher.server.NotificationManagerService");
+        construct(amClass, new Class<?>[] {atmClass, pmClass, notifications},
+                atm, pm, construct(notifications, new Class<?>[0]));
+        Method caller = method(atmClass, "callerProcess", int.class);
+        Method unassigned = method(atmClass, "unassignedProcess", int.class);
+        Method died = method(atmClass, "processDied", processClass);
+        Field exiting = field(processClass, "exiting");
+        Field dead = field(processClass, "dead");
+        Field superseded = field(processClass, "pidSuperseded");
+        Field recover = field(processClass, "recoverAfterPidSupersession");
+        int pid = 888884;
+        Object record = attachProcess(atm, attach, processes, pid, pkg);
         Class<?> identityClass = Class.forName("com.gesher.server.CallerIdentity");
         Object identity = construct(identityClass, new Class<?>[] {pmClass, atmClass}, pm, atm);
         Method forPid = identityClass.getMethod("packageForPid", int.class);
-        require(pkg.equals(forPid.invoke(identity, 888884)), "Attached PID did not map to its own package");
+        require(pkg.equals(forPid.invoke(identity, pid)), "Attached PID did not map to its own package");
+        require(caller.invoke(atm, pid) == record, "Attached process lost lifecycle admission");
         require(forPid.invoke(identity, 888885) == null, "Unknown PID received an app identity");
-        field(processClass, "exiting").setBoolean(record, true);
-        require(forPid.invoke(identity, 888884) == null, "Exiting process retained its app identity");
-        System.out.println("IdentitySecurityTest: guessed start, PID/UID mismatch and stale-PID mapping denied");
+        // Rejected attachments must not claim an already-owned PID, including a
+        // valid pending sequence presented with the wrong PID or Binder UID.
+        denied(() -> attach.invoke(atm, thread, pid, 913L), "start sequence");
+        field(pendingClass, "pid").setInt(expected, pid + 1);
+        denied(() -> attach.invoke(atm, thread, pid, 914L), "start sequence");
+        field(pendingClass, "pid").setInt(expected, pid);
+        denied(() -> attach.invoke(atm, thread, pid, 914L), "UID");
+        require(processes.size() == 1 && processes.get(0) == record
+                        && pending.get(914L) == expected && !superseded.getBoolean(record)
+                        && !exiting.getBoolean(record) && caller.invoke(atm, pid) == record
+                        && pkg.equals(forPid.invoke(identity, pid)),
+                "Rejected attachment changed the existing PID owner or consumed a pending start");
+        // Told to exit but still running (onTerminate, queued main-looper work): Android
+        // keeps its Binder identity until the process is gone, so services must not turn
+        // its last calls into SecurityExceptions.
+        exiting.setBoolean(record, true);
+        require(pkg.equals(forPid.invoke(identity, pid)), "Exiting live process lost its app identity");
+        require(caller.invoke(atm, pid) == null, "Exiting process received new lifecycle work");
+        // Supersession must also retire an older record that has not yet been told to exit.
+        exiting.setBoolean(record, false);
+        Object reused = attachProcess(atm, attach, processes, pid, "test.identity.reused");
+        require(superseded.getBoolean(record) && exiting.getBoolean(record)
+                        && recover.getBoolean(record) && !dead.getBoolean(record) && processes.contains(record),
+                "PID replacement did not preserve the old record solely for death cleanup");
+        require("test.identity.reused".equals(forPid.invoke(identity, pid))
+                        && caller.invoke(atm, pid) == reused,
+                "An older record shadowed the latest attached PID owner");
+        exiting.setBoolean(reused, true);
+        require("test.identity.reused".equals(forPid.invoke(identity, pid)),
+                "Exiting replacement revived the previous PID owner's identity");
+        require(caller.invoke(atm, pid) == null, "Exiting replacement restored older lifecycle admission");
+        dead.setBoolean(reused, true);
+        require(forPid.invoke(identity, pid) == null && caller.invoke(atm, pid) == null,
+                "Dead replacement revived a previous PID owner");
+        died.invoke(atm, reused);
+        require(processes.contains(record) && !processes.contains(reused)
+                        && forPid.invoke(identity, pid) == null && caller.invoke(atm, pid) == null,
+                "Removing the latest owner revived a superseded process");
+
+        Object oldUnbound = attachProcess(atm, attach, processes, pid, null);
+        Object unbound = attachProcess(atm, attach, processes, pid, null);
+        require(recover.getBoolean(record), "Later PID claims erased the old process's recovery intent");
+        require(forPid.invoke(identity, pid) == null && caller.invoke(atm, pid) == unbound,
+                "An unbound attachment inherited an older record instead of its own bootstrap state");
+        synchronized (atm) {
+            require(unassigned.invoke(atm, pid) == unbound && unassigned.invoke(atm, 0) == unbound,
+                    "Unassigned-process selection returned a superseded attachment");
+            dead.setBoolean(unbound, true);
+            require(unassigned.invoke(atm, pid) == null && unassigned.invoke(atm, 0) == null,
+                    "Dead unbound owner or its predecessor received a package assignment");
+            dead.setBoolean(unbound, false);
+        }
+        exiting.setBoolean(unbound, true);
+        require(forPid.invoke(identity, pid) == null && caller.invoke(atm, pid) == null,
+                "Exiting unbound owner revived an older process");
+        synchronized (atm) {
+            require(unassigned.invoke(atm, pid) == null && unassigned.invoke(atm, 0) == null,
+                    "Exiting unbound owner or its predecessor received a package assignment");
+        }
+        died.invoke(atm, unbound);
+        require(forPid.invoke(identity, pid) == null && caller.invoke(atm, pid) == null,
+                "Removing an unbound owner revived an older process");
+
+        Object latest = attachProcess(atm, attach, processes, pid, pkg);
+        synchronized (atm) {
+            require(unassigned.invoke(atm, pid) == null && unassigned.invoke(atm, 0) == null,
+                    "A bound replacement left its superseded unbound predecessor assignable");
+        }
+        died.invoke(atm, oldUnbound);
+        died.invoke(atm, record);
+        require(dead.getBoolean(record) && !processes.contains(record)
+                        && !dead.getBoolean(latest) && !superseded.getBoolean(latest)
+                        && pkg.equals(forPid.invoke(identity, pid)) && caller.invoke(atm, pid) == latest,
+                "Delayed cleanup of the old process revoked its replacement");
+        died.invoke(atm, latest);
+        require(processes.isEmpty() && forPid.invoke(identity, pid) == null
+                        && caller.invoke(atm, pid) == null,
+                "Removed process retained identity or lifecycle admission");
+        System.out.println("IdentitySecurityTest: guessed start, PID/UID mismatch and stale-PID mapping denied;"
+                + " exiting owner keeps identity and superseded owners never revive");
     }
 
     public static void main(String[] args) throws Exception {

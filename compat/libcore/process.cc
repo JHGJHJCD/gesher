@@ -216,8 +216,23 @@ jint JNICALL WaitForProcessExit(JNIEnv*, jobject, jint pid) {
     CloseHandle(h);
   }
   int status = ex::ExitStatus(code);
-  fprintf(stderr, "gesher: exec pid %d exited with status %d\n", static_cast<int>(pid), status);
-  fflush(stderr);
+  // stdout and stderr can share the app's log handle. A single fprintf can
+  // still emit fragments between another writer's records (Java's PrintStream
+  // does not take the CRT FILE lock). Format this bounded ASCII record first,
+  // then issue one write to the actual stderr descriptor, including redirects.
+  char message[96];
+  int length = snprintf(message, sizeof(message), "gesher: exec pid %d exited with status %d\n",
+                        static_cast<int>(pid), status);
+  int fd = _fileno(stderr);
+  if (length > 0 && static_cast<size_t>(length) < sizeof(message) && fd >= 0) {
+    intptr_t sink = _get_osfhandle(fd);
+    if (sink != -1 && sink != -2 && sink != 0) {
+      DWORD written = 0;
+      // Diagnostics are best effort; a closed/full sink must not change the
+      // child's status. The descriptor owns this handle; do not close it here.
+      WriteFile(reinterpret_cast<HANDLE>(sink), message, static_cast<DWORD>(length), &written, nullptr);
+    }
+  }
   return status;
 }
 

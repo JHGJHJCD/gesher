@@ -76,6 +76,7 @@ public final class DynamicShortcutTest {
         AssetManager.createSystemAssetsInZygoteLocked(false,System.getenv("ANDROID_ROOT")+"/framework/framework-res.apk");
         android.system.Os.setenv("GESHER_MICROG_SPOOF","1",true);
         android.system.Os.setenv("GESHER_SHORTCUTS","0",true);
+        ServiceRecoveryTest.pidSupersessionContracts(args[1]);
         Object harness=make(Class.forName("gesher.services.DelegatedIntentRetirementTest$Harness"),
                 new Class<?>[]{String.class,String.class,boolean.class,boolean.class},args[0],args[1],false,true);
         PackageManagerService pm=(PackageManagerService)field(harness,"pm");
@@ -123,6 +124,23 @@ public final class DynamicShortcutTest {
             try {api.setDynamicShortcuts(pkg,new ParceledListSlice<>(tooMany),0);throw new AssertionError("unbounded snapshot accepted");}
             catch(IllegalArgumentException expected){checks++;}
             require(list(api,pkg).size()==2,"rejected batch changed state");
+            // A publisher told to exit still runs app code (onTerminate, queued listeners:
+            // OsmAnd's LauncherShortcutsHelper reads and prunes its shortcuts then). Its
+            // Binder identity holds until death or a later attachment claims its PID.
+            Object process=field(harness,"process");
+            Field exiting=process.getClass().getDeclaredField("exiting");exiting.setAccessible(true);
+            Field dead=process.getClass().getDeclaredField("dead");dead.setAccessible(true);
+            Method caller=atm.getClass().getDeclaredMethod("callerProcess",int.class);caller.setAccessible(true);
+            exiting.setBoolean(process,true);
+            try {
+                require(list(api,pkg).size()==2,"exiting publisher could not read its shortcuts");
+                api.removeDynamicShortcuts(pkg,Collections.singletonList("absent"),0);
+                require(list(api,pkg).size()==2,"exiting publisher prune changed unrelated shortcuts");
+                require(caller.invoke(atm,910001)==null,"exiting publisher received new lifecycle work");
+                dead.setBoolean(process,true);
+                denied(()->api.getShortcuts(pkg,15,0));
+                require(caller.invoke(atm,910001)==null,"dead publisher received new lifecycle work");
+            } finally {dead.setBoolean(process,false);exiting.setBoolean(process,false);}
             Binder.restoreCallingIdentity(((long)owner.uid()<<32)|999991);
             denied(()->api.getShortcuts(pkg,15,0));
             Binder.restoreCallingIdentity(((long)owner.uid()<<32)|910001);
