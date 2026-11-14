@@ -825,7 +825,9 @@ final class ActiveServices {
                 // Intentional force-stop suppresses recovery. Cached retirement removes
                 // unused/self-bound records at commit; if active work still survives here,
                 // its process may be restarted just as after an ordinary process death.
-                boolean recover = (!app.exiting || app.reaped)
+                // Superseding a running PID also blocks new work without turning its
+                // eventual death into an intentional stop of its existing services.
+                boolean recover = (!app.exiting || app.reaped || app.recoverAfterPidSupersession)
                         && (started || r.hasAutoCreateConnections());
                 if (serviceCurrent(r) && recover) {
                     if (r.startRequested && r.pendingStarts.isEmpty() && started) {

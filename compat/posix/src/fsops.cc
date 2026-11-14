@@ -21,6 +21,8 @@
 
 #include <string>
 
+#include <gesher/reserved_names.h>
+
 #include "internal.h"
 #include "record_lock_descriptors.h"
 
@@ -330,7 +332,7 @@ int Symlink(const char* target, const char* linkpath) {
   // current when the link is followed.
   std::wstring windows_target;
   bool absolute = target[0] == '/' || target[0] == '\\' ||
-                  (((target[0] | 0x20) >= 'a' && (target[0] | 0x20) <= 'z') && target[1] == ':');
+                  gesher::reserved_names::DriveRoot(target);
   if (absolute) {
     if (gesher::MapPath(target, &windows_target) != PathKind::kFile) return errno = EPERM, -1;
     DWORD n = GetFullPathNameW(windows_target.c_str(), 0, nullptr, nullptr);
@@ -339,6 +341,7 @@ int Symlink(const char* target, const char* linkpath) {
     if (n != 0 && n < full.size()) windows_target = full.substr(0, n);
   } else {
     windows_target = gesher::Widen(target);
+    gesher::reserved_names::EncodeName(&windows_target);
   }
   for (wchar_t& c : windows_target) {
     if (c == L'/') c = L'\\';
