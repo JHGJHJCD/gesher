@@ -47,7 +47,11 @@ function Sync-GesherRuntimeFile {
         [Parameter(Mandatory = $true)] $State
     )
     $sourceInfo = Get-Item -LiteralPath $Source -ErrorAction Stop
-    if ($sourceInfo.PSIsContainer) { throw "Expected a runtime file: $Source" }
+    # A missing literal path must not be acknowledged even if the filesystem
+    # provider returns no item without a terminating error (Windows PowerShell).
+    if ($null -eq $sourceInfo -or $sourceInfo.PSIsContainer) {
+        throw "Expected an existing runtime file: $Source"
+    }
     $copy = $false
     if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
         $copy = $true
