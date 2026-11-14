@@ -46,8 +46,9 @@ struct Format {
     if (std::string(key) != "title") return false;
     *out = std::to_string(tag); return true;
   }
-  bool GetBuffer(const char*, std::vector<uint8_t>* out) const {
-    if (tag != 2) return false; // Deliberately leaves absent output unchanged.
+  bool GetBuffer(const char* key, std::vector<uint8_t>* out) const {
+    // Pinned AMEDIAFORMAT_KEY_ALBUMART; absent keys do not mutate output.
+    if (std::string(key) != "albumart" || tag != 2) return false;
     *out = {11, 22, 33}; return true;
   }
   bool GetInt64(const char* key, int64_t* out) const {

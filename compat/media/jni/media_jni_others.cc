@@ -68,7 +68,7 @@ bool Fill(RetrieverSnapshot* r, std::shared_ptr<DataSource> source, std::string*
   }
   std::string mime = file.Mime();
   if (!mime.empty()) r->metadata[12] = mime;
-  file.GetBuffer("album-art", &r->album_art);
+  file.GetBuffer("albumart", &r->album_art);
   int64_t duration = -1;
   file.GetInt64("durationUs", &duration);
   bool audio = false, video = false;

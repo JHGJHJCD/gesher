@@ -38,8 +38,9 @@ struct Format {
     if (std::string(name) != "title") return false;
     *out = std::string(1, tag); return true;
   }
-  bool GetBuffer(const char*, std::vector<uint8_t>* out) const {
-    if (tag != 'a') return false;  // Like real Format::GetBuffer: no output mutation.
+  bool GetBuffer(const char* key, std::vector<uint8_t>* out) const {
+    // Pinned AMEDIAFORMAT_KEY_ALBUMART; absent keys do not mutate output.
+    if (std::string(key) != "albumart" || tag != 'a') return false;
     *out = {4, 5, 6}; return true;
   }
   bool GetInt64(const char* name, int64_t* out) const {

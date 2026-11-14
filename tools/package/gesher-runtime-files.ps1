@@ -40,6 +40,20 @@ function New-GesherRuntimeSync {
     }
 }
 
+function Get-GesherRuntimeFileHash {
+    param([Parameter(Mandatory = $true)][string] $Path)
+    # Packaged launchers must not depend on Get-FileHash/module availability in
+    # their PowerShell host. Stream large ICU/font resources and allow readers
+    # that already have identical runtime bytes mapped to remain open.
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            return [BitConverter]::ToString($algorithm.ComputeHash($stream)).Replace('-', '')
+        } finally { $stream.Dispose() }
+    } finally { $algorithm.Dispose() }
+}
+
 function Sync-GesherRuntimeFile {
     param(
         [Parameter(Mandatory = $true)][string] $Source,
@@ -65,8 +79,8 @@ function Sync-GesherRuntimeFile {
             # A new component stamp requires checking it, not rewriting identical
             # bytes that a running ART process can have open without write sharing.
             # Unversioned builds also cannot use metadata as a release identity.
-            $copy = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -cne
-                    (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
+            $copy = (Get-GesherRuntimeFileHash -Path $sourceInfo.FullName) -cne
+                    (Get-GesherRuntimeFileHash -Path $destinationInfo.FullName)
             if (-not $copy -and $sourceInfo.LastWriteTimeUtc -ne $destinationInfo.LastWriteTimeUtc) {
                 # Avoid repeating a timestamp-only comparison on later launches.
                 # An existing reader may deny attribute writes; its bytes are
