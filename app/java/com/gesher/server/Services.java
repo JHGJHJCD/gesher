@@ -129,6 +129,8 @@ public final class Services {
                 new com.gesher.server.stub.IAudioServiceStub(audio));
         services.put(Context.MEDIA_SESSION_SERVICE, StandIn.of(
                 android.media.session.ISessionManager.class, new MediaSessionService(audio)).asBinder());
+        services.put(Context.MEDIA_ROUTER_SERVICE, StandIn.of(android.media.IMediaRouterService.class,
+                new MediaRouterService(audio, am.callers())).asBinder());
         // content: observers, and apps' sync adapters (SyncManager).
         SyncManager sync = new SyncManager(am, pm);
         services.put(ContentResolver.CONTENT_SERVICE_NAME,
@@ -461,6 +463,11 @@ public final class Services {
 
     /** display: DisplayManagerService, with one display. */
     public static final class DisplayManager extends IDisplayManager.Default {
+        @Override
+        public android.hardware.display.WifiDisplayStatus getWifiDisplayStatus() {
+            return new android.hardware.display.WifiDisplayStatus();
+        }
+
         @Override
         public DisplayInfo getDisplayInfo(int displayId) {
             return displayId == Display.DEFAULT_DISPLAY
