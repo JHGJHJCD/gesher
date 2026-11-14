@@ -13,7 +13,9 @@ try {
 
 $here = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Resolve-Path (Join-Path $PWD 'tools/package')).Path }
 . (Join-Path $here 'gesher-ui.ps1')
+. (Join-Path $here 'gesher-update.ps1')
 $root = Join-Path $env:LOCALAPPDATA 'Gesher'
+$script:UpdateDirectory = Join-Path $root 'updates'
 
 $isHe = ($script:GesherUiLanguage -eq 'he')
 $flowDirection = if ($isHe) { 'RightToLeft' } else { 'LeftToRight' }
@@ -123,7 +125,7 @@ function Get-InstalledApps {
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="$(Get-GesherText 'cp_title')"
-        Width="920" Height="700" MinWidth="800" MinHeight="600"
+        Width="920" Height="820" MinWidth="800" MinHeight="600"
         WindowStartupLocation="CenterScreen"
         FlowDirection="$flowDirection"
         FontFamily="Segoe UI, Tahoma, Arial"
@@ -179,8 +181,10 @@ function Get-InstalledApps {
             </Style.Triggers>
         </Style>
     </Window.Resources>
-    <Grid Margin="24">
+    <ScrollViewer Name="PanelScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <Grid Name="PanelLayout" Margin="24" MinHeight="640">
         <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -207,7 +211,7 @@ function Get-InstalledApps {
         </Border>
 
         <!-- Services Cards (Google Play & Aurora Store) -->
-        <Grid Grid.Row="1" Margin="0,0,0,16">
+        <Grid Name="ServicesCards" Grid.Row="1" Margin="0,0,0,16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*"/>
                 <ColumnDefinition Width="16"/>
@@ -259,8 +263,34 @@ function Get-InstalledApps {
             </Border>
         </Grid>
 
+        <!-- Runtime updates: network work never runs on the WPF dispatcher. -->
+        <Border Grid.Row="2" Background="#FFFFFF" BorderBrush="#E4E7EC" BorderThickness="1" CornerRadius="10" Padding="18,14" Margin="0,0,0,16">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0" Margin="0,0,14,0">
+                    <TextBlock Text="$(Get-GesherText 'cp_update_title')" FontSize="15" FontWeight="Bold" Foreground="#101828"/>
+                    <TextBlock Name="UpdateVersionText" FontSize="12" Foreground="#667085" Margin="0,4,0,0"/>
+                    <TextBlock Name="UpdateStatusText" TextWrapping="Wrap" FontSize="12" Foreground="#475467" Margin="0,5,0,0"/>
+                    <CheckBox Name="AutomaticUpdateChecks" Content="$(Get-GesherText 'cp_update_automatic')" ToolTip="$(Get-GesherText 'cp_update_automatic_hint')" FontSize="12" Foreground="#475467" Margin="0,9,0,0"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                    <WrapPanel HorizontalAlignment="Right" MaxWidth="330">
+                        <Button Name="BtnCheckUpdate" Content="$(Get-GesherText 'cp_update_check')" Margin="0,0,8,6"/>
+                        <Button Name="BtnInstallUpdate" Content="$(Get-GesherText 'cp_update_download_install')" Style="{StaticResource PrimaryButton}" Margin="0,0,0,6" Visibility="Collapsed"/>
+                        <Button Name="BtnCancelUpdate" Content="$(Get-GesherText 'cp_update_cancel')" Margin="0,0,0,6" Visibility="Collapsed"/>
+                        <Button Name="BtnReopenPanel" Content="$(Get-GesherText 'cp_update_reopen')" Style="{StaticResource PrimaryButton}" Margin="0,0,0,6" Visibility="Collapsed"/>
+                    </WrapPanel>
+                    <Button Name="BtnUpdateNotes" Content="$(Get-GesherText 'cp_update_notes')" HorizontalAlignment="Right" Padding="8,3" FontSize="12" BorderThickness="0" Foreground="#175CD3" Visibility="Collapsed"/>
+                    <ProgressBar Name="UpdateProgress" Height="4" IsIndeterminate="True" Margin="0,8,0,0" Visibility="Collapsed"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
         <!-- Installed Applications Section -->
-        <Border Grid.Row="2" Background="#FFFFFF" BorderBrush="#E4E7EC" BorderThickness="1" CornerRadius="10" Padding="20">
+        <Border Name="ApplicationsSection" Grid.Row="3" Background="#FFFFFF" BorderBrush="#E4E7EC" BorderThickness="1" CornerRadius="10" Padding="20">
             <Grid>
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto"/>
@@ -280,7 +310,7 @@ function Get-InstalledApps {
                     </StackPanel>
                 </Grid>
 
-                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                <ScrollViewer Name="AppsViewport" Grid.Row="1" VerticalScrollBarVisibility="Auto">
                     <ItemsControl Name="AppsList">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
@@ -310,7 +340,7 @@ function Get-InstalledApps {
         </Border>
 
         <!-- Status & Progress Footer -->
-        <Border Grid.Row="3" Margin="0,12,0,0">
+        <Border Grid.Row="4" Margin="0,12,0,0">
             <Grid>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
@@ -321,17 +351,33 @@ function Get-InstalledApps {
             </Grid>
         </Border>
     </Grid>
+    </ScrollViewer>
 </Window>
 "@
 
 $reader = [System.Xml.XmlNodeReader]::new($xaml)
 $window = [System.Windows.Markup.XamlReader]::Load($reader)
+$window.MaxHeight = [System.Windows.SystemParameters]::WorkArea.Height
+$window.MinHeight = [Math]::Min($window.MinHeight, $window.MaxHeight)
+$window.Height = [Math]::Min($window.Height, $window.MaxHeight)
 
-# Set icon if available
+function Get-PanelWindowIcon([string] $path) {
+    $stream = [IO.File]::OpenRead($path)
+    try {
+        $icon = [System.Windows.Media.Imaging.BitmapFrame]::Create($stream,
+            [System.Windows.Media.Imaging.BitmapCreateOptions]::None,
+            [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+        $icon.Freeze()
+        return $icon
+    } finally { $stream.Dispose() }
+}
+
+# Load the icon completely: setup must be able to replace it while this panel
+# monitors the installer. The Uri overload would retain an on-demand file stream.
 $icoFile = Join-Path $here 'gesher.ico'
 if (Test-Path -LiteralPath $icoFile) {
     try {
-        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri]::new($icoFile))
+        $window.Icon = Get-PanelWindowIcon $icoFile
     } catch { }
 }
 
@@ -353,6 +399,25 @@ $btnInstallApk = $window.FindName('BtnInstallApk')
 $appsList = $window.FindName('AppsList')
 $statusMessage = $window.FindName('StatusMessage')
 $activityBar = $window.FindName('ActivityBar')
+$servicesCards = $window.FindName('ServicesCards')
+$applicationsSection = $window.FindName('ApplicationsSection')
+$updateVersionText = $window.FindName('UpdateVersionText')
+$updateStatusText = $window.FindName('UpdateStatusText')
+$automaticUpdateChecks = $window.FindName('AutomaticUpdateChecks')
+$btnCheckUpdate = $window.FindName('BtnCheckUpdate')
+$btnInstallUpdate = $window.FindName('BtnInstallUpdate')
+$btnCancelUpdate = $window.FindName('BtnCancelUpdate')
+$btnUpdateNotes = $window.FindName('BtnUpdateNotes')
+$btnReopenPanel = $window.FindName('BtnReopenPanel')
+$updateProgress = $window.FindName('UpdateProgress')
+$panelScroll = $window.FindName('PanelScroll')
+$panelLayout = $window.FindName('PanelLayout')
+
+function Update-PanelWindowLayout {
+    # A short or scaled display can scroll the complete dashboard. Its app list
+    # keeps a useful viewport rather than being squeezed behind the update card.
+    $panelLayout.Height = [Math]::Max(640, $panelScroll.ActualHeight - 48)
+}
 
 function Set-Busy([bool] $busy, [string] $msg = '') {
     # While an action runs (including its nested MessageBox loops) live refresh stays out of the way;
@@ -523,6 +588,379 @@ function Invoke-LiveRefreshTick {
     }
 }
 
+# Updates have their own state so a slow check or download does not suspend the
+# dashboard or its application controls. Only the installer takes the action guard.
+function New-PanelUpdateState($currentVersion, $preferences) {
+    return @{
+        Closed = $false; Phase = 'Idle'; CurrentVersion = $currentVersion
+        Preferences = $preferences; ChangingPreference = $false
+        Release = $null; Download = $null; Worker = $null; Installer = $null
+        PromptPending = $false; StatusKey = 'cp_update_ready'; StatusValues = @(); Detail = ''
+    }
+}
+
+function Set-PanelUpdateStatus([string] $key, [object[]] $values = @(), [string] $detail = '') {
+    $script:UpdateState.StatusKey = $key
+    $script:UpdateState.StatusValues = $values
+    $script:UpdateState.Detail = $detail
+}
+
+function Update-PanelUpdateView {
+    $state = $script:UpdateState
+    if ($state.Closed) { return }
+    $version = if ($state.CurrentVersion) { $state.CurrentVersion } else { Get-GesherText 'cp_update_unknown' }
+    $updateVersionText.Text = Get-GesherText 'cp_update_installed' @($version)
+    $updateStatusText.Text = Get-GesherText $state.StatusKey $state.StatusValues
+    $updateStatusText.ToolTip = $state.Detail
+    $working = $null -ne $state.Worker
+    $installing = $state.Phase -in 'Confirming', 'Installing'
+    $btnCheckUpdate.IsEnabled = -not ($working -or $installing -or $state.Phase -eq 'Completed')
+    $btnInstallUpdate.Visibility = if ($state.Phase -in 'Available', 'Ready') { 'Visible' } else { 'Collapsed' }
+    $btnInstallUpdate.Content = if ($state.Download) { Get-GesherText 'cp_update_install' } else { Get-GesherText 'cp_update_download_install' }
+    $cancellable = $working -and $state.Worker.Operation -ne 'Install'
+    $btnCancelUpdate.Visibility = if ($cancellable -or $state.Phase -eq 'Ready') { 'Visible' } else { 'Collapsed' }
+    $btnCancelUpdate.IsEnabled = $state.Phase -ne 'Cancelling'
+    $btnUpdateNotes.Visibility = if ($state.Release) { 'Visible' } else { 'Collapsed' }
+    $btnReopenPanel.Visibility = if ($state.Phase -eq 'Completed') { 'Visible' } else { 'Collapsed' }
+    $updateProgress.Visibility = if ($working -or $state.Phase -eq 'Installing') { 'Visible' } else { 'Collapsed' }
+    $automaticUpdateChecks.IsEnabled = -not $installing
+    $state.ChangingPreference = $true
+    try { $automaticUpdateChecks.IsChecked = [bool]$state.Preferences.AutomaticChecks }
+    finally { $state.ChangingPreference = $false }
+}
+
+function New-PanelUpdateWorker([string] $operation, $release, [bool] $automatic = $false) {
+    $powerShell = [PowerShell]::Create()
+    $cancellation = [Threading.CancellationTokenSource]::new()
+    try {
+        # AddArgument passes data, including paths and release metadata, without
+        # interpreting it as PowerShell source. The runspace never sees WPF objects.
+        $work = {
+            param($helper, $operation, $installDirectory, $destination, $release, $token)
+            $ErrorActionPreference = 'Stop'
+            . $helper
+            if ($operation -eq 'Check') {
+                Get-GesherUpdate -InstallDirectory $installDirectory -CancellationToken $token
+            } elseif ($operation -eq 'Download') {
+                Receive-GesherUpdate -Release $release -DestinationDirectory $destination -CancellationToken $token
+            } elseif ($operation -eq 'Install') {
+                Start-GesherUpdateInstaller -Download $release -InstallDirectory $installDirectory -CancellationToken $token
+            } else {
+                throw 'Unknown update operation.'
+            }
+        }
+        $null = $powerShell.AddScript($work.ToString()).AddArgument((Join-Path $here 'gesher-update.ps1')).
+            AddArgument($operation).AddArgument($here).AddArgument((Join-Path $script:UpdateDirectory 'downloads')).
+            AddArgument($release).AddArgument($cancellation.Token)
+        $handle = $powerShell.BeginInvoke()
+        return [PSCustomObject]@{
+            PowerShell = $powerShell; Handle = $handle; Cancellation = $cancellation
+            Operation = $operation; Automatic = $automatic; CancelRequested = $false; Disposed = $false
+        }
+    } catch {
+        $powerShell.Dispose()
+        $cancellation.Dispose()
+        throw
+    }
+}
+
+function Dispose-PanelUpdateWorker($worker) {
+    try { $worker.PowerShell.Dispose() }
+    finally { $worker.Cancellation.Dispose(); $worker.Disposed = $true }
+}
+
+function Remove-PanelUpdateDownload($download) {
+    if (-not $download) { return }
+    try {
+        $directory = [IO.Path]::GetFullPath([string]$download.Directory)
+        $path = [IO.Path]::GetFullPath([string]$download.Path)
+        $staging = [IO.Path]::GetFullPath((Join-Path $script:UpdateDirectory 'downloads'))
+        if ([IO.Path]::GetDirectoryName($directory) -ne $staging -or
+            [IO.Path]::GetDirectoryName($path) -ne $directory) { return }
+        # Only the staged installer and its now-empty unique directory are removed.
+        # Never recursively delete the update state, the profile, or another download.
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        [IO.Directory]::Delete($directory, $false)
+    } catch { }
+}
+
+function Start-PanelUpdateCheck([switch] $Automatic) {
+    $state = $script:UpdateState
+    if ($state.Closed -or $state.Worker -or $state.Installer -or $state.Phase -in 'Confirming', 'Installing', 'Completed') { return }
+    $now = [DateTime]::UtcNow
+    if ($Automatic -and -not (Test-GesherUpdateCheckDue -Preferences $state.Preferences -Now $now)) { return }
+    try {
+        $preferences = [PSCustomObject]@{
+            AutomaticChecks = [bool]$state.Preferences.AutomaticChecks
+            LastCheckUtc = $now.ToString('o')
+        }
+        # Record attempts before network work, including failed attempts. Manual
+        # checks intentionally bypass the daily automatic-check interval.
+        Save-GesherUpdatePreferences -StateDirectory $script:UpdateDirectory -Preferences $preferences
+        $state.Preferences = $preferences
+        Remove-PanelUpdateDownload $state.Download
+        $state.Download = $null; $state.Release = $null; $state.PromptPending = $false
+        $state.Worker = New-PanelUpdateWorker -operation Check -automatic ([bool]$Automatic)
+        $state.Phase = 'Checking'
+        Set-PanelUpdateStatus 'cp_update_checking'
+    } catch {
+        $state.Phase = 'Idle'
+        Set-PanelUpdateStatus 'cp_update_check_failed' @() $_.Exception.Message
+    }
+    Update-PanelUpdateView
+}
+
+function Start-PanelUpdateDownload {
+    $state = $script:UpdateState
+    if ($state.Closed -or $state.Worker -or $state.Installer -or $state.Phase -ne 'Available' -or -not $state.Release) { return }
+    try {
+        $state.Worker = New-PanelUpdateWorker -operation Download -release $state.Release
+        $state.Phase = 'Downloading'
+        Set-PanelUpdateStatus 'cp_update_downloading' @($state.Release.Version)
+    } catch {
+        Set-PanelUpdateStatus 'cp_update_download_failed' @() $_.Exception.Message
+    }
+    Update-PanelUpdateView
+}
+
+function Request-PanelUpdateCancellation {
+    $state = $script:UpdateState
+    if ($state.Closed -or $state.Installer -or $state.Phase -in 'Confirming', 'Installing') { return }
+    $state.PromptPending = $false
+    if ($state.Worker) {
+        $state.Worker.CancelRequested = $true
+        $state.Worker.Cancellation.Cancel()
+        $state.Phase = 'Cancelling'
+        Set-PanelUpdateStatus 'cp_update_cancelling'
+    } else {
+        Remove-PanelUpdateDownload $state.Download
+        $state.Download = $null
+        $state.Phase = if ($state.Release) { 'Available' } else { 'Idle' }
+        Set-PanelUpdateStatus 'cp_update_cancelled'
+    }
+    Update-PanelUpdateView
+}
+
+function Complete-PanelUpdateWorker([switch] $Wait) {
+    $state = $script:UpdateState
+    $worker = $state.Worker
+    if (-not $worker -or (-not $Wait -and -not $worker.Handle.IsCompleted)) { return }
+    $result = @(); $failure = $null
+    try {
+        $result = @($worker.PowerShell.EndInvoke($worker.Handle))
+        if ($worker.PowerShell.HadErrors) { $failure = [string]$worker.PowerShell.Streams.Error[0] }
+    } catch { $failure = $_.Exception.Message }
+    finally {
+        $cancelled = $worker.CancelRequested -or $worker.Cancellation.IsCancellationRequested
+        Dispose-PanelUpdateWorker $worker
+        $state.Worker = $null
+    }
+    if ($worker.Operation -eq 'Install') {
+        if (-not $failure -and $result.Count -eq 1 -and $result[0] -is [Diagnostics.Process]) {
+            # A process returned after cancellation has already been explicitly
+            # approved and started. Never kill setup or delete its running image.
+            $state.Installer = $result[0]
+            $state.Phase = 'Installing'
+            Set-PanelUpdateStatus 'cp_update_installing'
+        } else {
+            if ($state.Closed -or $cancelled) {
+                Remove-PanelUpdateDownload $state.Download
+                $state.Download = $null
+                $state.Phase = 'Available'
+            } else { $state.Phase = 'Ready' }
+            Set-PanelInstallationBusy $false
+            if ($cancelled) { Set-PanelUpdateStatus 'cp_update_cancelled' }
+            else { Set-PanelUpdateStatus 'cp_update_install_failed' @() ([string]$failure) }
+        }
+        Update-PanelUpdateView
+        return
+    }
+    if ($state.Closed -or $cancelled -or $failure -or $result.Count -ne 1) {
+        if ($worker.Operation -eq 'Download') {
+            foreach ($download in $result) { Remove-PanelUpdateDownload $download }
+        }
+        $state.Phase = if ($state.Release) { 'Available' } else { 'Idle' }
+        if ($cancelled -or $state.Closed) { Set-PanelUpdateStatus 'cp_update_cancelled' }
+        else {
+            $key = if ($worker.Operation -eq 'Check') { 'cp_update_check_failed' } else { 'cp_update_download_failed' }
+            Set-PanelUpdateStatus $key @() ([string]$failure)
+        }
+        Update-PanelUpdateView
+        return
+    }
+    if ($worker.Operation -eq 'Check') {
+        $check = $result[0]
+        $state.CurrentVersion = $check.CurrentVersion
+        $state.Release = $check.Release
+        switch ($check.Status) {
+            'Available' {
+                if (-not $state.Release) {
+                    $state.Phase = 'Idle'; Set-PanelUpdateStatus 'cp_update_check_failed'
+                } else {
+                    $state.Phase = 'Available'; Set-PanelUpdateStatus 'cp_update_available' @($state.Release.Version)
+                }
+            }
+            'Current' { $state.Phase = 'Current'; Set-PanelUpdateStatus 'cp_update_current' }
+            'NoRelease' { $state.Phase = 'Idle'; Set-PanelUpdateStatus 'cp_update_no_release' }
+            'UnknownVersion' { $state.Phase = 'Idle'; Set-PanelUpdateStatus 'cp_update_unknown_version' }
+            default { $state.Phase = 'Idle'; $state.Release = $null; Set-PanelUpdateStatus 'cp_update_check_failed' }
+        }
+    } else {
+        $download = $result[0]
+        if (-not $download.Path -or -not (Test-Path -LiteralPath $download.Path -PathType Leaf)) {
+            Remove-PanelUpdateDownload $download
+            $state.Phase = 'Available'; Set-PanelUpdateStatus 'cp_update_download_failed'
+        } else {
+            $state.Download = $download
+            $state.Phase = 'Ready'; $state.PromptPending = $true
+            Set-PanelUpdateStatus 'cp_update_download_ready' @($state.Release.Version)
+        }
+    }
+    Update-PanelUpdateView
+}
+
+function Set-PanelInstallationBusy([bool] $busy) {
+    $btnToggleDevice.IsEnabled = -not $busy
+    $servicesCards.IsEnabled = -not $busy
+    $applicationsSection.IsEnabled = -not $busy
+    $window.AllowDrop = -not $busy
+    if ($busy) { Set-Busy $true (Get-GesherText 'cp_update_installing') }
+    else { Set-Busy $false }
+}
+
+function Confirm-PanelUpdateInstallation {
+    return [System.Windows.MessageBox]::Show($window,
+        (Get-GesherText 'cp_update_confirm' @($script:UpdateState.Release.Version)),
+        (Get-GesherText 'cp_update_title'), [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Warning) -eq [System.Windows.MessageBoxResult]::Yes
+}
+
+function Start-PanelUpdateInstallation {
+    $state = $script:UpdateState
+    if ($state.Closed -or $script:IsBusy -or $state.Worker -or $state.Installer -or
+        $state.Phase -ne 'Ready' -or -not $state.Download) { return }
+    $state.PromptPending = $false
+    $state.Phase = 'Confirming'
+    Update-PanelUpdateView
+    try {
+        if (-not (Confirm-PanelUpdateInstallation) -or $state.Closed) {
+            $state.Phase = 'Ready'
+            Update-PanelUpdateView
+            return
+        }
+        $state.Phase = 'Installing'
+        Set-PanelInstallationBusy $true
+        Set-PanelUpdateStatus 'cp_update_installing'
+        # Revalidating a large downloaded installer can take time on slow disks.
+        # Validation and process creation run off the dispatcher as well.
+        $state.Worker = New-PanelUpdateWorker -operation Install -release $state.Download
+    } catch {
+        $state.Phase = 'Ready'
+        Set-PanelInstallationBusy $false
+        Set-PanelUpdateStatus 'cp_update_install_failed' @() $_.Exception.Message
+    }
+    Update-PanelUpdateView
+}
+
+function Complete-PanelUpdateInstallation {
+    $state = $script:UpdateState
+    if (-not $state.Installer -or -not $state.Installer.HasExited) { return }
+    $exitCode = $state.Installer.ExitCode
+    $state.Installer.Dispose()
+    $state.Installer = $null
+    try {
+        $state.CurrentVersion = Get-GesherInstalledVersion -InstallDirectory $here
+        if ($exitCode -eq 0 -and $state.CurrentVersion -ceq $state.Release.Version) {
+            $state.Phase = 'Completed'
+            Set-PanelUpdateStatus 'cp_update_installed_success' @($state.CurrentVersion)
+        } elseif ($exitCode -in 2, 5) {
+            $state.Phase = 'Available'
+            Set-PanelUpdateStatus 'cp_update_setup_cancelled'
+        } elseif ($exitCode -eq 0) {
+            $state.Phase = 'Available'
+            Set-PanelUpdateStatus 'cp_update_unverified'
+        } else {
+            $state.Phase = 'Available'
+            Set-PanelUpdateStatus 'cp_update_install_failed' @() (Get-GesherText 'cp_update_exit_code' @($exitCode))
+        }
+    } catch {
+        $state.Phase = 'Available'
+        Set-PanelUpdateStatus 'cp_update_unverified' @() $_.Exception.Message
+    } finally {
+        Remove-PanelUpdateDownload $state.Download
+        $state.Download = $null
+        Set-PanelInstallationBusy $false
+        try { Refresh-Dashboard } catch { }
+    }
+    Update-PanelUpdateView
+}
+
+function Invoke-PanelUpdateTick {
+    $state = $script:UpdateState
+    if ($state.Closed) { return }
+    Complete-PanelUpdateWorker
+    Complete-PanelUpdateInstallation
+    # File pickers and existing confirmation dialogs run nested dispatcher loops
+    # before some dashboard actions take IsBusy. Their inactive owner must not
+    # start setup; it may resume an application operation after the dialog closes.
+    if ($state.PromptPending -and -not $script:IsBusy -and $window.IsActive) { Start-PanelUpdateInstallation }
+}
+
+function Set-PanelAutomaticUpdateChecks([bool] $enabled) {
+    $state = $script:UpdateState
+    if ($state.Closed -or $state.ChangingPreference) { return }
+    try {
+        $preferences = [PSCustomObject]@{
+            AutomaticChecks = $enabled; LastCheckUtc = $state.Preferences.LastCheckUtc
+        }
+        Save-GesherUpdatePreferences -StateDirectory $script:UpdateDirectory -Preferences $preferences
+        $state.Preferences = $preferences
+        if (-not $enabled -and $state.Worker -and $state.Worker.Automatic) { Request-PanelUpdateCancellation }
+        elseif ($enabled) { Start-PanelUpdateCheck -Automatic }
+    } catch { Set-PanelUpdateStatus 'cp_update_preferences_failed' @() $_.Exception.Message }
+    Update-PanelUpdateView
+}
+
+function Close-PanelUpdates {
+    $state = $script:UpdateState
+    if ($state.Closed) { return }
+    $state.Closed = $true
+    $state.PromptPending = $false
+    if ($state.Worker) {
+        $state.Worker.CancelRequested = $true
+        $state.Worker.Cancellation.Cancel()
+    }
+    if (-not $state.Installer -and -not $state.Worker) {
+        Remove-PanelUpdateDownload $state.Download
+        $state.Download = $null
+    }
+}
+
+$script:UpdateState = New-PanelUpdateState (Get-GesherInstalledVersion -InstallDirectory $here) `
+    (Get-GesherUpdatePreferences -StateDirectory $script:UpdateDirectory)
+Update-PanelUpdateView
+$btnCheckUpdate.Add_Click({ Start-PanelUpdateCheck })
+$btnInstallUpdate.Add_Click({
+    if ($script:UpdateState.Download) { Start-PanelUpdateInstallation }
+    else { Start-PanelUpdateDownload }
+})
+$btnCancelUpdate.Add_Click({ Request-PanelUpdateCancellation })
+$automaticUpdateChecks.Add_Checked({ Set-PanelAutomaticUpdateChecks $true })
+$automaticUpdateChecks.Add_Unchecked({ Set-PanelAutomaticUpdateChecks $false })
+$btnUpdateNotes.Add_Click({
+    try {
+        if ($script:UpdateState.Release) { Start-Process -FilePath $script:UpdateState.Release.Url }
+    } catch { Set-PanelUpdateStatus 'cp_update_notes_failed' @() $_.Exception.Message; Update-PanelUpdateView }
+})
+$btnReopenPanel.Add_Click({
+    try {
+        Start-Process -FilePath (Join-Path $here 'gesher-launch.exe') -ArgumentList 'control-panel' -WindowStyle Hidden
+        $window.Close()
+    } catch { Set-PanelUpdateStatus 'cp_update_reopen_failed' @() $_.Exception.Message; Update-PanelUpdateView }
+})
+$window.Add_SizeChanged({ Update-PanelWindowLayout })
+$window.Add_ContentRendered({ Update-PanelWindowLayout; Start-PanelUpdateCheck -Automatic })
+
 # Toggle device handler
 $btnToggleDevice.Add_Click({
     Set-Busy $true
@@ -679,16 +1117,40 @@ $script:LiveTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:LiveTimer.Interval = [TimeSpan]::FromMilliseconds($script:LiveRefreshIntervalMs)
 $script:LiveTimer.Add_Tick({
     try { Invoke-LiveRefreshTick } catch { }
+    try { Invoke-PanelUpdateTick } catch {
+        Set-PanelUpdateStatus 'cp_update_check_failed' @() $_.Exception.Message
+        Update-PanelUpdateView
+    }
 })
 $window.Add_Activated({
     try { if (-not $script:IsBusy) { Refresh-Dashboard } } catch { }
 })
+$window.Add_Closing({
+    param($sender, $event)
+    # Finish or cancel the separate setup wizard before closing its progress view.
+    # Checking and downloading can always be cancelled by closing this window.
+    Complete-PanelUpdateInstallation
+    if ($script:UpdateState.Installer -or $script:UpdateState.Phase -eq 'Installing') {
+        $event.Cancel = $true
+        Set-PanelUpdateStatus 'cp_update_finish_setup'
+        Update-PanelUpdateView
+    }
+})
 $window.Add_Closed({
+    Close-PanelUpdates
     $script:LiveTimer.Stop()
 })
 
 # Initial load
 Refresh-Dashboard
 $script:LiveTimer.Start()
-$window.ShowDialog() | Out-Null
-$script:LiveTimer.Stop()
+try { $window.ShowDialog() | Out-Null }
+finally {
+    $script:LiveTimer.Stop()
+    Close-PanelUpdates
+    # The window is already closed. Drain the cooperatively cancelled, bounded
+    # request here so the worker can delete partial files before its runspace ends.
+    # EndInvoke is never allowed to wait on the live WPF dispatcher.
+    Complete-PanelUpdateWorker -Wait
+    if ($script:UpdateState.Installer) { $script:UpdateState.Installer.Dispose() }
+}

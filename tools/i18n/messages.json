@@ -552,6 +552,142 @@
     "launch_not_identified": {
       "en": "the system server did not identify the launched process",
       "he": "שרת המערכת לא זיהה את התהליך שהופעל"
+    },
+    "cp_update_title": {
+      "en": "Gesher updates",
+      "he": "עדכוני גשר"
+    },
+    "cp_update_automatic": {
+      "en": "Check for updates automatically",
+      "he": "בדיקת עדכונים אוטומטית"
+    },
+    "cp_update_automatic_hint": {
+      "en": "Check when the control center opens, at most once a day. Installation requires your approval.",
+      "he": "בודק בעת פתיחת לוח הבקרה, לכל היותר פעם ביום. התקנה דורשת את אישורך."
+    },
+    "cp_update_check": {
+      "en": "Check for updates",
+      "he": "בדיקת עדכונים"
+    },
+    "cp_update_download_install": {
+      "en": "Download and install",
+      "he": "הורדה והתקנה"
+    },
+    "cp_update_install": {
+      "en": "Install update",
+      "he": "התקנת העדכון"
+    },
+    "cp_update_cancel": {
+      "en": "Cancel",
+      "he": "ביטול"
+    },
+    "cp_update_notes": {
+      "en": "Release notes",
+      "he": "מה חדש בגרסה"
+    },
+    "cp_update_reopen": {
+      "en": "Reopen control center",
+      "he": "פתיחת לוח הבקרה מחדש"
+    },
+    "cp_update_unknown": {
+      "en": "Unknown",
+      "he": "לא ידועה"
+    },
+    "cp_update_installed": {
+      "en": "Installed version: \u2068{0}\u2069",
+      "he": "גרסה מותקנת: \u2068{0}\u2069"
+    },
+    "cp_update_ready": {
+      "en": "Updates come from stable GitHub releases.",
+      "he": "העדכונים מגיעים מהגרסאות היציבות שפורסמו ב־GitHub."
+    },
+    "cp_update_checking": {
+      "en": "Checking for updates…",
+      "he": "בודק עדכונים…"
+    },
+    "cp_update_check_failed": {
+      "en": "Could not check for updates. Check your connection and try again.",
+      "he": "לא ניתן לבדוק עדכונים. בדוק את החיבור ונסה שוב."
+    },
+    "cp_update_available": {
+      "en": "Version \u2068{0}\u2069 is available.",
+      "he": "גרסה \u2068{0}\u2069 זמינה לעדכון."
+    },
+    "cp_update_current": {
+      "en": "Gesher is up to date.",
+      "he": "גשר מעודכן."
+    },
+    "cp_update_no_release": {
+      "en": "There is no published stable release yet.",
+      "he": "עדיין לא פורסמה גרסה יציבה."
+    },
+    "cp_update_unknown_version": {
+      "en": "This installation has no release version. Install a published release to enable updates.",
+      "he": "לא נמצאה גרסת הפצה להתקנה זו. התקן גרסה שפורסמה כדי לאפשר עדכונים."
+    },
+    "cp_update_downloading": {
+      "en": "Downloading version \u2068{0}\u2069…",
+      "he": "מוריד את גרסה \u2068{0}\u2069…"
+    },
+    "cp_update_download_failed": {
+      "en": "The update could not be downloaded or verified. Please try again.",
+      "he": "לא ניתן להוריד או לאמת את העדכון. נסה שוב."
+    },
+    "cp_update_download_ready": {
+      "en": "Version \u2068{0}\u2069 is ready to install.",
+      "he": "גרסה \u2068{0}\u2069 מוכנה להתקנה."
+    },
+    "cp_update_cancelling": {
+      "en": "Canceling…",
+      "he": "מבטל…"
+    },
+    "cp_update_cancelled": {
+      "en": "Update operation canceled.",
+      "he": "פעולת העדכון בוטלה."
+    },
+    "cp_update_confirm": {
+      "en": "Install Gesher \u2068{0}\u2069 now?\nSetup will close running Gesher applications. Installed apps and their data will be kept.",
+      "he": "להתקין עכשיו את גשר \u2068{0}\u2069?\nההתקנה תסגור יישומי גשר פעילים. היישומים המותקנים והנתונים שלהם יישמרו."
+    },
+    "cp_update_installing": {
+      "en": "Preparing or installing the update… Complete the setup window when it opens.",
+      "he": "מכין ומתקין את העדכון… יש להשלים את הפעולות בחלון ההתקנה."
+    },
+    "cp_update_install_failed": {
+      "en": "Setup did not finish successfully. You can retry the update.",
+      "he": "ההתקנה לא הושלמה בהצלחה. ניתן לנסות שוב."
+    },
+    "cp_update_setup_cancelled": {
+      "en": "Setup was canceled. You can retry the update.",
+      "he": "ההתקנה בוטלה. ניתן לנסות שוב."
+    },
+    "cp_update_unverified": {
+      "en": "Setup finished, but the installed version could not be verified. Reopen the control center and check again.",
+      "he": "ההתקנה הסתיימה, אך לא ניתן לאמת את הגרסה המותקנת. פתח מחדש את לוח הבקרה ובדוק שוב."
+    },
+    "cp_update_installed_success": {
+      "en": "Version \u2068{0}\u2069 is installed. Reopen the control center to finish.",
+      "he": "גרסה \u2068{0}\u2069 מותקנת. פתח מחדש את לוח הבקרה לסיום."
+    },
+    "cp_update_exit_code": {
+      "en": "Setup exit code: {0}",
+      "he": "קוד היציאה של תוכנית ההתקנה: {0}"
+    },
+    "cp_update_finish_setup": {
+      "en": "Finish or cancel setup before closing the control center.",
+      "he": "יש להשלים או לבטל את ההתקנה לפני סגירת לוח הבקרה."
+    },
+    "cp_update_preferences_failed": {
+      "en": "Could not save the update preference. The previous setting remains active.",
+      "he": "לא ניתן לשמור את הגדרת העדכונים. ההגדרה הקודמת נשארת בתוקף."
+    },
+    "cp_update_notes_failed": {
+      "en": "Could not open the release notes.",
+      "he": "לא ניתן לפתוח את פירוט השינויים בגרסה."
+    },
+    "cp_update_reopen_failed": {
+      "en": "The update is installed. Close and reopen the control center from the Start menu.",
+      "he": "העדכון מותקן. סגור את לוח הבקרה ופתח אותו מחדש מתפריט התחל."
     }
   }
 }
