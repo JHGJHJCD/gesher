@@ -195,13 +195,14 @@ gate. The existing media API/AAudio I/O regression suite remains unchanged in
 behavior and preserves all 266 assertions.
 
 Build `tests/native/aaudio_builder_contract_test.c` with the real NDK for each
-Windows guest ABI, for example:
+Windows guest ABI. The exercised declarations are available at API29 in the
+CI-pinned NDK r27c; the behavioral reference remains Android16r4:
 
 ```sh
-"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android36-clang" \
+"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android29-clang" \
   -std=c11 -O2 -Wall -Wextra -Werror \
   tests/native/aaudio_builder_contract_test.c -laaudio -o aaudio-builder-x64
-"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang" \
+"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" \
   -std=c11 -O2 -Wall -Wextra -Werror \
   tests/native/aaudio_builder_contract_test.c -laaudio -o aaudio-builder-arm64
 ```

@@ -60,6 +60,9 @@ jobs:
           cc="$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${ANDROID_API}-clang"
           mkdir -p dist-native
           bash tests/native/build-lookup-graph.sh "$cc" dist-native
+          "$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android29-clang" \
+            -std=c11 -O2 -Wall -Wextra -Werror tests/native/aaudio_builder_contract_test.c \
+            -laaudio -o dist-native/aaudio_builder_x64
           "$cc" -shared -fPIC -O2 -fno-stack-protector -Wall -Wextra -Werror \
             -DGESHER_MADVISE_WINDOWS -Wl,-soname,libmadvise_contract.so \
             -o dist-native/madvise_contract.so tests/native/madvise_contract.c

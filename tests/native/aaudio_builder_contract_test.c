@@ -1,6 +1,6 @@
 /* Copyright (C) 2026 The Gesher Authors; SPDX-License-Identifier: Apache-2.0 */
 /* Public NDK fixture for real gesher-exec on Windows, native or translated ELF.
- * Build for Android API 36 with -laaudio. Use GESHER_AUDIO=null for a silent,
+ * Build with the pinned NDK's API 29 headers and -laaudio. Use GESHER_AUDIO=null for a silent,
  * paced backend. Input device/permission coverage belongs to recordapp/media3.
  */
 #include <aaudio/AAudio.h>

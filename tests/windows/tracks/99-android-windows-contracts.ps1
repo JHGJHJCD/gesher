@@ -1,12 +1,34 @@
 # Runtime contracts added by the November 14 Android/Windows audit.
 # Track 50 supplies bounded RunTimed; track 94 supplies the framework boot path.
-foreach ($serviceFixture in @('RunningTaskSnapshotTest', 'TextServicesContractTest')) {
+foreach ($serviceFixture in @('RunningTaskSnapshotTest', 'TextServicesContractTest', 'MediaRouterContractTest')) {
   $serviceContractOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' + $serviceFixture) 90
   $serviceContractCode = $LASTEXITCODE
   Check "services: $serviceFixture public manager and generated Binder contracts" {
     $global:LASTEXITCODE = $serviceContractCode
     $serviceContractOut
   } @("$serviceFixture all passed:")
+}
+
+. "$PSScriptRoot/../media-text-contracts.ps1"
+Check 'services: remote media/text managers, ordinary identity and Binder death' {
+  Test-MediaTextTransport $Dir $dvmFixes $root
+} @('MediaRouterContractTest all passed:', 'MediaTextRemoteTest all passed:',
+    'MediaTextRemoteTest death cleanup passed')
+
+$aaudioSaved = [Environment]::GetEnvironmentVariable('GESHER_AUDIO', 'Process')
+try {
+  $env:GESHER_AUDIO = 'null'
+  foreach ($aaudioGuest in @('aaudio_builder_x64', 'aaudio_builder_arm64')) {
+    $aaudioOut = RunTimed "$Dir/gesher-exec.exe" @('--elf', (Resolve-Path "$Dir/$aaudioGuest").Path, $aaudioGuest) 90
+    $aaudioCode = $LASTEXITCODE
+    Check "media: $aaudioGuest actual negotiation, callbacks and clock errors" {
+      $global:LASTEXITCODE = $aaudioCode
+      $aaudioOut
+    } @('AAudio builder guest contracts:', ' checks, 0 failures')
+  }
+} finally {
+  if ($null -eq $aaudioSaved) { Remove-Item Env:GESHER_AUDIO -ErrorAction SilentlyContinue }
+  else { [Environment]::SetEnvironmentVariable('GESHER_AUDIO', $aaudioSaved, 'Process') }
 }
 
 $effectContractOut = FixesRun ($dvmFixes + 'gesher.services.AudioEffectAvailabilityTest') 90
