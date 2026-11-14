@@ -59,6 +59,7 @@ jobs:
           set -euo pipefail
           cc="$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${ANDROID_API}-clang"
           mkdir -p dist-native
+          bash tests/native/build-lookup-graph.sh "$cc" dist-native
           # Step 1: a self-contained library, no libc, no TLS, no stack guard.
           "$cc" -shared -fPIC -O2 -fno-stack-protector -nostdlib \
             -Wl,-soname,libtrivial.so -Wl,--hash-style=both \

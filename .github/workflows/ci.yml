@@ -76,6 +76,8 @@ jobs:
           python3 tools/test_statvfs_contracts.py --sanitize
           python3 tools/test_sendfile_contracts.py --sanitize
           python3 tools/test_elf_finalizers.py --sanitize
+          python3 tools/test_elf_lookup_contracts.py --sanitize
+          python3 tools/test_elf_lookup_contracts.py --linux-reference
           python3 tools/test_media_api_contracts.py --sanitize
 
       - name: Timer, DNS and media lifetime contracts

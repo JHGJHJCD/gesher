@@ -183,6 +183,7 @@ jobs:
           "$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objcopy" \
             -O binary --only-section=.text /tmp/arm64-fpcr-code.o dist-arm64/arm64-fpcr-code.bin
           # Step 1 (guest): a self-contained .so, no libc/TLS/stack guard.
+          bash tests/native/build-lookup-graph.sh "$cc" dist-arm64 _arm64
           "$cc" -shared -fPIC -O2 -fno-stack-protector -nostdlib \
             -Wl,-soname,libtrivial.so -Wl,--hash-style=both \
             -o dist-arm64/trivial_arm64.so tests/native/trivial.c
