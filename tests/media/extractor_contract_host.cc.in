@@ -8,6 +8,11 @@
 struct JNIEnv { std::string exception; };
 using jobject = void*;
 void jniThrow(JNIEnv* env, const char* type, const char*) { env->exception = type; }
+bool CheckException(JNIEnv* env, const char*) {
+  const bool pending = !env->exception.empty();
+  env->exception.clear();
+  return pending;
+}
 #define MEDIA_LOGE(...) ((void)0)
 
 int sources_alive = 0;
