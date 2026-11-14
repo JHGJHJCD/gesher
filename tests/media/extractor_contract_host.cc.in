@@ -25,7 +25,9 @@ struct Extractor {
     return source->readable ? std::make_unique<Extractor>(std::move(source)) : nullptr;
   }
 };
+template <class T> using ReceiverLease = T*;  // Setup-only seam; real leases have a separate JNI test.
 struct JniExtractor {
+  bool opening = false;
   std::shared_ptr<DataSource> source;
   std::unique_ptr<Extractor> extractor;
   std::vector<int> selected;
