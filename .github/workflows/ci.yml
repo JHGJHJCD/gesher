@@ -71,6 +71,7 @@ jobs:
         run: |
           python3 tools/test_bionic_key_contracts.py --sanitize
           python3 tools/test_bionic_wait_contracts.py --sanitize
+          python3 tools/test_libcore_process_logging.py --sanitize
           python3 tools/test_bionic_dns_contracts.py --sanitize
           python3 tools/test_ordinary_os_contracts.py --sanitize
           python3 tools/test_statvfs_contracts.py --sanitize
