@@ -166,6 +166,8 @@ public final class WebStorageOriginContractTest implements WebView2Host.Client {
         storage.deleteOrigin(null);
         storage.deleteOrigin("");
         storage.deleteOrigin(FIRST);
+        // IndexedDB's inspector queries require an inspected document at this origin.
+        navigate(FIRST);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(15);
         while (hasDatabase(FIRST) && System.nanoTime() < deadline) Thread.sleep(25);
         check(!hasDatabase(FIRST), "target origin's IndexedDB was not removed");
