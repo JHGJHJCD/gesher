@@ -55,7 +55,10 @@ function New-HttpFixture {
     [PSCustomObject]@{ Handler = $handler; Client = [Net.Http.HttpClient]::new($handler) }
 }
 function Add-HttpResponse($Fixture, [int] $Status = 200, [string] $Location = '') {
-    $response = [Net.Http.HttpResponseMessage]::new([Net.HttpStatusCode] $Status)
+    # .NET Framework lacks named enum members for valid HTTP codes such as 429
+    # and 308. Preserve those numeric responses without PowerShell's named-value cast.
+    $code = [Enum]::ToObject([Net.HttpStatusCode], [int] $Status)
+    $response = [Net.Http.HttpResponseMessage]::new($code)
     if ($Location) { $response.Headers.Location = [uri] $Location }
     $Fixture.Handler.Responses.Enqueue($response)
 }
