@@ -102,12 +102,19 @@ inline void Encode(std::wstring* path) { EncodeFrom(path, RootLength(*path)); }
 // One name (no root): every reserved character is encoded.
 inline void EncodeName(std::wstring* name) { EncodeFrom(name, 0); }
 
-// The names as Linux sees them again.
-inline void Decode(std::wstring* path) {
-  for (wchar_t& c : *path) {
+// Decodes encoded characters from `from` on.
+inline void DecodeFrom(std::wstring* path, size_t from) {
+  for (size_t i = from; i < path->size(); ++i) {
+    wchar_t& c = (*path)[i];
     if (Encoded(c)) c = static_cast<wchar_t>(c - kBase);
   }
 }
+
+// A name or relative symlink target: every encoded character is decoded.
+inline void Decode(std::wstring* path) { DecodeFrom(path, 0); }
+
+// A native Windows path: keep its root before converting namespaces.
+inline void DecodePath(std::wstring* path) { DecodeFrom(path, RootLength(*path)); }
 
 inline std::wstring Decoded(std::wstring_view path) {
   std::wstring out(path);

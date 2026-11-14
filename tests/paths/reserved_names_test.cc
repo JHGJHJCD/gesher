@@ -1,5 +1,6 @@
 // Encoding of the file-name characters Windows reserves (gesher/reserved_names.h).
 #include "../../compat/posix/include/gesher/reserved_names.h"
+#include "../../compat/posix/include/gesher/unc_paths.h"
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -87,6 +88,33 @@ int main() {
     // A private-use character that is not an encoding is left alone.
     Check(Decoded(L"a\xF000" L"b\xF020\xF061\xF0FF") == L"a\xF000" L"b\xF020\xF061\xF0FF",
           "only encoded reserved characters decode");
+
+    // Native UNC roots may themselves contain private-use characters. They
+    // stay literal while a name below the share is decoded and encoded again.
+    const std::wstring native_unc =
+        L"\\\\server\xF03F" L"root\\share\xF03A" L"root\\dir\xF02A" L"name\\file\xF03A" L"name";
+    const std::wstring guest_unc =
+        L"/mnt/unc/server\xF03F" L"root/share\xF03A" L"root/dir*name/file:name";
+    const std::vector<std::wstring> native_roots = {
+        native_unc,
+        L"\\\\?\\UNC\\" + native_unc.substr(2),
+        L"\\\\?\\unc\\" + native_unc.substr(2),
+    };
+    for (const std::wstring& native : native_roots) {
+      std::wstring decoded = native;
+      gesher::reserved_names::DecodePath(&decoded);
+      Check(decoded.substr(0, RootLength(native)) == native.substr(0, RootLength(native)),
+            "private-use characters in a native UNC root stay literal");
+      std::wstring guest;
+      Check(gesher::unc_paths::FromWindows(decoded, &guest),
+            "decoded native UNC path remains valid");
+      Check(guest == guest_unc, "UNC root kept while names below it decode");
+      std::wstring restored;
+      Check(gesher::unc_paths::ToWindows(guest, &restored) == gesher::unc_paths::Match::kMapped,
+            "decoded UNC guest path is accepted on return");
+      gesher::reserved_names::Encode(&restored);
+      Check(restored == native_unc, "UNC round trip preserves root and stored names");
+    }
   } catch (const std::exception& e) {
     std::fprintf(stderr, "reserved names: FAILED after %d checks: %s\n", checks, e.what());
     return 1;

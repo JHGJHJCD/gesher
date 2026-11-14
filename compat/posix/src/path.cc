@@ -333,6 +333,7 @@ static int SystemFontPath(const char* path, std::wstring* windows) {
   if (unc == unc_paths::Match::kInvalid) return -1;
   if (unc == unc_paths::Match::kUnrelated && !DrivePath(target.c_str(), windows))
     *windows = Widen(target.c_str());
+  reserved_names::Encode(windows);
   Lengthen(windows);
   return 1;
 }
@@ -407,12 +408,11 @@ int CurrentDrive() {
 }
 
 std::string LinuxPath(const wchar_t* windows) {
-  std::wstring unc;
-  if (unc_paths::FromWindows(windows, &unc)) {
-    reserved_names::Decode(&unc);
-    return Narrow(unc.c_str());
-  }
+  // Decode only names under the native root, before UNC namespace conversion.
   std::wstring path = windows;
+  reserved_names::DecodePath(&path);
+  std::wstring unc;
+  if (unc_paths::FromWindows(path, &unc)) return Narrow(unc.c_str());
   if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) {
     path = L"\\\\" + path.substr(8);
   } else if (path.rfind(L"\\\\?\\", 0) == 0) {
@@ -421,7 +421,6 @@ std::string LinuxPath(const wchar_t* windows) {
   for (wchar_t& c : path) {
     if (c == L'\\') c = L'/';
   }
-  reserved_names::Decode(&path);
   int drive = CurrentDrive();
   if (path.size() >= 2 && path[1] == L':' && iswalpha(path[0]) && (path.size() == 2 || path[2] == L'/')) {
     if (drive > 0 && towupper(path[0]) == static_cast<wchar_t>(L'A' + drive - 1)) {

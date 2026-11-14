@@ -164,7 +164,7 @@ public final class PendingIntentContractTest {
             set(am, "mServices", make(type("ActiveServices"), new Class<?>[]{atmType, pmType,
                     type("NotificationManagerService")}, atm, pm, null));
             Object providers = UNSAFE.allocateInstance(type("ContentProviders"));
-            for (String map : new String[]{"mPublished", "mPublishedBy", "mClients"}) set(providers, map, new LinkedHashMap<>());
+            for (String map : new String[]{"mPublished", "mPublishedBy", "mClients", "mConnections"}) set(providers, map, new LinkedHashMap<>());
             set(am, "mProviders", providers);
             broadcasts = make(type("BroadcastController"), new Class<?>[]{atmType, pmType, long.class}, atm, pm, timeout);
             set(am, "mBroadcasts", broadcasts);

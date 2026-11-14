@@ -127,6 +127,52 @@ public final class ActivityManagerService extends IActivityManager.Default {
         return mServices.hasForegroundService(app);
     }
 
+    /**
+     * Whether the process runs for good, never reaped when idle: microG's main process
+     * (its accounts, location, the chimera provider every client asks for) and its
+     * {@code :persistent} process (Cloud Messaging's MCS connection, check-in). Its other
+     * processes ({@code com.google.android.gms.unstable}: DroidGuard; {@code :ui}) start on
+     * demand like any app's.
+     */
+    boolean isPersistent(ActivityTaskManagerService.ProcessRecord app) {
+        return app != null && GmsPackageSupport.PACKAGE_GMS.equals(app.packageName)
+                && (GmsPackageSupport.PACKAGE_GMS.equals(app.processName)
+                        || (GmsPackageSupport.PACKAGE_GMS + ":persistent").equals(app.processName));
+    }
+
+    /** Commit provider retirement only if no acquisition or newer use won the race. */
+    boolean retireUnusedProviders(ActivityTaskManagerService.ProcessRecord app, long expectedActive) {
+        return mProviders.retireUnused(app, expectedActive);
+    }
+
+    /**
+     * Freeze service and broadcast admission before ATM/provider retirement. Both
+     * controllers already enter ATM; neither calls the other while holding its lock.
+     * No application callback runs here. New service clients cannot attach to the
+     * exiting process's old published Binder after this commit.
+     */
+    boolean commitIdleReap(ActivityTaskManagerService.ProcessRecord app, long now, long idleMs) {
+        synchronized (mServices) {
+            if (mServices.inUse(app)) return false;
+            synchronized (mBroadcasts) {
+                if (mBroadcasts.hasReceivers(app) || !mAtm.commitIdleReap(app, now, idleMs)) return false;
+                mServices.retireCachedServices(app);
+                return true;
+            }
+        }
+    }
+
+    /**
+     * Whether something uses the process now, for the idle reaper
+     * ({@link ActivityTaskManagerService#reapIdleProcesses}): a service in use (started,
+     * bound by another process or the system), a broadcast for it, or a provider reference
+     * a client holds. Unlike {@link #keepsAlive}, a binding from the process itself and a
+     * client that released its providers do not count.
+     */
+    boolean inUse(ActivityTaskManagerService.ProcessRecord app) {
+        return mServices.inUse(app) || mBroadcasts.hasReceivers(app) || mProviders.hasActiveClients(app);
+    }
+
     @Override
     public List<android.app.ActivityManager.RunningAppProcessInfo> getRunningAppProcesses() {
         List<android.app.ActivityManager.RunningAppProcessInfo> result =
@@ -161,7 +207,7 @@ public final class ActivityManagerService extends IActivityManager.Default {
                 throw new SecurityException("Provider request requires its own application thread");
             }
         }
-        return mProviders.getContentProvider(app, callingPackage, name);
+        return mProviders.getContentProvider(app, callingPackage, name, stable, true);
     }
 
     @Override
@@ -269,6 +315,7 @@ public final class ActivityManagerService extends IActivityManager.Default {
 
     @Override
     public void removeContentProvider(IBinder connection, boolean stable) {
+        mProviders.removeContentProvider(connection, stable);
     }
 
     // --- PendingIntents (PendingIntents) ---------------------------------------------------

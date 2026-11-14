@@ -32,10 +32,13 @@ the disk for Linux code turns back:
 
 | Direction | Where |
 |---|---|
-| Linux to Windows (encode) | `MapPath` (every path call), a relative `symlink` target, the bionic shim's `unlink`/`rmdir`, the exec tools' `WindowsPath` |
+| Linux to Windows (encode) | `MapPath` (every path call, including configured/install font roots), a relative `symlink` target, the bionic shim's `unlink`/`rmdir`, the exec tools' `WindowsPath` |
 | Windows to Linux (decode) | `LinuxPath` (`getcwd`, `realpath`, `readlink` of absolute targets and of `/proc/self/fd`), `readdir`, `readlink` of relative targets, inotify event names, the exec shell's globbing and `ls` |
 
-The Windows root of a path keeps its characters. That means a drive `C:`, the
+The Windows root of a path keeps its characters in both directions. Native
+paths decode only below that root, before conversion to the `/mnt/unc`
+namespace, so private-use characters in a server or share remain literal.
+That means a drive `C:`, the
 `\\?\` and `\\.\` prefixes, and a UNC server and share, so the Windows paths
 that gesher-base also accepts (ADR 0010) mean what they meant. A drive is a
 letter and a colon before a separator or the end. `x:cfg` is a Linux name in
@@ -48,9 +51,10 @@ unchanged, and so are a trailing dot or space and the device names (`CON`,
 ## Consequences
 - Firebase's settings files and Play Store's per-process directories are
   created, listed, renamed and removed under the names the app gave.
-- A name with U+F000+`c` in it already (only possible for a name written by
-  Windows software) reads as the reserved character. Cygwin has the same
-  ambiguity.
+- A literal U+F000+`c` in an ordinary name, supplied by either a Linux caller
+  or Windows software, aliases the corresponding reserved character. This
+  mapping cannot represent those two names separately. Windows root
+  components are preserved and do not undergo that decoding.
 - Gesher's Java code that builds Windows paths itself (`Zygote.windowsPath`,
   for icons, APKs, logs and caches, and a WebView file upload) does not encode
   them. None of those names holds a reserved character today.
@@ -66,8 +70,16 @@ unchanged, and so are a trailing dot or space and the device names (`CON`,
 
 ## Tests
 `tests/paths/reserved_names_test.cc` (CI, portable): every reserved character
-and only those, round trips, the Windows roots, and idempotence.
+and only those, round trips, the Windows roots, idempotence, and private-use
+UNC server/share names combined with encoded leaf names.
 `probes/posix/posix_probe.cc` "ReservedNames" (Windows): Firebase's and Play
 Store's names through `mkdir`, `fopen`, `stat`, `readdir`, `rename`, `O_EXCL`,
 `symlink`/`readlink`, `chdir`/`getcwd` and inotify. It also checks that the
-disk holds the encoded name and no data stream.
+disk holds the encoded name and no data stream. Dirfd-relative single-letter
+colon names exercise `openat`, `fstatat`, `renameat`, `mkdirat`, `symlinkat`,
+`readlinkat` and `unlinkat`. A configured font root under an encoded directory
+must work through both `/system/etc/fonts.xml` and `/system/fonts`.
+
+The mandatory exec shell smoke suite checks quoted literal `?` and `*` next
+to an active wildcard, a quoted directory component before an active child
+pattern, and a wildcard matching a filename that itself contains `*`.
