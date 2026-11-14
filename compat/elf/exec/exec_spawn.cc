@@ -2,6 +2,8 @@
 
 #include "exec_spawn.h"
 
+#include <gesher/reserved_names.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -20,7 +22,7 @@ bool IsSlash(char c) { return c == '/' || c == '\\'; }
 
 bool IsAbsolute(const std::string& p) {
   return (!p.empty() && IsSlash(p[0])) ||
-         (p.size() >= 2 && p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')));
+         gesher::reserved_names::DriveRoot(p.c_str());
 }
 
 bool EqualsIgnoreCase(const std::wstring& a, const wchar_t* b) { return _wcsicmp(a.c_str(), b) == 0; }
@@ -307,6 +309,7 @@ std::wstring WindowsPath(const std::string& path, const std::string& dir) {
   std::string full = path;
   if (!IsAbsolute(path) && !dir.empty()) full = dir + "/" + path;
   std::wstring w = Widen(full);
+  gesher::reserved_names::Encode(&w);  // names stored as gesher-base stores them
   std::replace(w.begin(), w.end(), L'/', L'\\');
   DWORD n = GetFullPathNameW(w.c_str(), 0, nullptr, nullptr);
   if (n == 0) return w;

@@ -77,7 +77,9 @@ import java.nio.channels.OverlappingFileLockException;
  *    its subclass from linking even on a device without Bluetooth.
  *  - android.os.Debug's Binder counters (compat/framework/android_runtime.cc):
  *    OsmAnd's diagnostic worker died with UnsatisfiedLinkError; real AOSP
- *    Binder object counts are registered and absent transaction totals stay -1.
+ *    Binder object counts are registered and absent transaction totals stay -1;
+ *    then getMemoryInfo (its MemoryLog sample) died the same way: the Debug
+ *    memory accounting natives report the Windows working set.
  *  - libphonenumber (com.android.i18n.phonenumbers, the ext boot jar's; bundled into
  *    framework.jar with its metadata, tools/framework/plan.py's EXT_BUNDLED): Gmail's
  *    compose window died on a stackless NoClassDefFoundError for
@@ -618,6 +620,176 @@ public final class FrameworkFixesTest {
                 + "and Parcel release; proxy/death counts resolve, transaction totals unavailable");
     }
 
+    // MemoryInfo is extensible. Android's native field IDs belong to the base
+    // class even when an application declares unrelated fields with the same names.
+    private static final class ShadowedMemoryInfo extends android.os.Debug.MemoryInfo {
+        public int dalvikPss = 731, nativePss = 732, otherPss = 733;
+        public int[] otherStats = {734, 735};
+    }
+
+    private static void debugMemoryArrayBounds(int pid) {
+        final long sentinel = -731;
+        // AOSP writes only the available first three/four outputs. Empty arrays
+        // are valid, and callers may keep their own data after those slots.
+        for (int length = 0; length <= 5; length++) {
+            long[] usage = new long[length];
+            long[] graphics = new long[length];
+            java.util.Arrays.fill(usage, sentinel);
+            java.util.Arrays.fill(graphics, sentinel);
+            long pss = android.os.Debug.getPss(pid, usage, graphics);
+            require(pss > 0, "getPss rejected output length " + length);
+            if (length > 0) require(usage[0] > 0 && usage[0] <= pss, "short USS output");
+            if (length > 1) require(usage[1] == 0, "short swap PSS output");
+            if (length > 2) require(usage[2] >= pss, "short RSS output");
+            for (int i = 3; i < length; i++) {
+                require(usage[i] == sentinel, "getPss overwrote an output tail");
+            }
+            for (int i = 0; i < length; i++) {
+                require(graphics[i] == (i < 4 ? 0 : sentinel), "getPss memtrack bounds");
+            }
+            java.util.Arrays.fill(graphics, sentinel);
+            require(android.os.Debug.getRss(pid, graphics) > 0, "getRss rejected output length " + length);
+            for (int i = 0; i < length; i++) {
+                require(graphics[i] == (i < 4 ? 0 : sentinel), "getRss memtrack bounds");
+            }
+        }
+        long[] usage = {101, 102, 103, 104, 105};
+        long[] graphics = {201, 202, 203, 204, 205};
+        long[] savedUsage = usage.clone(), savedGraphics = graphics.clone();
+        require(android.os.Debug.getPss(-1, usage, graphics) == 0
+                && java.util.Arrays.equals(usage, savedUsage)
+                && java.util.Arrays.equals(graphics, savedGraphics),
+                "failed getPss changed output arrays");
+        require(android.os.Debug.getRss(-1, graphics) == 0
+                && java.util.Arrays.equals(graphics, savedGraphics),
+                "failed getRss changed output arrays");
+    }
+
+    private static void debugMemoryInfo() throws Exception {
+        // Make sure part of the Java heap is resident and dirty.
+        byte[][] touched = new byte[16][];
+        for (int i = 0; i < touched.length; i++) {
+            touched[i] = new byte[256 * 1024];
+            java.util.Arrays.fill(touched[i], (byte) i);
+        }
+        android.os.Debug.MemoryInfo info = new android.os.Debug.MemoryInfo();
+        java.lang.reflect.Field otherStats = android.os.Debug.MemoryInfo.class.getDeclaredField("otherStats");
+        otherStats.setAccessible(true);
+        int[] breakdown = (int[]) otherStats.get(info);
+        java.util.Arrays.fill(breakdown, 731);
+        android.os.Debug.getMemoryInfo(info);
+        for (int value : breakdown) require(value == 0, "unavailable per-mapping statistics retained old data");
+        int pss = info.getTotalPss(), rss = info.getTotalRss();
+        require(pss > 0 && rss >= pss && info.getTotalUss() > 0 && info.getTotalUss() <= pss,
+                "getMemoryInfo totals: pss " + pss + " rss " + rss + " uss " + info.getTotalUss());
+        require(info.dalvikPss > 0 && info.dalvikPrivateDirty == info.dalvikPss,
+                "getMemoryInfo has no resident Java heap: " + info.dalvikPss);
+        require(info.nativePss > 0 && info.otherPss >= 0 && info.otherRss >= 0
+                && info.otherPrivateDirty >= 0 && !info.hasSwappedOutPss
+                && info.getTotalSwappedOut() == 0,
+                "getMemoryInfo categories: native " + info.nativePss + " other " + info.otherPss);
+        require(info.dalvikPss + info.nativePss + info.otherPss == pss,
+                "getMemoryInfo categories do not add up to the total PSS");
+        require(info.getTotalSwappablePss() == 0,
+                "page permissions were reported as known file-backed swappable memory");
+        // The memory summary OsmAnd's MemoryLog and ActivityManager's dumps read.
+        require(info.getMemoryStats().get("summary.total-pss") != null,
+                "MemoryInfo.getMemoryStats lost its summary");
+        int myPid = android.os.Process.myPid();
+        ShadowedMemoryInfo subclass = new ShadowedMemoryInfo();
+        int[] inheritedBreakdown = (int[]) otherStats.get(subclass);
+        java.util.Arrays.fill(inheritedBreakdown, 736);
+        require(android.os.Debug.getMemoryInfo(myPid, subclass) && subclass.getTotalPss() > 0
+                && subclass.getTotalRss() >= subclass.getTotalPss(),
+                "getMemoryInfo did not populate inherited Android fields");
+        require(subclass.dalvikPss == 731 && subclass.nativePss == 732 && subclass.otherPss == 733
+                && java.util.Arrays.equals(subclass.otherStats, new int[] {734, 735}),
+                "getMemoryInfo wrote application fields shadowing Android's fields");
+        for (int value : inheritedBreakdown) require(value == 0, "inherited otherStats was not cleared");
+        android.os.Debug.MemoryInfo byPid = new android.os.Debug.MemoryInfo();
+        require(android.os.Debug.getMemoryInfo(myPid, byPid) && byPid.getTotalPss() > 0,
+                "getMemoryInfo(myPid) failed");
+        java.util.Map<String, String> previousStats = byPid.getMemoryStats();
+        int previousRss = byPid.getTotalRss(), previousUss = byPid.getTotalUss();
+        require(!android.os.Debug.getMemoryInfo(-1, byPid)
+                && previousStats.equals(byPid.getMemoryStats())
+                && byPid.getTotalRss() == previousRss && byPid.getTotalUss() == previousUss,
+                "failed getMemoryInfo changed the existing snapshot");
+        require(!android.os.Debug.getMemoryInfo(-1, new android.os.Debug.MemoryInfo()),
+                "getMemoryInfo of a missing process succeeded");
+        try {
+            android.os.Debug.getMemoryInfo(null);
+            throw new AssertionError("getMemoryInfo(null) accepted");
+        } catch (NullPointerException expected) {
+        }
+        try {
+            android.os.Debug.getMemoryInfo(myPid, null);
+            throw new AssertionError("getMemoryInfo(pid, null) accepted");
+        } catch (NullPointerException expected) {
+        }
+
+        long ownPss = android.os.Debug.getPss();
+        long ownRss = android.os.Debug.getRss();
+        long[] ussSwapRss = {-1, -1, -1};
+        long[] memtrack = {-1, -1, -1, -1};
+        long pidPss = android.os.Debug.getPss(myPid, ussSwapRss, memtrack);
+        require(ownPss > 0 && ownRss > 0 && pidPss > 0, "getPss/getRss: " + ownPss + " " + ownRss);
+        require(ussSwapRss[0] > 0 && ussSwapRss[0] <= pidPss && ussSwapRss[1] == 0
+                && ussSwapRss[2] >= pidPss, "getPss outputs " + java.util.Arrays.toString(ussSwapRss));
+        require(memtrack[0] == 0 && memtrack[3] == 0, "no memtrack HAL, but graphics memory reported");
+        require(android.os.Debug.getRss(myPid, null) > 0, "getRss(myPid) failed");
+        require(android.os.Debug.getPss(-1, null, null) == 0 && android.os.Debug.getRss(-1, null) == 0,
+                "a missing process has memory");
+        debugMemoryArrayBounds(myPid);
+        java.lang.ref.Reference.reachabilityFence(touched);
+
+        long[] system = new long[android.os.Debug.MEMINFO_COUNT];
+        android.os.Debug.getMemInfo(system);
+        long total = system[android.os.Debug.MEMINFO_TOTAL];
+        require(total > 0 && system[android.os.Debug.MEMINFO_FREE] >= 0
+                && system[android.os.Debug.MEMINFO_FREE] <= total
+                && system[android.os.Debug.MEMINFO_CACHED] >= 0
+                && system[android.os.Debug.MEMINFO_SWAP_FREE] <= system[android.os.Debug.MEMINFO_SWAP_TOTAL],
+                "getMemInfo: " + java.util.Arrays.toString(system));
+        require(system[android.os.Debug.MEMINFO_AVAILABLE] >= 0
+                && system[android.os.Debug.MEMINFO_AVAILABLE] <= total,
+                "getMemInfo available physical memory is invalid");
+        for (int i = 0; i < system.length; i++) {
+            if (i != android.os.Debug.MEMINFO_TOTAL && i != android.os.Debug.MEMINFO_AVAILABLE) {
+                require(system[i] == 0, "unsupported Linux memory slot was fabricated: " + i);
+            }
+        }
+        try {
+            android.os.Debug.getMemInfo(new long[1]);
+            throw new AssertionError("getMemInfo accepted a short array");
+        } catch (RuntimeException expected) {
+        }
+        for (int length : new int[] {0, android.os.Debug.MEMINFO_COUNT - 1}) {
+            long[] shortOutput = new long[length];
+            java.util.Arrays.fill(shortOutput, -731);
+            try {
+                android.os.Debug.getMemInfo(shortOutput);
+                throw new AssertionError("getMemInfo accepted output length " + length);
+            } catch (RuntimeException expected) {
+            }
+            for (long value : shortOutput) require(value == -731, "short getMemInfo output changed");
+        }
+        long[] extended = new long[android.os.Debug.MEMINFO_COUNT + 2];
+        java.util.Arrays.fill(extended, -731);
+        android.os.Debug.getMemInfo(extended);
+        require(extended[android.os.Debug.MEMINFO_TOTAL] > 0
+                && extended[android.os.Debug.MEMINFO_COUNT] == -731
+                && extended[android.os.Debug.MEMINFO_COUNT + 1] == -731,
+                "getMemInfo overwrote an output tail");
+        try {
+            android.os.Debug.getMemInfo(null);
+            throw new AssertionError("getMemInfo(null) accepted");
+        } catch (NullPointerException expected) {
+        }
+        System.out.println("FrameworkFixesTest: Debug.getMemoryInfo, getPss, getRss and getMemInfo report "
+                + "the process working set and system memory (pss " + pss + " kB, rss " + rss + " kB)");
+    }
+
     public static void main(String[] args) throws Exception {
         // The FileChannel lock natives and Binder's (gesher-app loads them in an app).
         System.loadLibrary("android_runtime");
@@ -633,6 +805,7 @@ public final class FrameworkFixesTest {
         bluetoothProfiles();
         bluetoothLeCallbacks();
         binderDebugCounters();
+        debugMemoryInfo();
         phoneNumbers();
         handlerThreadQuit();
         System.out.println("FrameworkFixesTest all passed");

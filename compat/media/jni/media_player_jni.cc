@@ -21,6 +21,7 @@
 #include "../player/data_source.h"
 #include "../player/player.h"
 #include "jni_util.h"
+#include "java_data_source.h"
 #include "media_jni.h"
 
 // libandroid_runtime's host ANativeWindow_fromSurface; hostgraphics' release.
@@ -76,56 +77,6 @@ void Process(JNIEnv* env, const std::shared_ptr<Player>& mp, int status, const c
     jniThrow(env, exception, msg);
   }
 }
-
-// --- MediaDataSource ---------------------------------------------------------------------
-
-class JavaDataSource : public DataSource {
- public:
-  JavaDataSource(JNIEnv* env, jobject source) : source_(std::make_shared<GlobalRef>(env, source)) {
-    jclass cls = env->FindClass("android/media/MediaDataSource");
-    read_at_ = env->GetMethodID(cls, "readAt", "(J[BII)I");
-    get_size_ = env->GetMethodID(cls, "getSize", "()J");
-    close_ = env->GetMethodID(cls, "close", "()V");
-    buffer_ = std::make_shared<GlobalRef>(env, env->NewByteArray(kBuffer));
-  }
-  ~JavaDataSource() override {
-    if (JNIEnv* env = AttachedEnv("gesher-media")) {
-      env->CallVoidMethod(source_->get(), close_);
-      CheckException(env, "MediaDataSource.close");
-    }
-  }
-
-  ssize_t ReadAt(int64_t offset, void* data, size_t size) override {
-    JNIEnv* env = AttachedEnv("gesher-media");
-    if (env == nullptr) return -1;
-    size_t done = 0;
-    while (done < size) {
-      jint n = env->CallIntMethod(source_->get(), read_at_, static_cast<jlong>(offset + done),
-                                  static_cast<jbyteArray>(buffer_->get()), 0,
-                                  static_cast<jint>(std::min<size_t>(size - done, kBuffer)));
-      if (CheckException(env, "MediaDataSource.readAt")) return -1;
-      if (n <= 0) break;
-      env->GetByteArrayRegion(static_cast<jbyteArray>(buffer_->get()), 0, n,
-                              reinterpret_cast<jbyte*>(static_cast<uint8_t*>(data) + done));
-      done += static_cast<size_t>(n);
-    }
-    return static_cast<ssize_t>(done);
-  }
-
-  int64_t Size() override {
-    JNIEnv* env = AttachedEnv("gesher-media");
-    if (env == nullptr) return -1;
-    jlong s = env->CallLongMethod(source_->get(), get_size_);
-    if (CheckException(env, "MediaDataSource.getSize")) return -1;
-    return s;
-  }
-
- private:
-  static constexpr jint kBuffer = 64 * 1024;
-  std::shared_ptr<GlobalRef> source_;
-  std::shared_ptr<GlobalRef> buffer_;
-  jmethodID read_at_, get_size_, close_;
-};
 
 // --- Natives -----------------------------------------------------------------------------
 
@@ -231,8 +182,13 @@ void JNICALL MP_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject dataSou
     jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
     return;
   }
-  Process(env, mp, mp->SetDataSource(std::make_shared<JavaDataSource>(env, dataSource)),
-          "java/lang/RuntimeException", "setDataSourceCallback failed.");
+  std::shared_ptr<DataSource> source = OpenJavaDataSource(env, dataSource);
+  if (source == nullptr) return;
+  const int status = mp->SetDataSource(source);
+  // Close a rejected candidate before the public error mapper invokes JNI.
+  source.reset();
+  if (status != kPlayerOk) CheckException(env, "MediaPlayer rejected source close");
+  Process(env, mp, status, "java/lang/RuntimeException", "setDataSourceCallback failed.");
 }
 
 jint JNICALL MP_prepare(JNIEnv* env, jobject thiz, jobject) {

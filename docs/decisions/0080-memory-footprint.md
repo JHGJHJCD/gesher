@@ -107,9 +107,11 @@ accesses through the actual mapping and vectored-exception implementations.
 ## Consequences
 - A SIGSEGV in a PROT_NONE mapping reports SEGV_MAPERR (the pages are
   reserved), where Linux reports SEGV_ACCERR.
-- madvise(MADV_DONTNEED) of a writable file view still writes zeros (no
-  release); ART's consumers of `kMadviseZeroes` all use private anonymous
-  memory.
+- The original implementation zeroed writable file views on DONTNEED. The
+  [2026-11-14 advice repair](../research/madvise-contracts-2026-11-14.md)
+  removes that destructive behavior: file/shared discard reports EOPNOTSUPP
+  without changing bytes. Private-anonymous discard retains the zero-fill
+  contract used by ART's consumers of `kMadviseZeroes`.
 - Not addressed here: each launched app keeps a launcher dalvikvm alive for
   its lifetime (about 70 MB of working set each after this change), and the
   guest stacks of arm64 threads are committed (8 MiB each).

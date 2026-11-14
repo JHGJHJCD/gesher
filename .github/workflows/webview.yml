@@ -87,6 +87,17 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
           test -f out-webview/webview2_probe_dll.exe
 
+      - name: Build native origin admission and its inert negative control
+        run: |
+          sdk_headers=(out-webview/webview2-sdk-*/build/native/include)
+          test "${#sdk_headers[@]}" -eq 1
+          python3 tools/test_webstorage_native_contracts.py \
+            --cxx "$HOME/toolchain/$LLVM_MINGW_NAME/bin/x86_64-w64-mingw32-clang++" \
+            --sdk-include "${sdk_headers[0]}" --output out-webview/webstorage_native_contracts.exe --no-run
+          python3 tools/test_webstorage_native_contracts.py \
+            --cxx "$HOME/toolchain/$LLVM_MINGW_NAME/bin/x86_64-w64-mingw32-clang++" \
+            --sdk-include "${sdk_headers[0]}" --output out-webview/webstorage_native_negative.exe --no-run --negative-control
+
       - name: Collect the probes
         run: |
           mkdir -p dist-webview

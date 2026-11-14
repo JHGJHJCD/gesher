@@ -48,6 +48,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
+#include <psapi.h>
 
 #include <algorithm>
 #include <atomic>
@@ -118,6 +119,19 @@ enum class Kind : uint8_t {
   kHole,  // a placeholder (group regions only)
 };
 
+// Windows' allocation type is not the mapping's Linux origin: private file
+// tails and MAP_FIXED file fallbacks also use VirtualAlloc. Plain allocations
+// may contain several origins after fixed replacement, so keep one byte per
+// logical page (1/4096 of the mapping on supported Windows systems).
+enum class Origin : uint8_t {
+  kUnknown,
+  kPrivateAnonymous,
+  kSharedAnonymous,
+  kPrivateFile,
+  kSharedFile,
+  kDevice,
+};
+
 struct Region {
   size_t size = 0;            // bytes, multiple of the page size
   Kind kind = Kind::kAnon;
@@ -136,6 +150,7 @@ struct Region {
   size_t view_padding = 0;
   bool shared = false;        // views: MAP_SHARED
   std::vector<bool> live;     // one entry per page
+  std::vector<Origin> origins;  // logical origin; independent of Kind/MEM_PRIVATE
   size_t live_pages = 0;
 };
 
@@ -161,6 +176,21 @@ State& state() {
 }
 
 size_t RoundUp(size_t x, size_t n) { return (x + n - 1) / n * n; }
+
+// Validate before rounding or forming a range end. Zero length still requires
+// a page-aligned address for madvise, as on Linux.
+bool AdviceRange(uintptr_t begin, size_t length, size_t page, size_t* rounded) {
+  if (begin % page != 0 || length > SIZE_MAX - (page - 1)) {
+    errno = EINVAL;
+    return false;
+  }
+  *rounded = RoundUp(length, page);
+  if (*rounded > UINTPTR_MAX - begin) {
+    errno = EINVAL;
+    return false;
+  }
+  return true;
+}
 
 // GESHER_TRACE_MMAP=1 logs every call to stderr.
 bool Tracing() {
@@ -208,10 +238,11 @@ std::map<uintptr_t, Region>::iterator FindRegion(State& s, uintptr_t addr) {
 }
 
 std::map<uintptr_t, Region>::iterator AddRegion(State& s, uintptr_t start, size_t size,
-                                                Region region) {
+                                                Region region, Origin origin = Origin::kUnknown) {
   region.size = size;
   const bool live = region.kind != Kind::kHole;
   region.live.assign(size / s.page_size, live);
+  region.origins.assign(size / s.page_size, origin);
   region.live_pages = live ? region.live.size() : 0;
   return s.regions.emplace(start, std::move(region)).first;
 }
@@ -278,6 +309,7 @@ void* SharedAlias(State& s, uintptr_t begin, size_t old_size, size_t length, int
   alias.physical_extent = length + alias.view_padding;
   alias.size = length;
   alias.live.assign(length / s.page_size, true);
+  alias.origins.assign(length / s.page_size, Origin::kSharedFile);
   alias.live_pages = alias.live.size();
   // A C++17 node handle makes final address publication allocation-free.
   std::map<uintptr_t, Region> prepared;
@@ -317,10 +349,12 @@ std::map<uintptr_t, Region>::iterator SplitEntry(State& s,
   lower.shared_alias = upper.shared_alias = false;
   upper.size = lower.size - (at - it->first);
   upper.live.assign(lower.live.begin() + lower_pages, lower.live.end());
+  upper.origins.assign(lower.origins.begin() + lower_pages, lower.origins.end());
   upper.live_pages = static_cast<size_t>(std::count(upper.live.begin(), upper.live.end(), true));
   upper.offset = lower.offset + (at - it->first);
   lower.size = at - it->first;
   lower.live.resize(lower_pages);
+  lower.origins.resize(lower_pages);
   lower.live_pages -= upper.live_pages;
   return s.regions.emplace(at, std::move(upper)).first;
 }
@@ -388,6 +422,22 @@ bool RangeIsOurs(State& s, uintptr_t begin, uintptr_t end) {
   auto it = FindRegion(s, begin);
   if (it == s.regions.end()) it = s.regions.lower_bound(begin);
   return it != s.regions.end() && it->first < end;
+}
+
+// A placeholder retained after munmap is address-space bookkeeping, not a
+// live Linux mapping. MAP_FIXED_NOREPLACE may reuse an entirely unmapped range
+// inside a group, but must reject the complete request before touching even
+// one page when any part is still mapped (including PROT_NONE reservations).
+bool RangeIsHole(State& s, uintptr_t begin, uintptr_t end) {
+  auto it = FindRegion(s, begin);
+  for (uintptr_t at = begin; at < end; ++it) {
+    if (it == s.regions.end() || it->first > at || it->second.group == 0 ||
+        it->second.kind != Kind::kHole) {
+      return false;
+    }
+    at = it->first + it->second.size;
+  }
+  return true;
 }
 
 // Maps a view of `mapping` into the hole exactly at [start, start + size).
@@ -540,6 +590,7 @@ std::map<uintptr_t, Region>::iterator Punch(State& s, uintptr_t begin, uintptr_t
     }
     first->second.size = end - begin;
     first->second.live.assign((end - begin) / s.page_size, false);
+    first->second.origins.assign((end - begin) / s.page_size, Origin::kUnknown);
     first->second.live_pages = 0;
   }
   return first;
@@ -547,7 +598,7 @@ std::map<uintptr_t, Region>::iterator Punch(State& s, uintptr_t begin, uintptr_t
 
 // Fills the hole `it` with anonymous zero pages. PROT_NONE pages are only
 // reserved (see AnonymousCommit).
-bool FillAnonymous(std::map<uintptr_t, Region>::iterator it, int prot) {
+bool FillAnonymous(std::map<uintptr_t, Region>::iterator it, int prot, Origin origin) {
   if (Placeholders().alloc2(GetCurrentProcess(), reinterpret_cast<void*>(it->first),
                             it->second.size, AnonymousCommit(prot) | MEM_REPLACE_PLACEHOLDER,
                             PageProtection(prot), nullptr, 0) == nullptr) {
@@ -556,6 +607,7 @@ bool FillAnonymous(std::map<uintptr_t, Region>::iterator it, int prot) {
   Region& r = it->second;
   r.kind = Kind::kAnon;
   std::fill(r.live.begin(), r.live.end(), true);
+  std::fill(r.origins.begin(), r.origins.end(), origin);
   r.live_pages = r.live.size();
   return true;
 }
@@ -566,7 +618,11 @@ void* GroupAnonymous(State& s, void* start, size_t len, int prot, int flags) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(start);
   const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
   std::map<uintptr_t, Region>::iterator hole;
-  if ((flags & MAP_FIXED) != 0 && CoveringGroup(s, addr, addr + len) != 0) {
+  if (fixed && CoveringGroup(s, addr, addr + len) != 0) {
+    if ((flags & MAP_FIXED_NOREPLACE) != 0 && !RangeIsHole(s, addr, addr + len)) {
+      errno = EEXIST;
+      return MAP_FAILED;
+    }
     hole = Punch(s, addr, addr + len);
   } else {
     if (fixed && RangeIsOurs(s, addr, addr + len)) {
@@ -586,7 +642,9 @@ void* GroupAnonymous(State& s, void* start, size_t len, int prot, int flags) {
   }
   const uintptr_t group = hole->second.group;
   const uintptr_t result = hole->first;
-  if (!FillAnonymous(hole, prot)) {
+  const Origin origin = (flags & MAP_SHARED) != 0 ? Origin::kSharedAnonymous
+                                                : Origin::kPrivateAnonymous;
+  if (!FillAnonymous(hole, prot, origin)) {
     ReleaseGroupIfEmpty(s, group);
     errno = ENOMEM;
     return MAP_FAILED;
@@ -687,7 +745,12 @@ void* GroupFile(State& s, void* start, size_t len, int prot, int flags, int fd, 
   const uintptr_t addr = reinterpret_cast<uintptr_t>(start);
   const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
   std::map<uintptr_t, Region>::iterator hole;
-  if ((flags & MAP_FIXED) != 0 && CoveringGroup(s, addr, addr + len) != 0) {
+  if (fixed && CoveringGroup(s, addr, addr + len) != 0) {
+    if ((flags & MAP_FIXED_NOREPLACE) != 0 && !RangeIsHole(s, addr, addr + len)) {
+      if (mapping != nullptr) CloseHandle(mapping);
+      errno = EEXIST;
+      return MAP_FAILED;
+    }
     hole = Punch(s, addr, addr + len);
   } else {
     uintptr_t at = 0;
@@ -746,6 +809,8 @@ void* GroupFile(State& s, void* start, size_t len, int prot, int flags, int fd, 
     r.shared_alias = shared && !exec && (prot == PROT_READ || prot == (PROT_READ | PROT_WRITE)) &&
                      GetFileType(file) == FILE_TYPE_DISK;
     std::fill(r.live.begin(), r.live.end(), true);
+    std::fill(r.origins.begin(), r.origins.end(),
+              shared ? Origin::kSharedFile : Origin::kPrivateFile);
     r.live_pages = r.live.size();
     DWORD protection = PageProtection(prot);
     if (!shared) protection = CopyOnWrite(protection);
@@ -758,7 +823,7 @@ void* GroupFile(State& s, void* start, size_t len, int prot, int flags, int fd, 
   // [result + in_view, result + len): anonymous, with what the file has there.
   if (in_view < len) {
     auto tail = FindRegion(s, result + in_view);
-    if (!FillAnonymous(tail, PROT_READ | PROT_WRITE)) return fail(ENOMEM);
+    if (!FillAnonymous(tail, PROT_READ | PROT_WRITE, Origin::kPrivateFile)) return fail(ENOMEM);
     if (!CopyFromFile(s, file, file_size, begin + in_view,
                       reinterpret_cast<uint8_t*>(result + in_view), len - in_view)) {
       return fail(EACCES);
@@ -792,10 +857,12 @@ void* MapAnonymous(State& s, void* start, size_t len, int prot, int flags) {
   DWORD protection = PageProtection(prot);
   uintptr_t addr = reinterpret_cast<uintptr_t>(start);
   bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
+  const Origin origin = (flags & MAP_SHARED) != 0 ? Origin::kSharedAnonymous
+                                                : Origin::kPrivateAnonymous;
 
   // MAP_FIXED inside one of our anonymous regions: replace those pages with
   // fresh zero pages, as mmap does.
-  if ((flags & MAP_FIXED) != 0) {
+  if ((flags & MAP_FIXED) != 0 && (flags & MAP_FIXED_NOREPLACE) == 0) {
     auto it = FindRegion(s, addr);
     if (it != s.regions.end() && it->second.kind == Kind::kAnon &&
         addr + len <= it->first + it->second.size) {
@@ -807,6 +874,7 @@ void* MapAnonymous(State& s, void* start, size_t len, int prot, int flags) {
       }
       Region& region = it->second;
       for (size_t i = (addr - it->first) / s.page_size, n = i + len / s.page_size; i < n; ++i) {
+        region.origins[i] = origin;
         if (!region.live[i]) {
           region.live[i] = true;
           ++region.live_pages;
@@ -831,7 +899,7 @@ void* MapAnonymous(State& s, void* start, size_t len, int prot, int flags) {
     errno = ENOMEM;
     return MAP_FAILED;
   }
-  AddRegion(s, reinterpret_cast<uintptr_t>(result), len, Region{});
+  AddRegion(s, reinterpret_cast<uintptr_t>(result), len, Region{}, origin);
   return result;
 }
 
@@ -847,6 +915,12 @@ void* CopyFileInto(State& s, void* start, size_t len, int prot, int fd, off_t of
   if (MapAnonymous(s, start, len, PROT_READ | PROT_WRITE, MAP_FIXED) == MAP_FAILED) {
     return MAP_FAILED;
   }
+  // Mark the replaced pages before copying: even a failed copy must not turn
+  // file-origin pages into disposable private-anonymous pages.
+  auto region = FindRegion(s, reinterpret_cast<uintptr_t>(start));
+  const size_t first = (reinterpret_cast<uintptr_t>(start) - region->first) / s.page_size;
+  std::fill(region->second.origins.begin() + first,
+            region->second.origins.begin() + first + len / s.page_size, Origin::kPrivateFile);
   if (!CopyFromFile(s, file, static_cast<uint64_t>(file_length.QuadPart),
                     static_cast<uint64_t>(offset), static_cast<uint8_t*>(start), len)) {
     errno = EACCES;
@@ -866,20 +940,22 @@ void* CopyFileInto(State& s, void* start, size_t len, int prot, int fd, off_t of
 
 void* MapFile(State& s, void* start, size_t len, int prot, int flags, int fd, off_t offset) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(start);
-  // An offset that is not page-aligned (Linux refuses it) gets a plain view.
+  const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
+  // The public entry point has already validated page-aligned file offsets.
   if (Placeholders().available() && static_cast<uint64_t>(offset) % s.page_size == 0) {
     auto it = FindRegion(s, addr);
     if (it == s.regions.end() || it->second.group != 0 || (flags & MAP_FIXED) == 0) {
       void* result = GroupFile(s, start, len, prot, flags, fd, offset);
       if (result != MAP_FAILED || errno != 0) return result;
       // A shared mapping that ends in a partial page: a plain view.
-      if ((flags & MAP_FIXED) != 0) {
+      if (fixed) {
         errno = EINVAL;
         return MAP_FAILED;
       }
     }
   }
-  if ((flags & MAP_FIXED) != 0 && (flags & MAP_SHARED) == 0) {
+  if ((flags & MAP_FIXED) != 0 && (flags & MAP_FIXED_NOREPLACE) == 0 &&
+      (flags & MAP_SHARED) == 0) {
     auto it = FindRegion(s, addr);
     if (it != s.regions.end() && it->second.kind == Kind::kAnon && it->second.group == 0 &&
         addr + len <= it->first + it->second.size) {
@@ -938,12 +1014,12 @@ void* MapFile(State& s, void* start, size_t len, int prot, int flags, int fd, of
   DWORD low = static_cast<DWORD>(file_offset & 0xffffffffu);
   void* want = start == nullptr ? nullptr : static_cast<uint8_t*>(start) - padding;
   void* view = MapViewOfFileEx(mapping, view_access, high, low, view_length, want);
-  if (view == nullptr && want != nullptr && (flags & MAP_FIXED) == 0) {
+  if (view == nullptr && want != nullptr && !fixed) {
     view = MapViewOfFileEx(mapping, view_access, high, low, view_length, nullptr);
   }
   if (view == nullptr) {
     CloseHandle(mapping);
-    errno = (flags & MAP_FIXED) != 0 ? EINVAL : ENOMEM;
+    errno = (flags & MAP_FIXED_NOREPLACE) != 0 ? EEXIST : fixed ? EINVAL : ENOMEM;
     return MAP_FAILED;
   }
 
@@ -959,7 +1035,8 @@ void* MapFile(State& s, void* start, size_t len, int prot, int flags, int fd, of
   region.physical_extent = len + padding;
   region.shared_alias = view_length != 0 && shared && (prot == PROT_READ || prot == (PROT_READ | PROT_WRITE)) &&
                         GetFileType(file) == FILE_TYPE_DISK;
-  AddRegion(s, reinterpret_cast<uintptr_t>(result), RoundUp(len, s.page_size), std::move(region));
+  AddRegion(s, reinterpret_cast<uintptr_t>(result), RoundUp(len, s.page_size), std::move(region),
+            shared ? Origin::kSharedFile : Origin::kPrivateFile);
   return result;
 }
 
@@ -978,6 +1055,88 @@ bool ForEachRun(void* addr, size_t len, Fn fn) {
     p = run_end;
   }
   return true;
+}
+
+// Query in bounded stack batches: no per-call allocation and no syscall per
+// page. Locked pages cannot be discarded, and large pages are not supported
+// by this page-granular path. mlock/munlock share the mapping registry lock.
+bool AdviceUnlocked(uintptr_t begin, size_t length, size_t page) {
+  PSAPI_WORKING_SET_EX_INFORMATION entries[128] = {};
+  for (size_t done = 0; done < length;) {
+    const size_t count = std::min<size_t>(128, (length - done) / page);
+    for (size_t i = 0; i < count; ++i) {
+      entries[i] = {};
+      entries[i].VirtualAddress = reinterpret_cast<void*>(begin + done + i * page);
+    }
+    if (!QueryWorkingSetEx(GetCurrentProcess(), entries,
+                          static_cast<DWORD>(count * sizeof(entries[0])))) {
+      gesher::FailWithLastError();
+      return false;
+    }
+    for (size_t i = 0; i < count; ++i) {
+      const auto& attributes = entries[i].VirtualAttributes;
+      if (attributes.Valid && (attributes.Locked || attributes.LargePage)) {
+        errno = EINVAL;
+        return false;
+      }
+    }
+    done += count * page;
+  }
+  return true;
+}
+
+// Validate the complete logical range before any discard. A private file tail
+// is still a file mapping even though Windows reports MEM_PRIVATE. A range
+// ending in a hole or an unsupported mapping must not zero its earlier pages.
+// Caller holds State::lock throughout preflight and execution.
+bool PreflightAdvice(State& s, uintptr_t begin, size_t length, int advice) {
+  const uintptr_t end = begin + length;
+  const bool discard = advice == MADV_DONTNEED || advice == MADV_FREE || advice == MADV_REMOVE;
+  for (uintptr_t at = begin; at < end;) {
+    auto found = FindRegion(s, at);
+    if (found == s.regions.end()) {
+      MEMORY_BASIC_INFORMATION info;
+      if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) != sizeof(info) ||
+          info.State != MEM_COMMIT) {
+        errno = ENOMEM;
+        return false;
+      }
+      // Native allocations outside this registry have no certified Linux
+      // provenance. Hints are harmless; destructive advice is unsupported.
+      if (discard) { errno = EOPNOTSUPP; return false; }
+      at = std::min(end, reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize);
+      continue;
+    }
+    const Region& region = found->second;
+    const uintptr_t limit = std::min(end, found->first + region.size);
+    for (size_t i = (at - found->first) / s.page_size;
+         i < (limit - found->first) / s.page_size; ++i) {
+      if (region.kind == Kind::kHole || !region.live[i]) { errno = ENOMEM; return false; }
+      if (!discard) continue;
+      const Origin origin = region.origins[i];
+      if (advice == MADV_REMOVE) {
+        errno = origin == Origin::kPrivateFile ? EACCES
+              : origin == Origin::kPrivateAnonymous || origin == Origin::kDevice ? EINVAL
+              : EOPNOTSUPP;
+        return false;  // requires a backing-store hole operation, never memset
+      }
+      if (origin != Origin::kPrivateAnonymous) {
+        errno = advice == MADV_FREE || origin == Origin::kDevice ? EINVAL : EOPNOTSUPP;
+        return false;
+      }
+    }
+    at = limit;
+  }
+  errno = ENOMEM;
+  return ForEachRun(reinterpret_cast<void*>(begin), length,
+      [&](uint8_t* p, size_t n, const MEMORY_BASIC_INFORMATION& info) {
+        if (info.State != MEM_COMMIT && info.State != MEM_RESERVE) return false;
+        if (!discard) return true;
+        if (info.Type != MEM_PRIVATE) { errno = EOPNOTSUPP; return false; }
+        if ((info.Protect & PAGE_GUARD) != 0) { errno = EINVAL; return false; }
+        return info.State == MEM_RESERVE ||
+               AdviceUnlocked(reinterpret_cast<uintptr_t>(p), n, s.page_size);
+      });
 }
 
 // --- zeroing private pages ----------------------------------------------------
@@ -1101,20 +1260,38 @@ int gesher_mmap_placeholders(void) { return Placeholders().available() ? 1 : 0; 
 
 void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
   State& s = state();
-  if (length == 0 || reinterpret_cast<uintptr_t>(addr) % s.page_size != 0 || offset < 0) {
+  const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
+  const int type = flags & 0x0f;
+  const uintptr_t begin = reinterpret_cast<uintptr_t>(addr);
+  if (length == 0 ||
+      (fixed && begin % s.page_size != 0) || offset < 0 ||
+      static_cast<uint64_t>(offset) % s.page_size != 0 ||
+      (type != MAP_PRIVATE && type != MAP_SHARED && type != MAP_SHARED_VALIDATE) ||
+      (type == MAP_SHARED_VALIDATE && (flags & MAP_ANONYMOUS) != 0)) {
     errno = EINVAL;
     return MAP_FAILED;
   }
+  if (length > SIZE_MAX - (s.page_size - 1)) { errno = ENOMEM; return MAP_FAILED; }
   length = RoundUp(length, s.page_size);
+  if (fixed && length > UINTPTR_MAX - begin) { errno = ENOMEM; return MAP_FAILED; }
+  if ((flags & MAP_ANONYMOUS) == 0 && fd < 0) { errno = EBADF; return MAP_FAILED; }
+  // An ordinary address is only a hint, and need not be page aligned.
+  if (!fixed) addr = reinterpret_cast<void*>(begin - begin % s.page_size);
   std::lock_guard<std::mutex> guard(s.lock);
   void* result;
-  if ((flags & MAP_ANONYMOUS) != 0 || fd == -1) {
+  if ((flags & MAP_ANONYMOUS) != 0) {
     result = MapAnonymous(s, addr, length, prot, flags);
   } else if (gesher::IsBinderFd(fd)) {
     // /dev/binder's receive buffer: memory binder.cc copies the process's
     // incoming transactions into, read-only to the process on Linux.
     result = MapAnonymous(s, addr, length, PROT_READ | PROT_WRITE, flags & ~MAP_SHARED);
-    if (result != MAP_FAILED) gesher::SetBinderMapping(fd, result, length);
+    if (result != MAP_FAILED) {
+      auto region = FindRegion(s, reinterpret_cast<uintptr_t>(result));
+      const size_t first = (reinterpret_cast<uintptr_t>(result) - region->first) / s.page_size;
+      std::fill(region->second.origins.begin() + first,
+                region->second.origins.begin() + first + length / s.page_size, Origin::kDevice);
+      gesher::SetBinderMapping(fd, result, length);
+    }
   } else {
     result = MapFile(s, addr, length, prot, flags, fd, offset);
   }
@@ -1253,42 +1430,55 @@ int mprotect(void* addr, size_t length, int prot) {
 int madvise(void* addr, size_t length, int advice) {
   TRACE("madvise(%p, 0x%zx, %d)\n", addr, length, advice);
   switch (advice) {
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
     case MADV_DONTNEED:
     case MADV_FREE:
-    case MADV_REMOVE: {
-      // Decommit is a temporary physical state, not a logical PROT_NONE map.
-      // Keep mprotect/mremap/MAP_FIXED from observing or replacing that state
-      // before the recommit restores the mapping's protection. Ordinary loads
-      // still use the lock-free fault retry above while the range is zeroed.
-      State& s = state();
-      std::lock_guard<std::mutex> registry_guard(s.lock);
-      // Linux semantics for private anonymous memory: the range reads back as
-      // zeros. Decommit + recommit gives exactly that.
-      bool ok = ForEachRun(addr, length, [](uint8_t* p, size_t n, const MEMORY_BASIC_INFORMATION& info) {
-        if (info.Type == MEM_PRIVATE && info.State == MEM_COMMIT) {
-          return ZeroPrivate(p, n, info.Protect);
-        }
-        if (info.Type == MEM_MAPPED && (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY |
-                                                        PAGE_EXECUTE_READWRITE |
-                                                        PAGE_EXECUTE_WRITECOPY))) {
-          memset(p, 0, n);
-        }
-        return true;
-      });
-      if (!ok) {
-        errno = ENOMEM;
-        return -1;
-      }
-      return 0;
-    }
-    case MADV_WILLNEED: {
-      WIN32_MEMORY_RANGE_ENTRY range = {addr, length};
-      PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0);
-      return 0;
-    }
+    case MADV_REMOVE:
+    case MADV_DONTFORK:
+    case MADV_DOFORK:
+    case MADV_HUGEPAGE:
+    case MADV_NOHUGEPAGE:
+      break;
     default:
-      return 0;  // advisory only
+      errno = EINVAL;
+      return -1;
   }
+  State& s = state();
+  if (!AdviceRange(reinterpret_cast<uintptr_t>(addr), length, s.page_size, &length)) return -1;
+  if (length == 0) return 0;
+  // Keep mprotect/mremap/MAP_FIXED from observing the temporary decommit
+  // state before recommit restores protection. Loads use RetryAfterMadvise.
+  std::lock_guard<std::mutex> registry_guard(s.lock);
+  const int previous_errno = errno;
+  if (!PreflightAdvice(s, reinterpret_cast<uintptr_t>(addr), length, advice)) return -1;
+  if (advice == MADV_DONTNEED || advice == MADV_FREE) {
+    // Eager reclaim is permitted for MADV_FREE. Only certified private
+    // anonymous pages reach here, including currently reserved PROT_NONE.
+    if (!ForEachRun(addr, length, [](uint8_t* p, size_t n, const MEMORY_BASIC_INFORMATION& info) {
+          return info.State != MEM_COMMIT || ZeroPrivate(p, n, info.Protect);
+        })) {
+      errno = ENOMEM;
+      return -1;
+    }
+  } else if (advice == MADV_WILLNEED) {
+    if (!ForEachRun(addr, length, [](uint8_t* p, size_t n, const MEMORY_BASIC_INFORMATION& info) {
+          // A hint must not turn an inaccessible reservation into a committed
+          // mapping. Prefetch currently accessible runs only.
+          if (info.State != MEM_COMMIT || info.Protect == PAGE_NOACCESS) return true;
+          WIN32_MEMORY_RANGE_ENTRY range = {p, n};
+          if (PrefetchVirtualMemory(GetCurrentProcess(), 1, &range, 0)) return true;
+          gesher::FailWithLastError();
+          return false;
+        })) return -1;
+  }
+  // NORMAL/RANDOM/SEQUENTIAL and huge-page preferences are validated hints.
+  // DONTFORK/DOFORK need no inheritance change while fork is unsupported;
+  // ART uses DONTFORK for its shared JIT views.
+  errno = previous_errno;
+  return 0;
 }
 
 int msync(void* addr, size_t length, int flags) {
@@ -1318,6 +1508,7 @@ int mlock(const void* addr, size_t length) {
 }
 
 int munlock(const void* addr, size_t length) {
+  std::lock_guard<std::mutex> registry_guard(state().lock);
   return VirtualUnlock(const_cast<void*>(addr), length) ? 0 : (errno = ENOMEM, -1);
 }
 
@@ -1358,11 +1549,17 @@ void* mremap(void* old_address, size_t old_size, size_t new_size, int flags, ...
   }
   old_size = RoundUp(old_size, s.page_size);
   new_size = RoundUp(new_size, s.page_size);
+  if (old_size > UINTPTR_MAX - old_begin ||
+      new_size > UINTPTR_MAX - reinterpret_cast<uintptr_t>(fixed_address)) {
+    errno = EINVAL;
+    return MAP_FAILED;
+  }
 
   std::unique_lock<std::mutex> guard(s.lock);
   auto file_source = FindRegion(s, old_begin);
   if (file_source != s.regions.end() && file_source->second.kind == Kind::kView)
     return SharedAlias(s, old_begin, old_size, new_size, flags);
+  if (old_size == 0) { errno = EINVAL; return MAP_FAILED; }
   // The source: live pages of anonymous regions.
   for (uintptr_t at = old_begin; at < old_begin + old_size;) {
     auto source = FindRegion(s, at);
@@ -1380,6 +1577,10 @@ void* mremap(void* old_address, size_t old_size, size_t new_size, int flags, ...
          i < n; ++i) {
       if (!source->second.live[i]) {
         errno = EFAULT;
+        return MAP_FAILED;
+      }
+      if (source->second.origins[i] != Origin::kPrivateAnonymous) {
+        errno = EOPNOTSUPP;  // copying would lose file/shared/device provenance
         return MAP_FAILED;
       }
     }

@@ -22,6 +22,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <limits>
+#include <new>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -54,9 +56,12 @@ constexpr aaudio_result_t kErrorInternal = -896;
 constexpr aaudio_result_t kErrorInvalidState = -895;
 constexpr aaudio_result_t kErrorUnimplemented = -890;
 constexpr aaudio_result_t kErrorUnavailable = -889;
+constexpr aaudio_result_t kErrorNoMemory = -887;
 constexpr aaudio_result_t kErrorNull = -886;
 constexpr aaudio_result_t kErrorTimeout = -885;
 constexpr aaudio_result_t kErrorInvalidFormat = -883;
+constexpr aaudio_result_t kErrorOutOfRange = -882;
+constexpr aaudio_result_t kErrorInvalidRate = -880;
 
 enum : int32_t { kDirectionOutput = 0, kDirectionInput = 1 };
 enum : int32_t { kFormatUnspecified = 0, kFormatI16 = 1, kFormatFloat = 2, kFormatI24 = 3, kFormatI32 = 4 };
@@ -146,16 +151,17 @@ void TraceInput(AAudioStream* s, const char* operation, int32_t requested, int32
 void InputCallbackLoop(AAudioStream* s) {
   gesher::bionic::EnterLoadedCode();
   RaiseAudioThreadPriority(true);
-  std::vector<uint8_t> buf(static_cast<size_t>(s->burst) * s->frame_size);
+  const int32_t callback_frames = s->b.frames_per_callback;
+  std::vector<uint8_t> buf(static_cast<size_t>(callback_frames) * s->frame_size);
   for (;;) {
     {
       std::unique_lock<std::mutex> lock(s->mu);
       s->cv.wait(lock, [s] { return s->quit || s->state == kStateStarted; });
       if (s->quit) return;
     }
-    if (!s->capture->WaitForData(static_cast<size_t>(s->burst), 50)) continue;
+    if (!s->capture->WaitForData(static_cast<size_t>(callback_frames), 50)) continue;
     if (s->capture->Read(buf.data(), buf.size(), false) != static_cast<ssize_t>(buf.size())) continue;
-    int32_t r = s->b.data_cb(s, s->b.data_user, buf.data(), s->burst);
+    int32_t r = s->b.data_cb(s, s->b.data_user, buf.data(), callback_frames);
     if (r != kCallbackContinue) {
       s->capture->Stop();
       s->state = kStateStopped;
@@ -170,7 +176,8 @@ void CallbackLoop(AAudioStream* s) {
   }
   gesher::bionic::EnterLoadedCode();
   RaiseAudioThreadPriority(true);
-  std::vector<uint8_t> buf(static_cast<size_t>(s->burst) * s->frame_size);
+  const int32_t callback_frames = s->b.frames_per_callback;
+  std::vector<uint8_t> buf(static_cast<size_t>(callback_frames) * s->frame_size);
   for (;;) {
     {
       std::unique_lock<std::mutex> lock(s->mu);
@@ -179,10 +186,10 @@ void CallbackLoop(AAudioStream* s) {
     }
     // Woken by the mixer as it plays (not a sleep: under load a sleeping feeder wakes
     // late and the stream's few bursts run dry).
-    if (!s->track->WaitForRoom(static_cast<size_t>(s->burst), 20)) continue;
-    int32_t r = s->b.data_cb(s, s->b.data_user, buf.data(), s->burst);
+    if (!s->track->WaitForRoom(static_cast<size_t>(callback_frames), 20)) continue;
+    int32_t r = s->b.data_cb(s, s->b.data_user, buf.data(), callback_frames);
     s->track->Write(buf.data(), buf.size(), false);
-    s->written += s->burst;
+    s->written += callback_frames;
     if (r != kCallbackContinue) {
       s->track->Stop();
       s->state = kStateStopped;
@@ -194,8 +201,8 @@ void CallbackLoop(AAudioStream* s) {
 
 aaudio_result_t SYSV CreateStreamBuilder(Builder** out) {
   if (out == nullptr) return kErrorNull;
-  *out = new Builder();
-  return kOk;
+  *out = new (std::nothrow) Builder();
+  return *out != nullptr ? kOk : kErrorNoMemory;
 }
 #define SETTER(Name, field)                                          \
   void SYSV Name(Builder* b, int32_t v) {                           \
@@ -235,12 +242,63 @@ aaudio_result_t SYSV BuilderDelete(Builder* b) {
   return kOk;
 }
 
+// Android 16's AAudioStreamParameters::validate / AudioStreamBuilder::validate.
+// Accepted ranges precede device setup; legal but unavailable backend features
+// report an error rather than silently becoming a different stream direction.
+aaudio_result_t ValidateBuilder(const Builder& b) {
+  if (b.channels < 0 || b.channels > 12 || b.device_id < 0) return kErrorOutOfRange;
+  if (b.sharing != 0 && b.sharing != kSharingShared) return kErrorIllegalArgument;
+  if (b.format < kFormatUnspecified || b.format > kFormatI32) return kErrorInvalidFormat;
+  if (b.sample_rate != 0 && (b.sample_rate < 8000 || b.sample_rate > 1600000)) return kErrorInvalidRate;
+  if (b.capacity < 0 || b.frames_per_callback < 0 || b.frames_per_callback > 1024 * 1024) {
+    return kErrorOutOfRange;
+  }
+  if (b.direction != kDirectionInput && b.direction != kDirectionOutput) return kErrorIllegalArgument;
+  if (!((b.usage >= 0 && b.usage <= 6) || (b.usage >= 10 && b.usage <= 14) ||
+        b.usage == 16 || (b.usage >= 1000 && b.usage <= 1003))) return kErrorIllegalArgument;
+  if (b.content_type < 0 || b.content_type > 4) return kErrorIllegalArgument;
+  switch (b.input_preset) {
+    case 0: case 1: case 5: case 6: case 7: case 9: case 10: case 1997: case 1999: break;
+    default: return kErrorIllegalArgument;
+  }
+  if (b.performance < 10 || b.performance > 13) return kErrorIllegalArgument;
+  if (b.performance == 13) return kErrorUnavailable;  // no offloaded hardware path
+  if (b.device_id != 0 && b.device_id !=
+      (b.direction == kDirectionInput ? kInputDeviceId : kOutputDeviceId)) return kErrorUnavailable;
+  if (b.direction == kDirectionInput) {
+    if (b.sample_rate > 192000) return kErrorInvalidRate;  // capture engine limit
+    if (b.channels > 8) return kErrorUnavailable;
+  }
+  return kOk;
+}
+
+aaudio_result_t ConfigureBuffers(AAudioStream* s, int64_t burst, int periods) {
+  if (burst <= 0 || burst > std::numeric_limits<int32_t>::max()) return kErrorOutOfRange;
+  s->burst = static_cast<int32_t>(burst);
+  if (s->b.data_cb != nullptr && s->b.frames_per_callback == 0) s->b.frames_per_callback = s->burst;
+  const int64_t capacity = std::max<int64_t>(s->b.capacity,
+      std::max<int64_t>(burst, s->b.frames_per_callback) * periods);
+  if (capacity > std::numeric_limits<int32_t>::max()) return kErrorOutOfRange;
+  // A bounded ring prevents valid-looking huge counts from terminating the
+  // no-exceptions audio backend during vector allocation. This is a host
+  // resource limit, not an advertised Android hardware capability.
+  constexpr uint64_t kMaxBufferBytes = 64u * 1024u * 1024u;
+  if (s->frame_size == 0 || static_cast<uint64_t>(capacity) > kMaxBufferBytes / s->frame_size) {
+    return kErrorNoMemory;
+  }
+  s->b.capacity = static_cast<int32_t>(capacity);
+  s->b.sharing = kSharingShared;
+  s->b.performance = kPerformanceNone;
+  return kOk;
+}
+
 aaudio_result_t OpenInputStream(Builder* b, AAudioStream** out) {
   if (!RecordingAllowed()) {
     MEDIA_LOGE("AAudio: the app does not have android.permission.RECORD_AUDIO");
     return kErrorUnavailable;
   }
-  auto s = std::make_unique<AAudioStream>();
+  std::unique_ptr<AAudioStream> s(new (std::nothrow) AAudioStream);
+  if (s == nullptr) return kErrorNoMemory;
   s->b = *b;
   InputInfo in = GetInputInfo();
   int32_t rate = b->sample_rate > 0 ? b->sample_rate : static_cast<int32_t>(in.sample_rate);
@@ -257,8 +315,9 @@ aaudio_result_t OpenInputStream(Builder* b, AAudioStream** out) {
   s->b.channels = channels;
   s->frame_size = BytesPerSample(s->pcm) * static_cast<size_t>(channels);
   // A burst is the capture engine's period (10 ms) at the stream's rate.
-  s->burst = b->frames_per_callback > 0 ? b->frames_per_callback : std::max<int32_t>(rate / 100, 64);
-  int32_t capacity = std::max(b->capacity > 0 ? b->capacity : 0, s->burst * 8);
+  aaudio_result_t configured = ConfigureBuffers(s.get(), std::max<int32_t>(rate / 100, 64), 8);
+  if (configured != kOk) return configured;
+  int32_t capacity = s->b.capacity;
   if (s->b.session_id == 0) s->b.session_id = NewSessionId();
   CaptureParams p;
   p.sample_rate = static_cast<uint32_t>(rate);
@@ -272,11 +331,11 @@ aaudio_result_t OpenInputStream(Builder* b, AAudioStream** out) {
     MEDIA_LOGE("AAudio: %s", error.c_str());
     return kErrorInternal;
   }
-  s->b.capacity = capacity;
+  s->b.capacity = static_cast<int32_t>(s->capture->capacity_frames());
   const char* trace = getenv("GESHER_MEDIA_TRACE_RECORD");
   if (trace != nullptr && trace[0] == '1') {
     MEDIA_LOGI("AAudio input open trace: %d Hz, requested capacity %d, effective capacity %d",
-               rate, b->capacity, capacity);
+               rate, b->capacity, s->b.capacity);
   }
   AAudioStream* raw = s.release();
   if (raw->b.data_cb != nullptr) raw->callback_thread = std::thread([raw] { CallbackLoop(raw); });
@@ -285,9 +344,14 @@ aaudio_result_t OpenInputStream(Builder* b, AAudioStream** out) {
 }
 
 aaudio_result_t SYSV OpenStream(Builder* b, AAudioStream** out) {
-  if (b == nullptr || out == nullptr) return kErrorNull;
+  if (out == nullptr) return kErrorNull;
+  *out = nullptr;
+  if (b == nullptr) return kErrorNull;
+  const aaudio_result_t validation = ValidateBuilder(*b);
+  if (validation != kOk) return validation;
   if (b->direction == kDirectionInput) return OpenInputStream(b, out);
-  auto s = std::make_unique<AAudioStream>();
+  std::unique_ptr<AAudioStream> s(new (std::nothrow) AAudioStream);
+  if (s == nullptr) return kErrorNoMemory;
   s->b = *b;
   OutputInfo out_info = GetOutputInfo();
   int32_t rate = b->sample_rate > 0 ? b->sample_rate : static_cast<int32_t>(out_info.sample_rate);
@@ -304,18 +368,18 @@ aaudio_result_t SYSV OpenStream(Builder* b, AAudioStream** out) {
   s->b.channels = channels;
   s->frame_size = BytesPerSample(s->pcm) * static_cast<size_t>(channels);
   // A burst is the mixer's period at the stream's rate.
-  s->burst = b->frames_per_callback > 0
-                 ? b->frames_per_callback
-                 : std::max<int32_t>(static_cast<int32_t>(static_cast<int64_t>(out_info.period_frames) *
-                                                          rate / std::max<uint32_t>(out_info.sample_rate, 1)),
-                                     64);
-  int32_t capacity = std::max(b->capacity > 0 ? b->capacity : 0, s->burst * 4);
+  const int64_t burst = std::max<int64_t>(
+      static_cast<int64_t>(out_info.period_frames) * rate / std::max<uint32_t>(out_info.sample_rate, 1), 64);
+  aaudio_result_t configured = ConfigureBuffers(s.get(), burst, 4);
+  if (configured != kOk) return configured;
+  int32_t capacity = s->b.capacity;
   if (s->b.session_id == 0) s->b.session_id = NewSessionId();  // AAUDIO_SESSION_ID_ALLOCATE
   TrackParams p;
   p.sample_rate = static_cast<uint32_t>(rate);
   p.channels = static_cast<uint32_t>(channels);
   p.format = s->pcm;
   p.stream_type = StreamForUsage(b->usage);
+  p.session_id = s->b.session_id > 0 ? s->b.session_id : 0;
   p.capacity_frames = static_cast<size_t>(capacity);
   p.name = "AAudio";
   std::string error;
@@ -324,7 +388,7 @@ aaudio_result_t SYSV OpenStream(Builder* b, AAudioStream** out) {
     MEDIA_LOGE("AAudio: %s", error.c_str());
     return kErrorInternal;
   }
-  s->b.capacity = capacity;
+  s->b.capacity = static_cast<int32_t>(s->track->buffer_capacity_frames());
   AAudioStream* raw = s.release();
   if (raw->b.data_cb != nullptr) raw->callback_thread = std::thread([raw] { CallbackLoop(raw); });
   *out = raw;
@@ -459,6 +523,7 @@ int32_t SYSV Read(AAudioStream* s, void* data, int32_t frames, int64_t timeout_n
 
 aaudio_result_t SYSV SetBufferSizeInFrames(AAudioStream* s, int32_t frames) {
   if (s == nullptr) return kErrorNull;
+  if (frames < 0) return kErrorOutOfRange;
   if (s->capture != nullptr) return s->b.capacity;
   return s->track->SetBufferSizeFrames(static_cast<uint32_t>(std::max(frames, 1)));
 }
@@ -481,10 +546,11 @@ int32_t SYSV GetSampleRate(AAudioStream* s) { return s != nullptr ? s->b.sample_
 int32_t SYSV GetChannelCount(AAudioStream* s) { return s != nullptr ? s->b.channels : kErrorNull; }
 // The output's, or the input's, AudioDeviceInfo id.
 int32_t SYSV GetDeviceId(AAudioStream* s) {
-  return s != nullptr && s->capture != nullptr ? kInputDeviceId : kOutputDeviceId;
+  if (s == nullptr) return kErrorNull;
+  return s->capture != nullptr ? kInputDeviceId : kOutputDeviceId;
 }
 int32_t SYSV GetFormat(AAudioStream* s) { return s != nullptr ? s->b.format : kErrorNull; }
-int32_t SYSV GetSharingMode(AAudioStream*) { return kSharingShared; }
+int32_t SYSV GetSharingMode(AAudioStream* s) { return s != nullptr ? s->b.sharing : kErrorNull; }
 int32_t SYSV GetPerformanceMode(AAudioStream* s) { return s != nullptr ? s->b.performance : kErrorNull; }
 int32_t SYSV GetDirection(AAudioStream* s) { return s != nullptr ? s->b.direction : kErrorNull; }
 int64_t SYSV GetFramesWritten(AAudioStream* s) {
@@ -504,11 +570,21 @@ int32_t SYSV GetInputPreset(AAudioStream* s) { return s != nullptr ? s->b.input_
 int32_t SYSV GetZero(AAudioStream*) { return 0; }
 bool SYSV GetFalse(AAudioStream*) { return false; }
 
-aaudio_result_t SYSV GetTimestamp(AAudioStream* s, int32_t /*clockid*/, int64_t* frames, int64_t* ns) {
+aaudio_result_t SYSV GetTimestamp(AAudioStream* s, int32_t clockid, int64_t* frames, int64_t* ns) {
   if (s == nullptr || frames == nullptr || ns == nullptr) return kErrorNull;
+  // Guest Linux IDs. The media engine timestamps use host MONOTONIC. A
+  // suspend-aware BOOTTIME translation is not yet available; do not silently
+  // return a timestamp from a different clock domain.
+  if (clockid == 7) return kErrorUnimplemented;
+  if (clockid != 1) return kErrorIllegalArgument;
   if (s->state != kStateStarted) return kErrorInvalidState;
-  if (s->capture != nullptr) return s->capture->Timestamp(frames, ns) ? kOk : kErrorInvalidState;
-  return s->track->Timestamp(frames, ns) ? kOk : kErrorInvalidState;
+  int64_t position = 0, timestamp = 0;
+  const bool have = s->capture != nullptr ? s->capture->Timestamp(&position, &timestamp)
+                                        : s->track->Timestamp(&position, &timestamp);
+  if (!have) return kErrorInvalidState;
+  *frames = position;
+  *ns = timestamp;
+  return kOk;
 }
 
 const char* SYSV ResultToText(aaudio_result_t r) {
@@ -519,9 +595,12 @@ const char* SYSV ResultToText(aaudio_result_t r) {
     case kErrorInvalidState: return "AAUDIO_ERROR_INVALID_STATE";
     case kErrorUnimplemented: return "AAUDIO_ERROR_UNIMPLEMENTED";
     case kErrorUnavailable: return "AAUDIO_ERROR_UNAVAILABLE";
+    case kErrorNoMemory: return "AAUDIO_ERROR_NO_MEMORY";
     case kErrorNull: return "AAUDIO_ERROR_NULL";
     case kErrorTimeout: return "AAUDIO_ERROR_TIMEOUT";
     case kErrorInvalidFormat: return "AAUDIO_ERROR_INVALID_FORMAT";
+    case kErrorOutOfRange: return "AAUDIO_ERROR_OUT_OF_RANGE";
+    case kErrorInvalidRate: return "AAUDIO_ERROR_INVALID_RATE";
     default: return "Unrecognized AAudio error";
   }
 }

@@ -9,6 +9,7 @@
 
 #include <gesher/system_properties.h>
 #include <gesher/logging.h>
+#include <gesher/reserved_names.h>
 
 #include <windows.h>
 #include <tlhelp32.h>
@@ -83,7 +84,7 @@ int ListOne(const std::string& path, bool long_form, bool all) {
     HANDLE h = FindFirstFileW((w + L"\\*").c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
       do {
-        std::string name = Narrow(fd.cFileName);
+        std::string name = Narrow(gesher::reserved_names::Decoded(fd.cFileName));
         if (!all && !name.empty() && name[0] == '.') continue;
         names.push_back(name);
       } while (FindNextFileW(h, &fd));
@@ -94,7 +95,9 @@ int ListOne(const std::string& path, bool long_form, bool all) {
   }
   for (const std::string& n : names) {
     if (long_form) {
-      std::wstring full = (attrs & FILE_ATTRIBUTE_DIRECTORY) ? w + L"\\" + Widen(n) : w;
+      std::wstring name = Widen(n);
+      gesher::reserved_names::EncodeName(&name);  // listed decoded, stored encoded
+      std::wstring full = (attrs & FILE_ATTRIBUTE_DIRECTORY) ? w + L"\\" + name : w;
       WIN32_FILE_ATTRIBUTE_DATA info = {};
       long long size = 0;
       char type = '-';

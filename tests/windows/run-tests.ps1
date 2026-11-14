@@ -208,6 +208,7 @@ $testTracks = if ($FrameworkContractsOnly) {
 if ($FrameworkContractsOnly) {
   $systemContractTrack = Join-Path $PSScriptRoot 'tracks/98-system-contracts.ps1'
   $testTracks += Get-Item -LiteralPath $systemContractTrack -ErrorAction Stop
+  $testTracks += Get-Item -LiteralPath (Join-Path $PSScriptRoot 'tracks/99-android-windows-contracts.ps1') -ErrorAction Stop
 }
 foreach ($t in $testTracks) {
   try {

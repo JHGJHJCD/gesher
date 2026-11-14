@@ -53,8 +53,11 @@ bool Near(float a, float b) {
 
 // Win32 (winuser.h), without windows.h next to AOSP's headers.
 constexpr uint32_t kWmKeyDown = 0x0100, kWmKeyUp = 0x0101, kWmMouseMove = 0x0200,
-                   kWmLButtonDown = 0x0201, kWmLButtonUp = 0x0202, kWmMouseWheel = 0x020A;
-constexpr uint64_t kMkLButton = 0x0001;
+                   kWmLButtonDown = 0x0201, kWmLButtonUp = 0x0202,
+                   kWmRButtonDown = 0x0204, kWmRButtonUp = 0x0205,
+                   kWmMouseWheel = 0x020A, kWmCaptureChanged = 0x0215,
+                   kWmCancelMode = 0x001F;
+constexpr uint64_t kMkLButton = 0x0001, kMkRButton = 0x0002;
 
 int64_t Point(int x, int y) {
   return (static_cast<int64_t>(static_cast<uint16_t>(y)) << 16) | static_cast<uint16_t>(x);
@@ -218,6 +221,103 @@ void TestKeyContracts() {
   auto fresh = key('A', 30, true, true, 1000);
   check(fresh.down_time == 1000 && fresh.repeat_count == 0,
         "translate: focus loss clears key history");
+}
+
+void TestMouseCancellation() {
+  Translator translator(TranslateOptions{});
+  std::vector<AndroidEvent> out;
+  WindowEvent press = Event(WindowEvent::kMouseDown, 12, 34);
+  press.button = 1;
+  translator.Translate(press, 100, &out);
+  out.clear();
+  WindowEvent cancel = Event(WindowEvent::kMouseCancel);
+  check(Translator::IsInput(cancel), "capture: cancellation enters input translation");
+  translator.Translate(cancel, 120, &out);
+  check(out.size() == 1 && out[0].action == AMOTION_EVENT_ACTION_CANCEL &&
+            (out[0].flags & AMOTION_EVENT_FLAG_CANCELED) != 0 &&
+            out[0].down_time == 100 && out[0].event_time == 120 &&
+            Near(out[0].cursor_x, 12) && Near(out[0].cursor_y, 34),
+        "capture: Android cancel preserves gesture time, last coordinates and canceled flag");
+  out.clear();
+  translator.Translate(cancel, 121, &out);
+  WindowEvent release = press;
+  release.type = WindowEvent::kMouseUp;
+  translator.Translate(release, 122, &out);
+  check(out.empty(), "capture: repeated cancellation and stale button-up cannot click");
+  translator.Translate(press, 130, &out);
+  check(out.size() == 2 && out[0].action == AMOTION_EVENT_ACTION_DOWN &&
+            out[0].down_time == 130,
+        "capture: the same button starts a fresh gesture after cancellation");
+}
+
+// A posted key-up is an ordered barrier on the real window message thread.
+// Pointer routing is independent, so this marker remains in the source queue.
+bool CaptureBarrier(gesher::Window* window) {
+  constexpr int kF24 = 0x87;
+  if (!PostWindowMessage(window->hwnd(), kWmKeyUp, kF24, 1)) return false;
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  WindowEvent event;
+  while (std::chrono::steady_clock::now() < deadline) {
+    if (window->WaitEvent(&event, 100) && event.type == WindowEvent::kKeyUp &&
+        event.key == kF24) return true;
+  }
+  return false;
+}
+
+std::vector<int> CaptureEvents(gesher::Window* window) {
+  std::vector<int> result;
+  WindowEvent event;
+  while (window->PollEvent(&event)) {
+    if (event.type == WindowEvent::kMouseDown || event.type == WindowEvent::kMouseUp ||
+        event.type == WindowEvent::kMouseCancel) result.push_back(event.type);
+  }
+  return result;
+}
+
+void TestCaptureWindowRouting() {
+  std::unique_ptr<gesher::Window> window(gesher::Window::Create("Capture source", 80, 80));
+  std::unique_ptr<gesher::Window> first(gesher::Window::Create("Capture first target", 80, 80));
+  std::unique_ptr<gesher::Window> next(gesher::Window::Create("Capture next target", 80, 80));
+  check(window && first && next, "capture: real hidden Windows source and routing targets");
+  if (!window || !first || !next) return;
+  window->SetInputRoute(first.get(), nullptr, {});
+  check(PostWindowMessage(window->hwnd(), kWmLButtonDown, kMkLButton, Point(10, 20)) &&
+            CaptureBarrier(window.get()), "capture: first routed press delivered");
+  check(CaptureEvents(first.get()) == std::vector<int>{WindowEvent::kMouseDown},
+        "capture: initial gesture belongs to original target");
+  window->SetInputRoute(next.get(), nullptr, {});
+  check(PostWindowMessage(window->hwnd(), kWmCancelMode, 0, 0) && CaptureBarrier(window.get()),
+        "capture: actual WM_CANCELMODE and DefWindowProc completed");
+  check(CaptureEvents(first.get()) == std::vector<int>{WindowEvent::kMouseCancel} &&
+            CaptureEvents(next.get()).empty(),
+        "capture: original target gets exactly one cancel after route changes");
+  check(PostWindowMessage(window->hwnd(), kWmLButtonDown, kMkLButton, Point(30, 40)) &&
+            PostWindowMessage(window->hwnd(), kWmLButtonUp, 0, Point(30, 40)) &&
+            CaptureBarrier(window.get()), "capture: fresh routed click completed");
+  check(CaptureEvents(next.get()) ==
+            std::vector<int>{WindowEvent::kMouseDown, WindowEvent::kMouseUp} &&
+            CaptureEvents(first.get()).empty(),
+        "capture: new route receives normal click without spurious ReleaseCapture cancel");
+  check(PostWindowMessage(window->hwnd(), kWmLButtonDown, kMkLButton, Point(30, 40)) &&
+            PostWindowMessage(window->hwnd(), kWmRButtonDown, kMkLButton | kMkRButton,
+                              Point(30, 40)) &&
+            PostWindowMessage(window->hwnd(), kWmRButtonUp, kMkLButton, Point(30, 40)) &&
+            PostWindowMessage(window->hwnd(), kWmLButtonUp, 0, Point(30, 40)) &&
+            CaptureBarrier(window.get()), "capture: real Windows two-button chord completed");
+  check(CaptureEvents(next.get()) ==
+            std::vector<int>{WindowEvent::kMouseDown, WindowEvent::kMouseDown,
+                             WindowEvent::kMouseUp, WindowEvent::kMouseUp} &&
+            CaptureEvents(first.get()).empty(),
+        "capture: secondary press and partial release preserve the original gesture");
+  check(PostWindowMessage(window->hwnd(), kWmLButtonDown, kMkLButton, Point(30, 40)) &&
+            PostWindowMessage(window->hwnd(), kWmCaptureChanged, 0,
+                              reinterpret_cast<intptr_t>(window->hwnd())) &&
+            PostWindowMessage(window->hwnd(), kWmLButtonUp, 0, Point(30, 40)) &&
+            CaptureBarrier(window.get()), "capture: same-owner notification delivered");
+  check(CaptureEvents(next.get()) ==
+            std::vector<int>{WindowEvent::kMouseDown, WindowEvent::kMouseUp} &&
+            CaptureEvents(first.get()).empty(),
+        "capture: same-owner notification does not cancel the routed gesture");
 }
 
 void TestKeyMap() {
@@ -475,6 +575,8 @@ void TestChannel() {
 
 int main() {
   TestTranslation();
+  TestMouseCancellation();
+  TestCaptureWindowRouting();
   TestKeyContracts();
   TestKeyMap();
   TestChannel();
