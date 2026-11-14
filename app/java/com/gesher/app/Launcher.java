@@ -778,8 +778,7 @@ public final class Launcher {
 
     private static void printTail(File file, int lines) {
         try {
-            List<String> all = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
-            for (String l : all.subList(Math.max(0, all.size() - lines), all.size())) {
+            for (String l : LogLines.readTail(file, lines)) {
                 System.err.println("  " + l);
             }
         } catch (IOException e) {

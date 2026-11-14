@@ -4,13 +4,42 @@
  */
 package com.gesher.app;
 import java.io.ByteArrayOutputStream;
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /** Frames a single reader's byte chunks into atomic stdout lines. */
 public final class LogLines {
     private final PrintStream output;
-    private final ByteArrayOutputStream pending = new ByteArrayOutputStream();
+    private final LineBuffer pending = new LineBuffer();
+
+    /** The reader owns this buffer until a synchronous write finishes. */
+    private static final class LineBuffer extends ByteArrayOutputStream {
+        void writeTo(PrintStream output) { output.write(buf, 0, count); }
+    }
+
     public LogLines(PrintStream output) { this.output = output; }
+
+    /** Reads a UTF-8 suffix without retaining every preceding line of a large log. */
+    public static List<String> readTail(File file, int lines) throws IOException {
+        if (lines < 0) throw new IllegalArgumentException("Negative line count");
+        if (lines == 0) return Collections.emptyList();
+        ArrayDeque<String> tail = new ArrayDeque<>();
+        try (BufferedReader reader = Files.newBufferedReader(file.toPath(), StandardCharsets.UTF_8)) {
+            for (String line; (line = reader.readLine()) != null; ) {
+                if (tail.size() == lines) tail.removeFirst();
+                tail.addLast(line);
+            }
+        }
+        return new ArrayList<>(tail);
+    }
     public void write(byte[] bytes, int offset, int count) {
         int end = offset + count;
         int start = offset;
@@ -32,9 +61,8 @@ public final class LogLines {
         }
     }
     private void emit() {
-        byte[] line = pending.toByteArray();
         synchronized (output) {
-            output.write(line, 0, line.length);
+            pending.writeTo(output);
             output.flush();
         }
         pending.reset();
