@@ -161,6 +161,10 @@ struct Track::Resampler {
 
   uint32_t channels;
   std::vector<float> hist;  // interleaved; hist frame 0 is source frame start_index
+  // Mixing scratch belongs to this track and is protected by Track::mu_. Keep
+  // its capacity through Reset() so each 10 ms block does not allocate again.
+  std::vector<float> frame;
+  std::vector<float> source;
   size_t width;             // half-width in source frames of the current filter
   double t;                 // the next output frame's center, in hist frames
   int64_t start_index;      // source index of hist frame 0 (negative while primed zeros)
@@ -815,8 +819,9 @@ bool Track::MixInto(float* mix, size_t frames, uint32_t out_rate, uint32_t out_c
   }
 
   uint64_t played_before = played_;
-  std::vector<float> frame(ch);
-  std::vector<float> tmp;
+  std::vector<float>& frame = rs.frame;
+  frame.resize(ch);
+  std::vector<float>& tmp = rs.source;
   size_t out_done = 0;
   bool ended = false;
   bool starved = false;
