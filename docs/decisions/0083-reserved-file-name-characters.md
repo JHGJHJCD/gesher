@@ -32,8 +32,8 @@ the disk for Linux code turns back:
 
 | Direction | Where |
 |---|---|
-| Linux to Windows (encode) | `MapPath` (every path call, including configured/install font roots), a relative `symlink` target, the bionic shim's `unlink`/`rmdir`, the exec tools' `WindowsPath` |
-| Windows to Linux (decode) | `LinuxPath` (`getcwd`, `realpath`, `readlink` of absolute targets and of `/proc/self/fd`), `readdir`, `readlink` of relative targets, inotify event names, the exec shell's globbing and `ls` |
+| Linux to Windows (encode) | `MapPath` (every path call, including configured/install font roots), a relative `symlink` target, the bionic shim's `unlink`/`rmdir`, the exec tools' `WindowsPath`, Java's `Zygote.windowsPath` |
+| Windows to Linux (decode) | `LinuxPath` (`getcwd`, `realpath`, `readlink` of absolute targets and of `/proc/self/fd`), `readdir`, `readlink` of relative targets, inotify event names, the exec shell's globbing and `ls`, Java's `Zygote.fromWindowsPath` |
 
 The Windows root of a path keeps its characters in both directions. Native
 paths decode only below that root, before conversion to the `/mnt/unc`
@@ -55,9 +55,11 @@ unchanged, and so are a trailing dot or space and the device names (`CON`,
   or Windows software, aliases the corresponding reserved character. This
   mapping cannot represent those two names separately. Windows root
   components are preserved and do not undergo that decoding.
-- Gesher's Java code that builds Windows paths itself (`Zygote.windowsPath`,
-  for icons, APKs, logs and caches, and a WebView file upload) does not encode
-  them. None of those names holds a reserved character today.
+- Gesher's Java code that builds Windows paths itself goes through
+  `Zygote.windowsPath` (icons, APKs, logs, caches, and a WebView file upload of an
+  app's file), which encodes the names under the root the same way, so an
+  uploaded `a:b.txt` is the file the app wrote. A file picker's Windows path
+  comes back through `Zygote.fromWindowsPath`, which decodes.
 - Windows tools such as Explorer, a backup tool or `dir` show the private-use
   characters, usually as boxes. The data directory is the app's, not the user's.
 - Data written before this change: a two-colon name never reached the disk. A
@@ -83,3 +85,6 @@ must work through both `/system/etc/fonts.xml` and `/system/fonts`.
 The mandatory exec shell smoke suite checks quoted literal `?` and `*` next
 to an active wildcard, a quoted directory component before an active child
 pattern, and a wildcard matching a filename that itself contains `*`.
+
+`tests/dex-services/gesher/services/ZygotePathTest.java`: the Java conversion,
+the roots kept, and round trips through `fromWindowsPath`.
