@@ -28,6 +28,8 @@
 
 #include "gesher_shell.h"
 
+#include <gesher/reserved_names.h>
+
 #include <io.h>
 #include <windows.h>
 
@@ -1641,7 +1643,7 @@ void GlobExpand(Shell* sh, const std::string& text, const std::string& glob,
       HANDLE h = FindFirstFileW((wdir + L"\\*").c_str(), &fd);
       if (h != INVALID_HANDLE_VALUE) {
         do {
-          std::string name = Narrow(fd.cFileName);
+          std::string name = Narrow(gesher::reserved_names::Decoded(fd.cFileName));
           if (name == "." || name == "..") continue;
           if (!name.empty() && name[0] == '.' &&
               (comp.empty() || comp[0] != '.'))

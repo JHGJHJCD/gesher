@@ -1,8 +1,8 @@
 // gesher-base probe (ADR 0045, docs/posix.md): the path calls through the
 // path model (other drives as /mnt/<drive>, long and non-ASCII names, rename,
-// links, access, fopen), /proc/self and /etc/timezone, inotify (alone and in
-// epoll), and the process model (getppid, kill between processes, resource
-// limits), built against gesher-base's Linux headers like AOSP code.
+// links, access, fopen, names with characters Windows reserves), /proc/self
+// and /etc/timezone, inotify (alone and in epoll), and the process model
+// (getppid, kill between processes, resource limits), built against gesher-base's Linux headers like AOSP code.
 //
 //   posix_probe                 all checks; prints "all passed" and exits 0
 //   posix_probe --timezone      prints the content of /etc/timezone
@@ -527,6 +527,81 @@ static void Inotify(const std::string& dir) {
   unlink((dir + "/late.txt").c_str());
 }
 
+// Names with characters Windows reserves (gesher/reserved_names.h): Firebase's
+// "frc_<n>:<project>:android:<id>_..._settings.xml", Play Store's
+// "<package>:<process>" directories. They are stored as U+F000 + c and read
+// back as given; a ':' must never reach NTFS, where it names a data stream.
+static bool Listed(const std::string& dir, const char* name) {
+  DIR* d = opendir(dir.c_str());
+  if (d == nullptr) return false;
+  bool found = false;
+  while (struct dirent* e = readdir(d)) found = found || strcmp(e->d_name, name) == 0;
+  closedir(d);
+  return found;
+}
+
+static void ReservedNames(const std::string& dir) {
+  std::string sub = dir + "/com.example:background";
+  CHECK(mkdir(sub.c_str(), 0755) == 0);
+  CHECK(Listed(dir, "com.example:background"));
+  const char* prefs = "frc_1:4:android:fb5_fireperf_settings.xml";
+  std::string file = sub + "/" + prefs;
+  CHECK(PutFile(file, "settings"));
+  CHECK(FileContent(file) == "settings");
+  CHECK(Listed(sub, prefs));
+  struct stat st;
+  CHECK(stat(file.c_str(), &st) == 0 && S_ISREG(st.st_mode) && st.st_size == 8);
+  CHECK(access(file.c_str(), R_OK | W_OK) == 0);
+
+  // On the disk: the encoded name, and no stream of a file "frc_1".
+  std::wstring windows(sub.begin(), sub.end());
+  for (wchar_t& c : windows) c = c == L'/' ? L'\' : c == L':' ? 0xF03A : c;
+  CHECK(GetFileAttributesW(windows.c_str()) != INVALID_FILE_ATTRIBUTES);
+  CHECK(GetFileAttributesW((windows + L"\frc_1\xF03A" L"4\xF03A" L"android\xF03A"
+                            L"fb5_fireperf_settings.xml").c_str()) != INVALID_FILE_ATTRIBUTES);
+  CHECK(GetFileAttributesW((windows + L"\frc_1").c_str()) == INVALID_FILE_ATTRIBUTES);
+
+  // Every reserved character, renamed in and out; O_EXCL sees the name.
+  std::string odd = sub + "/a?b*c<d>e|f\"g";
+  CHECK(rename(file.c_str(), odd.c_str()) == 0);
+  CHECK(Listed(sub, "a?b*c<d>e|f\"g") && !Listed(sub, prefs));
+  CHECK(open(odd.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644) == -1 && errno == EEXIST);
+  CHECK(FileContent(odd) == "settings");
+
+  // A relative symbolic link to such a name reads back as it was given.
+  int sl = symlink("a?b*c<d>e|f\"g", (sub + "/x:link").c_str());
+  if (sl == -1 && errno == EPERM) {
+    printf("INFO reserved names: no privilege to create symbolic links; not checked\n");
+  } else {
+    CHECK(sl == 0);
+    char target[256];
+    ssize_t n = readlink((sub + "/x:link").c_str(), target, sizeof(target));
+    CHECK(n == 13 && memcmp(target, "a?b*c<d>e|f\"g", 13) == 0);
+    CHECK(FileContent(sub + "/x:link") == "settings");
+    CHECK(unlink((sub + "/x:link").c_str()) == 0);
+  }
+
+  // The current directory, and inotify's names.
+  char cwd[4096];
+  CHECK(getcwd(cwd, sizeof(cwd)) != nullptr);
+  CHECK(chdir(sub.c_str()) == 0);
+  char inside[4096];
+  CHECK(getcwd(inside, sizeof(inside)) != nullptr &&
+        strstr(inside, "/com.example:background") != nullptr);
+  CHECK(FileContent("a?b*c<d>e|f\"g") == "settings");
+  CHECK(chdir(cwd) == 0);
+  int in = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+  CHECK(in >= 0 && inotify_add_watch(in, sub.c_str(), IN_CREATE) > 0);
+  CHECK(PutFile(sub + "/new:file", "n"));
+  std::vector<Event> seen;
+  CHECK(WaitFor(in, IN_CREATE, "new:file", &seen));
+  close(in);
+
+  CHECK(unlink((sub + "/new:file").c_str()) == 0);
+  CHECK(unlink(odd.c_str()) == 0 && !Exists(odd));
+  CHECK(rmdir(sub.c_str()) == 0 && !Exists(sub));
+}
+
 // --- process model --------------------------------------------------------------------
 
 static int RunChild(const char* mode) {
@@ -698,6 +773,9 @@ int main(int argc, char** argv) {
   Proc(dir);
   fprintf(stderr, "-- %s\n", "Inotify");
   Inotify(dir);
+  fprintf(stderr, "-- %s
+", "ReservedNames");
+  ReservedNames(dir);
   fprintf(stderr, "-- %s\n", "Processes");
   Processes();
   CHECK(nftw(dir.c_str(), RemoveTree, 8, FTW_DEPTH | FTW_PHYS) == 0 && !Exists(dir));

@@ -111,11 +111,13 @@ jobs:
           CXX='c++ -fsanitize=thread -fno-omit-frame-pointer' \
             python3 tools/test_futex_contracts.py --group guest --group concurrency
 
-      - name: Temporary directory and UNC namespace contracts
+      - name: Temporary directory, UNC namespace and reserved file-name contracts
         run: |
           python3 tools/test_temp_directory.py
           c++ -std=c++17 -Wall -Wextra -Werror tests/paths/unc_paths_test.cc -o "$RUNNER_TEMP/gesher-unc-paths"
           "$RUNNER_TEMP/gesher-unc-paths"
+          c++ -std=c++17 -Wall -Wextra -Werror tests/paths/reserved_names_test.cc -o "$RUNNER_TEMP/gesher-reserved-names"
+          "$RUNNER_TEMP/gesher-reserved-names"
 
       - name: Anonymous mapping zeroing and protection contracts
         run: python3 tools/test_mman_zeroing_mappings.py --sanitize

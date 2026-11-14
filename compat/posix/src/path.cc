@@ -23,6 +23,7 @@
 #include <shellapi.h>
 #include <gesher/font_paths.h>
 #include <gesher/font_environment.h>
+#include <gesher/reserved_names.h>
 #include <gesher/unc_paths.h>
 
 #include <string>
@@ -338,7 +339,8 @@ static int SystemFontPath(const char* path, std::wstring* windows) {
 
 PathKind MapPath(const char* path, std::wstring* windows) {
   // "//name" is left to Windows as a UNC path; POSIX lets an implementation
-  // give a leading "//" its own meaning.
+  // give a leading "//" its own meaning. A name with a character Windows
+  // reserves (':' and the like) is stored encoded (gesher/reserved_names.h).
   if (path[0] == '/' && path[1] != '/') {
     auto unc = unc_paths::ToWindows(Widen(path), windows);
     if (unc == unc_paths::Match::kInvalid) {
@@ -346,6 +348,7 @@ PathKind MapPath(const char* path, std::wstring* windows) {
       return PathKind::kMissing;
     }
     if (unc == unc_paths::Match::kMapped) {
+      reserved_names::Encode(windows);
       Lengthen(windows);
       return PathKind::kFile;
     }
@@ -354,11 +357,13 @@ PathKind MapPath(const char* path, std::wstring* windows) {
     int font = SystemFontPath(path, windows);
     if (font != 0) return font > 0 ? PathKind::kFile : PathKind::kMissing;
     if (DrivePath(path, windows)) {
+      reserved_names::Encode(windows);
       Lengthen(windows);
       return PathKind::kFile;
     }
   }
   *windows = Widen(path);
+  reserved_names::Encode(windows);
   Lengthen(windows);
   return PathKind::kFile;
 }
@@ -403,7 +408,10 @@ int CurrentDrive() {
 
 std::string LinuxPath(const wchar_t* windows) {
   std::wstring unc;
-  if (unc_paths::FromWindows(windows, &unc)) return Narrow(unc.c_str());
+  if (unc_paths::FromWindows(windows, &unc)) {
+    reserved_names::Decode(&unc);
+    return Narrow(unc.c_str());
+  }
   std::wstring path = windows;
   if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) {
     path = L"\\\\" + path.substr(8);
@@ -413,6 +421,7 @@ std::string LinuxPath(const wchar_t* windows) {
   for (wchar_t& c : path) {
     if (c == L'\\') c = L'/';
   }
+  reserved_names::Decode(&path);
   int drive = CurrentDrive();
   if (path.size() >= 2 && path[1] == L':' && iswalpha(path[0]) && (path.size() == 2 || path[2] == L'/')) {
     if (drive > 0 && towupper(path[0]) == static_cast<wchar_t>(L'A' + drive - 1)) {

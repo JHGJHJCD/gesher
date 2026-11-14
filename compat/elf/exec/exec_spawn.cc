@@ -2,6 +2,8 @@
 
 #include "exec_spawn.h"
 
+#include <gesher/reserved_names.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -307,6 +309,7 @@ std::wstring WindowsPath(const std::string& path, const std::string& dir) {
   std::string full = path;
   if (!IsAbsolute(path) && !dir.empty()) full = dir + "/" + path;
   std::wstring w = Widen(full);
+  gesher::reserved_names::Encode(&w);  // names stored as gesher-base stores them
   std::replace(w.begin(), w.end(), L'/', L'\\');
   DWORD n = GetFullPathNameW(w.c_str(), 0, nullptr, nullptr);
   if (n == 0) return w;

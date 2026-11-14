@@ -43,6 +43,8 @@
 #include <thread>
 #include <vector>
 
+#include <gesher/reserved_names.h>
+
 #include "event_internal.h"
 #include "internal.h"
 
@@ -160,7 +162,7 @@ struct Inotify {
   // A watch's event, if its mask wants it; IN_ONESHOT ends the watch.
   void EmitFor(Watch& w, uint32_t mask, uint32_t cookie, const std::wstring& name) {
     if ((mask & (w.mask | kAlways)) == 0 || w.removed) return;
-    Emit(w.wd, mask, cookie, Narrow(name.c_str()));
+    Emit(w.wd, mask, cookie, Narrow(reserved_names::Decoded(name).c_str()));
     if ((w.mask & IN_ONESHOT) != 0 && (mask & kAlways) == 0) End(w);
   }
 

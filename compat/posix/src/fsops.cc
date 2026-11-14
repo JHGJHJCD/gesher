@@ -21,6 +21,8 @@
 
 #include <string>
 
+#include <gesher/reserved_names.h>
+
 #include "internal.h"
 #include "record_lock_descriptors.h"
 
@@ -339,6 +341,7 @@ int Symlink(const char* target, const char* linkpath) {
     if (n != 0 && n < full.size()) windows_target = full.substr(0, n);
   } else {
     windows_target = gesher::Widen(target);
+    gesher::reserved_names::EncodeName(&windows_target);
   }
   for (wchar_t& c : windows_target) {
     if (c == L'/') c = L'\\';
