@@ -185,9 +185,27 @@ public final class IdentitySecurityTest {
         Method forPid = identityClass.getMethod("packageForPid", int.class);
         require(pkg.equals(forPid.invoke(identity, 888884)), "Attached PID did not map to its own package");
         require(forPid.invoke(identity, 888885) == null, "Unknown PID received an app identity");
+        // Told to exit but still running (onTerminate, queued main-looper work): Android
+        // keeps its Binder identity until the process is gone, so services must not turn
+        // its last calls into SecurityExceptions.
         field(processClass, "exiting").setBoolean(record, true);
-        require(forPid.invoke(identity, 888884) == null, "Exiting process retained its app identity");
-        System.out.println("IdentitySecurityTest: guessed start, PID/UID mismatch and stale-PID mapping denied");
+        require(pkg.equals(forPid.invoke(identity, 888884)), "Exiting live process lost its app identity");
+        // A reused PID: the live process that attached later owns it, not the exiting one.
+        Object reused = construct(processClass, new Class<?>[] {atmClass, int.class, IApplicationThread.class},
+                atm, 888884, new ThreadStub());
+        field(processClass, "packageName").set(reused, "test.identity.reused");
+        field(processClass, "processName").set(reused, "test.identity.reused");
+        processes.add(reused);
+        require("test.identity.reused".equals(forPid.invoke(identity, 888884)),
+                "An exiting record shadowed the live process that reused its PID");
+        processes.remove(reused);
+        field(processClass, "dead").setBoolean(record, true);
+        require(forPid.invoke(identity, 888884) == null, "Dead process retained its app identity");
+        field(processClass, "dead").setBoolean(record, false);
+        processes.remove(record);
+        require(forPid.invoke(identity, 888884) == null, "Removed process retained its app identity");
+        System.out.println("IdentitySecurityTest: guessed start, PID/UID mismatch and stale-PID mapping denied;"
+                + " exiting live process keeps its identity");
     }
 
     public static void main(String[] args) throws Exception {

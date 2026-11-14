@@ -123,6 +123,20 @@ public final class DynamicShortcutTest {
             try {api.setDynamicShortcuts(pkg,new ParceledListSlice<>(tooMany),0);throw new AssertionError("unbounded snapshot accepted");}
             catch(IllegalArgumentException expected){checks++;}
             require(list(api,pkg).size()==2,"rejected batch changed state");
+            // A publisher told to exit still runs app code (onTerminate, queued listeners:
+            // OsmAnd's LauncherShortcutsHelper reads and prunes its shortcuts then). Its
+            // Binder identity holds until it dies, as on Android; only death revokes it.
+            Object process=field(harness,"process");
+            Field exiting=process.getClass().getDeclaredField("exiting");exiting.setAccessible(true);
+            Field dead=process.getClass().getDeclaredField("dead");dead.setAccessible(true);
+            exiting.setBoolean(process,true);
+            try {
+                require(list(api,pkg).size()==2,"exiting publisher could not read its shortcuts");
+                api.removeDynamicShortcuts(pkg,Collections.singletonList("absent"),0);
+                require(list(api,pkg).size()==2,"exiting publisher prune changed unrelated shortcuts");
+                dead.setBoolean(process,true);
+                denied(()->api.getShortcuts(pkg,15,0));
+            } finally {dead.setBoolean(process,false);exiting.setBoolean(process,false);}
             Binder.restoreCallingIdentity(((long)owner.uid()<<32)|999991);
             denied(()->api.getShortcuts(pkg,15,0));
             Binder.restoreCallingIdentity(((long)owner.uid()<<32)|910001);

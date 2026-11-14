@@ -1419,13 +1419,25 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     /** Only a package assigned to a live, attached Binder PID can act as that app. */
+    /**
+     * The package of the attached process that owns {@code pid}, until that process dies.
+     * A process told to exit (idle exit, a closed last window, force-stop) still runs
+     * app code until it is gone: Application.onTerminate, queued main-looper work,
+     * listeners. On Android its calls keep their Binder UID identity until the kernel
+     * reaps it, so system services answer them instead of failing with a
+     * SecurityException that the app would turn into a crash. Lifecycle admission
+     * (new work for an exiting process) is decided elsewhere, through
+     * {@link #callerProcess}. A dead record is removed by processDied and never matches;
+     * a live record sharing the PID (a reused PID) wins over an exiting one.
+     */
     synchronized String authenticatedPackageForPid(int pid) {
+        String exiting = null;
         for (ProcessRecord app : mProcesses) {
-            if (app.pid == pid && !app.exiting && app.packageName != null) {
-                return app.packageName;
-            }
+            if (app.pid != pid || app.dead || app.packageName == null) continue;
+            if (!app.exiting) return app.packageName;
+            if (exiting == null) exiting = app.packageName;
         }
-        return null;
+        return exiting;
     }
 
     /** One-time enrollment in a mode that already permits real self-attachment. */
