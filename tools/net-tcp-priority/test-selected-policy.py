@@ -53,6 +53,61 @@ FCNTL_REPLACEMENTS=(
   }
 '''),
 )
+# The reviewed TCP fixture change adds failure-only select diagnostics and two
+# final call-site labels. Derive the complete expected file from BASE using
+# only these unique literal replacements; no function region is excluded.
+# All assertion predicates, deadlines and other fixture bytes remain exact.
+TCP_DIAGNOSTIC_REPLACEMENTS=(
+ (br'''static void ready(int fd, bool urgent, int timeout = 0) {
+  pollfd p{fd, POLLPRI, 0};
+  require(poll(&p, 1, timeout) == (urgent ? 1 : 0), urgent ? "poll urgent" : "poll no urgent");
+  require(p.revents == (urgent ? POLLPRI : 0), "priority mask");
+  fd_set exceptions; FD_ZERO(&exceptions); FD_SET(fd, &exceptions);
+  timeval zero{};
+  require(select(fd + 1, nullptr, nullptr, &exceptions, &zero) == (urgent ? 1 : 0), "select exception count");
+  require((FD_ISSET(fd, &exceptions) != 0) == urgent, "select exception membership");
+}
+''',
+  br'''static void ready(int fd, bool urgent, int timeout = 0,
+                  const char* phase = "scenario", int call_line = __builtin_LINE()) {
+  pollfd p{fd, POLLPRI, 0};
+  const int polled = poll(&p, 1, timeout);
+  require(polled == (urgent ? 1 : 0), urgent ? "poll urgent" : "poll no urgent");
+  require(p.revents == (urgent ? POLLPRI : 0), "priority mask");
+  const short poll_revents = p.revents;
+  fd_set exceptions; FD_ZERO(&exceptions); FD_SET(fd, &exceptions);
+  timeval zero{};
+  const int errno_before = errno;
+  const int selected = select(fd + 1, nullptr, nullptr, &exceptions, &zero);
+  const int errno_after = errno;
+  auto diagnose = [&](bool member) {
+    fprintf(stderr, "TCP_PRIORITY_SELECT_DIAGNOSTIC phase=%s line=%d fd=%d expected_urgent=%d "
+            "poll_timeout_ms=%d poll_rc=%d poll_revents=%d select_rc=%d "
+            "errno_before=%d errno_after=%d member=%d\n",
+            phase, call_line, fd, urgent, timeout, polled, poll_revents, selected,
+            errno_before, errno_after, member);
+    errno = errno_after;  // Diagnostic I/O must not replace the assertion's errno.
+  };
+  if (selected != (urgent ? 1 : 0)) diagnose(FD_ISSET(fd, &exceptions) != 0);
+  require(selected == (urgent ? 1 : 0), "select exception count");
+  const bool member = FD_ISSET(fd, &exceptions) != 0;
+  if (member != urgent) diagnose(member);
+  require(member == urgent, "select exception membership");
+}
+'''),
+ (b'''  require(pthread_create(&thread, nullptr, delayed, &a.sender) == 0, "sender thread");
+  ready(a.receiver, true, 2000);
+''',
+  b'''  require(pthread_create(&thread, nullptr, delayed, &a.sender) == 0, "sender thread");
+  ready(a.receiver, true, 2000, "delayed-arrival");
+'''),
+ (b'''  char byte{}; require(recv(a.receiver, &byte, 1, MSG_OOB) == 1 && byte == '?', "concurrent byte preserved");
+  ready(a.receiver, false, 30);
+''',
+  b'''  char byte{}; require(recv(a.receiver, &byte, 1, MSG_OOB) == 1 && byte == '?', "concurrent byte preserved");
+  ready(a.receiver, false, 30, "delayed-consumed");
+'''),
+)
 # Only the successful protocol fixture's startup budget changed. Pin its exact
 # reviewed bytes separately; controller, worker and execution gates retain BASE.
 CONTROL_BASE='c62c0ea4f88447c64608851ecf661f630e259442'
@@ -70,6 +125,12 @@ def check():
    assert actual.count(FD_DEVICE_LOOKUP)==1 and FD_DEVICE_LOOKUP not in expected,path
    assert actual.replace(FD_DEVICE_LOOKUP,b'',1)==expected,path
    assert hashlib.sha256(actual).hexdigest()==FD_SHA256,path
+  elif path=='tests/net-tcp-priority/contract.cc':
+   for before,after in TCP_DIAGNOSTIC_REPLACEMENTS:
+    assert expected.count(before)==actual.count(after)==1,path
+    assert after not in expected and before not in actual,path
+    expected=expected.replace(before,after,1)
+   assert actual==expected,path
   elif path=='compat/posix/src/system.cc':
    for before,after in FCNTL_REPLACEMENTS:
     assert expected.count(before)==actual.count(after)==1,path
@@ -100,5 +161,5 @@ def check():
  assert pin['ordered_patch_sha256']=={'minimum-detached-retirement.patch':'ebc5aac990c6ec075431d0c25a9b74ecadc0940da1bdad9503f358d4fe3431ad','minimum-noattach-join.patch':'c4f47903af720542a584fa743932316d86c45683da70a4c8620d7a71d3eb7f96'}
  for name,digest in pin['ordered_patch_sha256'].items():assert hashlib.sha256((ROOT/'tools/host-pthread-authority'/name).read_bytes()).hexdigest()==digest
  for path in ['tools/net-tcp-priority/manifest.py','tools/host-pthread-authority/minimum_receipt.py']:ast.parse((ROOT/path).read_text(encoding='utf-8'))
- print('TCP_SELECTED_POLICY_PASS original_product3 reviewed_nested_epoll_fd reviewed_device_lookup_only reviewed_sendmsg_control reviewed_statvfs_affinity_file_allocation_writev_and_memfd_only reviewed_fcntl_argument_selection_only canonical_Recv originalworkflow originalfixtures controller_execution_tail original_import_NDK_build_roles=EXACT new_two_supplier_DAG=BOUNDED source12_patch2_exact native_processes_started=0')
+ print('TCP_SELECTED_POLICY_PASS original_product3 reviewed_nested_epoll_fd reviewed_device_lookup_only reviewed_sendmsg_control reviewed_statvfs_affinity_file_allocation_writev_and_memfd_only reviewed_fcntl_argument_selection_only canonical_Recv originalworkflow original_fixture_assertions_deadlines=EXACT reviewed_select_diagnostics_only controller_execution_tail original_import_NDK_build_roles=EXACT new_two_supplier_DAG=BOUNDED source12_patch2_exact native_processes_started=0')
 if __name__=='__main__':check()
