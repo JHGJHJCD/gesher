@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify reviewed writev/fcntl repairs cannot admit unrelated supplier changes."""
+"""Verify reviewed vector/fcntl repairs and TCP diagnostics preserve source bounds."""
 import contextlib
 import hashlib
 import importlib.util
@@ -16,9 +16,10 @@ original = source_path.read_bytes()
 read_bytes = Path.read_bytes
 
 
-def rejected(label, replacement, repin=False):
+def rejected(label, replacement, repin=False, target=source_path):
+    assert replacement != read_bytes(target), 'negative control made no change'
     def mutated(path):
-        return replacement if path == source_path else read_bytes(path)
+        return replacement if path == target else read_bytes(path)
     with patch.object(Path, 'read_bytes', mutated), contextlib.redirect_stdout(io.StringIO()):
         saved = policy.SYSTEM_SHA256
         try:
@@ -26,7 +27,8 @@ def rejected(label, replacement, repin=False):
                 policy.SYSTEM_SHA256 = hashlib.sha256(replacement).hexdigest()
             try:
                 policy.check()
-            except AssertionError:
+            except AssertionError as error:
+                assert str(error) == target.relative_to(ROOT).as_posix(), error
                 print_result = label
             else:
                 raise RuntimeError('source policy accepted ' + label)
@@ -60,3 +62,25 @@ rejected('fcntl socket descriptor flags edit even with a new full-file hash',
 rejected('duplicate reviewed fcntl preamble even with a new full-file hash',
          original + b'\n' + policy.FCNTL_REPLACEMENTS[1][1], True)
 print('vector/fcntl source policy: positive source and nine negative controls passed')
+
+fixture_path = ROOT / 'tests/net-tcp-priority/contract.cc'
+fixture = fixture_path.read_bytes()
+rejected('unrelated TCP fixture bytes',
+         fixture + b'\n// unrelated fixture change\n', target=fixture_path)
+rejected('TCP fixture assertion relaxation',
+         fixture.replace(b'require(pthread_join(thread, nullptr) == 0, "sender joined");',
+                         b'require(true, "sender joined");', 1), target=fixture_path)
+rejected('TCP delayed-arrival deadline change',
+         fixture.replace(b'ready(a.receiver, true, 2000, "delayed-arrival");',
+                         b'ready(a.receiver, true, 2500, "delayed-arrival");', 1), target=fixture_path)
+rejected('TCP diagnostic errno reset',
+         fixture.replace(b'  const int errno_before = errno;\n',
+                         b'  errno = 0;\n  const int errno_before = errno;\n', 1), target=fixture_path)
+rejected('duplicate reviewed TCP diagnostic anchor',
+         fixture + policy.TCP_DIAGNOSTIC_REPLACEMENTS[2][1], target=fixture_path)
+without_diagnostics = fixture
+for before, after in policy.TCP_DIAGNOSTIC_REPLACEMENTS:
+    assert without_diagnostics.count(after) == 1
+    without_diagnostics = without_diagnostics.replace(after, before, 1)
+rejected('TCP fixture missing required diagnostics', without_diagnostics, target=fixture_path)
+print('TCP diagnostic source policy: six negative controls passed')
