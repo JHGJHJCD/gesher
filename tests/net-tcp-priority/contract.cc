@@ -44,14 +44,31 @@ static Pair pair() {
   require(close(listener) == 0, "listener close");
   return {sender, receiver};
 }
-static void ready(int fd, bool urgent, int timeout = 0) {
+static void ready(int fd, bool urgent, int timeout = 0,
+                  const char* phase = "scenario", int call_line = __builtin_LINE()) {
   pollfd p{fd, POLLPRI, 0};
-  require(poll(&p, 1, timeout) == (urgent ? 1 : 0), urgent ? "poll urgent" : "poll no urgent");
+  const int polled = poll(&p, 1, timeout);
+  require(polled == (urgent ? 1 : 0), urgent ? "poll urgent" : "poll no urgent");
   require(p.revents == (urgent ? POLLPRI : 0), "priority mask");
+  const short poll_revents = p.revents;
   fd_set exceptions; FD_ZERO(&exceptions); FD_SET(fd, &exceptions);
   timeval zero{};
-  require(select(fd + 1, nullptr, nullptr, &exceptions, &zero) == (urgent ? 1 : 0), "select exception count");
-  require((FD_ISSET(fd, &exceptions) != 0) == urgent, "select exception membership");
+  const int errno_before = errno;
+  const int selected = select(fd + 1, nullptr, nullptr, &exceptions, &zero);
+  const int errno_after = errno;
+  auto diagnose = [&](bool member) {
+    fprintf(stderr, "TCP_PRIORITY_SELECT_DIAGNOSTIC phase=%s line=%d fd=%d expected_urgent=%d "
+            "poll_timeout_ms=%d poll_rc=%d poll_revents=%d select_rc=%d "
+            "errno_before=%d errno_after=%d member=%d\n",
+            phase, call_line, fd, urgent, timeout, polled, poll_revents, selected,
+            errno_before, errno_after, member);
+    errno = errno_after;  // Diagnostic I/O must not replace the assertion's errno.
+  };
+  if (selected != (urgent ? 1 : 0)) diagnose(FD_ISSET(fd, &exceptions) != 0);
+  require(selected == (urgent ? 1 : 0), "select exception count");
+  const bool member = FD_ISSET(fd, &exceptions) != 0;
+  if (member != urgent) diagnose(member);
+  require(member == urgent, "select exception membership");
 }
 static long long millis() {
   timespec t{}; require(clock_gettime(CLOCK_MONOTONIC, &t) == 0, "clock");
@@ -1144,10 +1161,10 @@ int main(int argc, char** argv) {
   alias_ownership();
   Pair a = pair(); pthread_t thread;
   require(pthread_create(&thread, nullptr, delayed, &a.sender) == 0, "sender thread");
-  ready(a.receiver, true, 2000);
+  ready(a.receiver, true, 2000, "delayed-arrival");
   require(pthread_join(thread, nullptr) == 0, "sender joined");
   char byte{}; require(recv(a.receiver, &byte, 1, MSG_OOB) == 1 && byte == '?', "concurrent byte preserved");
-  ready(a.receiver, false, 30);
+  ready(a.receiver, false, 30, "delayed-consumed");
   require(close(a.sender) == 0 && close(a.receiver) == 0, "concurrent cleanup");
   puts("PASS TCP priority: delayed arrival bounded wake and cleanup");
   if (noninline_only) puts("PASS TCP priority: noninline contract checks passed; inline remains OPEN");
