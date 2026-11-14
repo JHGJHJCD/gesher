@@ -15,8 +15,12 @@ function New-GesherRuntimeSync {
         $info = Get-Item -LiteralPath $metadata -Force
         if ($info.Length -le 4096) {
             $text = [IO.File]::ReadAllText($info.FullName)
-            if ($text -match '(?m)^Version=([0-9]+\.[0-9]+\.[0-9]+)\s*$') {
-                $generation = [IO.Path]::GetFullPath($InstallDirectory) + "`n" + $Matches[1]
+            # Setup owns this small file. Accept its unambiguous canonical form;
+            # corrupt/extended metadata safely falls back to checking content.
+            $match = [regex]::Match($text,
+                '\A\s*\[Gesher\]\s*\r?\nVersion=((0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4})\.(0|[1-9][0-9]{0,4}))\s*\z')
+            if ($match.Success -and @($match.Groups[1].Value.Split('.') | Where-Object { [int]$_ -gt 65535 }).Count -eq 0) {
+                $generation = [IO.Path]::GetFullPath($InstallDirectory) + "`n" + $match.Groups[1].Value
             }
         }
     }
@@ -44,19 +48,27 @@ function Sync-GesherRuntimeFile {
     )
     $sourceInfo = Get-Item -LiteralPath $Source -ErrorAction Stop
     if ($sourceInfo.PSIsContainer) { throw "Expected a runtime file: $Source" }
-    $copy = [bool]$State.ForceRefresh
+    $copy = $false
     if (-not (Test-Path -LiteralPath $Destination -PathType Leaf)) {
         $copy = $true
     } else {
         $destinationInfo = Get-Item -LiteralPath $Destination -ErrorAction Stop
-        if ($sourceInfo.Length -ne $destinationInfo.Length -or
-            $sourceInfo.LastWriteTimeUtc -ne $destinationInfo.LastWriteTimeUtc) {
+        if ($sourceInfo.Length -ne $destinationInfo.Length) {
             $copy = $true
-        } elseif (-not $State.Generation) {
-            # Unversioned developer builds need a content check; their timestamps
-            # and sizes do not constitute an immutable release identity.
+        } elseif ($State.ForceRefresh -or -not $State.Generation -or
+                  $sourceInfo.LastWriteTimeUtc -ne $destinationInfo.LastWriteTimeUtc) {
+            # The other launcher may already have copied and mapped this file.
+            # A new component stamp requires checking it, not rewriting identical
+            # bytes that a running ART process can have open without write sharing.
+            # Unversioned builds also cannot use metadata as a release identity.
             $copy = (Get-FileHash -LiteralPath $Source -Algorithm SHA256).Hash -cne
                     (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash
+            if (-not $copy -and $sourceInfo.LastWriteTimeUtc -ne $destinationInfo.LastWriteTimeUtc) {
+                # Avoid repeating a timestamp-only comparison on later launches.
+                # An existing reader may deny attribute writes; its bytes are
+                # already correct, so that must not prevent an app from starting.
+                try { [IO.File]::SetLastWriteTimeUtc($destinationInfo.FullName, $sourceInfo.LastWriteTimeUtc) } catch { }
+            }
         }
     }
     if ($copy) {
