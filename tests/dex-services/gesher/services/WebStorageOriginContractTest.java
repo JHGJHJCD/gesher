@@ -165,6 +165,22 @@ public final class WebStorageOriginContractTest implements WebView2Host.Client {
         WebStorage storage = (WebStorage) ctor.newInstance();
         storage.deleteOrigin(null);
         storage.deleteOrigin("");
+
+        // Native admission rejects these before posting any CDP work. The
+        // recording native fixture runs old-code negative controls without a
+        // browser; never use this real profile to run that negative control.
+        LinkedBlockingQueue<Result> done = new LinkedBlockingQueue<>();
+        for (String invalid : new String[] { "not an origin\"\n", "null", "file://",
+                "custom://example.invalid", "https://", "https://example.invalid:65536",
+                "https://example.invalid/path", "https://example.invalid\u0000ignored" }) {
+            check(!WebView2Host.clearOriginData(invalid, (type, status, value) ->
+                    done.add(new Result(status, value))), "invalid origin was admitted");
+            storage.deleteOrigin(invalid);
+        }
+        check(done.poll(50, TimeUnit.MILLISECONDS) == null, "rejected request called back");
+        preserved(FIRST, "one", true);
+        preserved(SECOND, "two", true);
+
         storage.deleteOrigin(FIRST);
         // IndexedDB's inspector queries require an inspected document at this origin.
         navigate(FIRST);
@@ -174,12 +190,13 @@ public final class WebStorageOriginContractTest implements WebView2Host.Client {
         preserved(FIRST, "one", false);
         preserved(SECOND, "two", true);
 
-        // A malformed origin must never turn into a profile-wide deletion.
-        LinkedBlockingQueue<Result> done = new LinkedBlockingQueue<>();
-        check(WebView2Host.clearOriginData("not an origin\"\n", (type, status, value) ->
-                done.add(new Result(status, value))), "malformed origin was not admitted");
-        await(done, "malformed-origin completion");
+        // The internal completion boundary also handles normalized tuple origins.
+        check(WebView2Host.clearOriginData("HTTPS://FIRST.STORAGE-CONTRACT.INVALID:443/",
+                (type, status, value) -> done.add(new Result(status, value))),
+                "valid canonicalized origin was rejected");
+        check(await(done, "origin completion").status >= 0, "origin deletion failed");
         check(done.poll(50, TimeUnit.MILLISECONDS) == null, "completion delivered twice");
+        preserved(FIRST, "one", false);
         preserved(SECOND, "two", true);
     }
 

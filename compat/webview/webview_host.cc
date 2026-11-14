@@ -5,6 +5,7 @@
 
 #include <shobjidl.h>
 #include <bcrypt.h>
+#include <urlmon.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -812,6 +813,48 @@ std::wstring JsonString(const std::wstring& s) {
     }
   }
   return out + L"\"";
+}
+
+// WebStorage takes a serialized origin, not an arbitrary navigation URL. Admit
+// only HTTP(S) tuple origins here, before any native work is queued. File URLs
+// use Gesher's synthetic origin and custom/opaque schemes need their own mapping.
+// The CDP storage-key endpoint also checks Chromium's canonical, nonopaque key
+// representation, so a Windows/Chromium parser disagreement fails closed.
+bool OriginStorageKey(const std::wstring& origin, std::wstring* key) {
+  key->clear();
+  if (origin.empty()) return false;
+  for (wchar_t c : origin) {
+    // Serialized web origins use ASCII (IDN hosts use their Punycode spelling).
+    // In particular, reject NUL before calling a null-terminated Windows API.
+    if (c <= 0x20 || c >= 0x7f) return false;
+  }
+  size_t authority = origin.find(L"://");
+  if (authority == std::wstring::npos) return false;
+  authority += 3;
+  if (origin.find_first_of(L"\\?#@%\"<>^") != std::wstring::npos) return false;
+  size_t slash = origin.find(L'/', authority);
+  if (slash != std::wstring::npos && slash != origin.size() - 1) return false;
+
+  Com<IUri> uri;
+  constexpr DWORD flags = Uri_CREATE_CANONICALIZE | Uri_CREATE_NO_IE_SETTINGS |
+      Uri_CREATE_NO_PRE_PROCESS_HTML_URI;
+  if (FAILED(CreateUri(origin.c_str(), flags, 0, uri.Put())) || !uri) return false;
+  DWORD scheme = 0, host_type = 0, host_length = 0, port = 0;
+  if (uri->GetScheme(&scheme) != S_OK ||
+      (scheme != URL_SCHEME_HTTP && scheme != URL_SCHEME_HTTPS) ||
+      uri->GetHostType(&host_type) != S_OK || host_type == Uri_HOST_UNKNOWN ||
+      uri->GetPropertyLength(Uri_PROPERTY_HOST, &host_length, 0) != S_OK ||
+      host_length == 0 || uri->GetPort(&port) != S_OK || port > 65535) return false;
+  BSTR absolute = nullptr;
+  HRESULT hr = uri->GetPropertyBSTR(Uri_PROPERTY_ABSOLUTE_URI, &absolute,
+                                  Uri_PUNYCODE_IDN_HOST);
+  if (hr == S_OK && absolute != nullptr) key->assign(absolute, SysStringLen(absolute));
+  SysFreeString(absolute);
+  if (key->empty() || key->back() != L'/') {
+    key->clear();
+    return false;
+  }
+  return true;
 }
 
 void Fail(Impl* impl, HRESULT hr, const std::wstring& what) {
@@ -2731,20 +2774,23 @@ bool Host::DeleteCookies(int32_t which, int64_t callback_id) {
 }
 
 bool Host::ClearOriginData(const std::wstring& origin, int64_t callback_id) {
-  if (origin.empty()) return false;
-  return PostGlobal([origin, callback_id](const GlobalWork& operation) {
-    WithCoreWebView([operation, origin, callback_id](ICoreWebView2* wv) {
+  std::wstring key;
+  if (!OriginStorageKey(origin, &key)) return false;
+  return PostGlobal([key = std::move(key), callback_id](const GlobalWork& operation) {
+    WithCoreWebView([operation, key, callback_id](ICoreWebView2* wv) {
       if (wv == nullptr) {
         ReportGlobal(kGlobalDone, callback_id, static_cast<int32_t>(E_FAIL), L"");
         return;
       }
       // Chromium AwQuotaManagerBridge::DeleteOriginFramework clears just these
       // quota-managed types. The profile-wide API would erase unrelated origins.
-      const std::wstring params = L"{\"origin\":" + JsonString(origin) +
+      // Unlike clearDataForOrigin, this method rejects invalid/opaque keys;
+      // clearDataForOrigin treats an opaque origin as profile-wide deletion.
+      const std::wstring params = L"{\"storageKey\":" + JsonString(key) +
           L",\"storageTypes\":\"file_systems,indexeddb\"}";
       auto pending = std::make_shared<GlobalCompletion>(operation);
       HRESULT hr = wv->CallDevToolsProtocolMethod(
-          L"Storage.clearDataForOrigin", params.c_str(),
+          L"Storage.clearDataForStorageKey", params.c_str(),
           GESHER_CALLBACK(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler,
                           [pending, callback_id](HRESULT error, LPCWSTR) -> HRESULT {
                             GlobalWork work = std::move(pending->operation);

@@ -418,7 +418,11 @@ public final class WebView2Host {
         return submitGlobal(callback, id -> nClearBrowsingData(kinds, id));
     }
 
-    /** Clears one origin's file systems and IndexedDB, preserving other storage. */
+    /**
+     * Clears an HTTP(S) origin's first-party file systems and IndexedDB.
+     * Native admission rejects malformed/opaque and unsupported origins without
+     * invoking the callback. IDN origins use their ASCII Punycode spelling.
+     */
     public static boolean clearOriginData(String origin, GlobalCallback callback) {
         if (origin == null || origin.isEmpty()) return false;
         return submitGlobal(callback, id -> nClearOriginData(origin, id));
