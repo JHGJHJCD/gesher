@@ -70,6 +70,8 @@ jobs:
       - name: Native TLS, wait, DNS, clock, affinity, finalizer and media lifecycle contracts
         run: |
           python3 tools/test_bionic_key_contracts.py --sanitize
+          python3 tools/test_pthread_clock_contracts.py --sanitize
+          python3 tools/test_pthread_clock_contracts.py --linux-reference
           python3 tools/test_bionic_wait_contracts.py --sanitize
           python3 tools/test_bionic_dns_contracts.py --sanitize
           python3 tools/test_ordinary_os_contracts.py --sanitize
@@ -104,6 +106,7 @@ jobs:
       - name: Physical keys, sensor flushes, directory walks and futex contracts
         run: |
           python3 tools/test_input_key_contracts.py --sanitize
+          python3 tools/test_mouse_capture_contracts.py --sanitize
           python3 tools/test_sensor_flush_contracts.py --sanitize
           python3 tools/test_traversal_contracts.py --sanitize
           python3 tools/test_futex_contracts.py --sanitize
@@ -125,6 +128,7 @@ jobs:
           python3 tools/test_file_timestamp_contracts.py --sanitize
           python3 tools/test_directory_rename_contracts.py --sanitize
           python3 tools/test_media_source_contracts.py --sanitize
+          python3 tools/test_media_callback_state.py --sanitize
           python3 tools/test_media_http_contracts.py --sanitize
           python3 tools/test_media_surface_contracts.py --sanitize
           cc -std=gnu11 -O1 -Wall -Wextra -Werror -DGESHER_FILESYSTEM_REFERENCE_MAIN \
@@ -138,6 +142,9 @@ jobs:
 
       - name: Audio JNI buffer contracts with checked JNI and UBSan
         run: python3 tools/test_audio_buffer_contracts.py
+
+      - name: MediaDataSource callback contracts with checked JNI and UBSan
+        run: python3 tools/test_media_callback_contracts.py
 
       - name: Settings context bootstrap and deferred construction contracts
         run: python3 tools/test_settings_context_bootstrap.py --java-home "$JAVA_HOME"

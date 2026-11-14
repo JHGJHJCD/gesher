@@ -74,6 +74,20 @@ Check 'media: extractor source ownership and cropped YUV JPEG pixels' {
   $mediaDataOut
 } @('MediaDataContractTest all passed:')
 
+$mediaSourceCallbacksOut = FixesRun ($dvmFixes + 'gesher.services.MediaDataSourceContractTest') 90
+$mediaSourceCallbacksCode = $LASTEXITCODE
+Check 'media: callback data sources through extractor, retriever and player JNI' {
+  $global:LASTEXITCODE = $mediaSourceCallbacksCode
+  $mediaSourceCallbacksOut
+} @('MediaDataSourceContractTest all passed:')
+
+$nsdValuesOut = FixesRun ($dvmFixes + 'gesher.services.NsdValueContractTest') 90
+$nsdValuesCode = $LASTEXITCODE
+Check 'network: NSD TXT limits and actual Parcel address/value round trips' {
+  $global:LASTEXITCODE = $nsdValuesCode
+  $nsdValuesOut
+} @('NsdValueContractTest all passed:', 'parcel=true')
+
 $bitmapCapacityOut = FixesRun ($dvmFixes + 'gesher.services.BitmapParcelCapacityTest') 90
 $bitmapCapacityCode = $LASTEXITCODE
 Check 'graphics: Bitmap Parcel pixels and actual SharedMemory capacity' {
