@@ -84,6 +84,13 @@ Outputs include:
 Tests: `tests/build-test-apps.sh out/test-apps` (needs a JDK), then
 `tests/windows/run-tests.ps1` on Windows.
 
+## Updates
+
+The Gesher Control Center checks GitHub Releases for stable updates and can
+download and install a newer version. Automatic checks can be disabled; installing
+requires confirmation and preserves installed Android apps and their data.
+See [updating Gesher](docs/updates.md) for behavior, release packaging and tests.
+
 ## License
 
 [Apache License 2.0](LICENSE), the same license as AOSP. See

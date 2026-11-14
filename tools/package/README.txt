@@ -3,6 +3,18 @@ Gesher: ART (Android's runtime) on Windows - a trial build
 
 Requirements: Windows 10 or 11, x64. Nothing else needs installing.
 
+Updating Gesher
+---------------
+Open Gesher Control Center from the Start menu, or run:
+
+    gesher-app control-panel
+
+The Updates card checks for stable GitHub releases. Automatic checks happen
+while the panel is open and can be disabled. You can also check manually.
+Save work in open Android apps before confirming an update: Setup stops the
+running Gesher device and upgrades the installation. Installed apps and their
+data are retained. You do not need to uninstall Gesher before updating.
+
 Running Hello
 -------------
 In a command prompt:
