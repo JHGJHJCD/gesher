@@ -81,6 +81,28 @@ try {
   else { Remove-Item Env:GESHER_MMAP_NO_PLACEHOLDERS -ErrorAction SilentlyContinue }
 }
 
+# Real Windows URLMON parser and production dispatch; recording COM cannot
+# create a browser or touch a profile, including in the negative control.
+$storageNativeOut = RunTimed "$Dir/webstorage_native_contracts.exe" @() 30
+$storageNativeCode = $LASTEXITCODE
+Check 'webview: native origin admission, scoped parameters and completion leases' {
+  $global:LASTEXITCODE = $storageNativeCode
+  $storageNativeOut
+} @('WebStorage native contracts:', ' checks, 0 failures')
+
+$storageNegativeOut = RunTimed "$Dir/webstorage_native_negative.exe" @() 30
+$storageNegativeCode = $LASTEXITCODE
+Check 'webview: recording control detects missing native origin admission' {
+  if ($storageNegativeCode -eq 1 -and $storageNegativeOut.Contains('FAIL: direct Host rejects invalid origin') -and
+      $storageNegativeOut.Contains('WebStorage native contracts:')) {
+    $global:LASTEXITCODE = 0
+    'WebStorage native negative control: missing admission rejected; no browser used'
+  } else {
+    $global:LASTEXITCODE = 1
+    $storageNegativeOut
+  }
+} @('WebStorage native negative control: missing admission rejected; no browser used')
+
 # Private profile, real WebView2, and intercepted local responses at two origins.
 $storageContractProfile = Join-Path ([IO.Path]::GetTempPath()) ('gesher-storage-contract-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $storageContractProfile -ErrorAction Stop | Out-Null
