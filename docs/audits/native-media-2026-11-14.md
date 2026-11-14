@@ -235,3 +235,23 @@ Remaining AAudio gaps include channel-mask/layout fidelity, ignored newer
 policy/spatialization/capture settings, compressed/offloaded paths, full
 suspend-aware clock translation, callback self-close, and comprehensive
 allocation/stream-lifetime handling under arbitrary concurrent caller use.
+
+### Embedded artwork key regression
+
+PR27's companion Windows `MediaDataSourceContractTest` exposed a misspelled format lookup in
+`Fill`: the pinned Android 16 r4 extractor publishes `albumart`, while the
+retriever requested `album-art`. The lookup now uses `albumart`. The host format
+seam also checks the requested key, so it cannot return artwork for an unknown
+key and hide the production defect.
+
+Pinned sources:
+
+- [NdkMediaFormat.cpp defines AMEDIAFORMAT_KEY_ALBUMART](https://android.googlesource.com/platform/frameworks/av/+/android-16.0.0_r4/media/ndk/NdkMediaFormat.cpp)
+- [MP3Extractor.cpp publishes embedded album artwork](https://android.googlesource.com/platform/frameworks/av/+/android-16.0.0_r4/media/module/extractors/mp3/MP3Extractor.cpp)
+
+The corrected source passes all 66 checked-JNI callback checks. The additive
+`--negative-control album-art-key` option restores only the old key in a
+disposable source copy and fails the unchanged first-source artwork assertion.
+The PR30 Windows `MediaCallbackContractTest` and its assertions are unchanged.
+Actual MP3 picture validation uses PR27's companion fixture after integration;
+both Windows callback fixtures remain required gates for that combined tree.
