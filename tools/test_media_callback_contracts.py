@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--java-home", type=Path, default=os.environ.get("JAVA_HOME"))
     parser.add_argument("--cxx", default=os.environ.get("CXX", "c++"))
-    parser.add_argument("--negative-control", choices=("stale-art", "unavailable-callback", "reentrant-admission"))
+    parser.add_argument("--negative-control", choices=("stale-art", "unavailable-callback", "reentrant-admission", "album-art-key"))
     args = parser.parse_args()
     java = args.java_home or Path(shutil.which("javac") or "missing-javac").resolve().parent.parent
     retriever = (ROOT / "compat/media/jni/media_jni_others.cc").read_text()
@@ -45,6 +45,11 @@ def main():
     }
     if args.negative_control == "stale-art":
         sections["RETRIEVER"] = sections["RETRIEVER"].replace("RetrieverSnapshot next;", "RetrieverSnapshot next = r->snapshot;")
+    elif args.negative_control == "album-art-key":
+        lookup = 'file.GetBuffer("albumart", &r->album_art);'
+        if sections["RETRIEVER"].count(lookup) != 1:
+            raise ValueError("production album-art lookup changed")
+        sections["RETRIEVER"] = sections["RETRIEVER"].replace(lookup, lookup.replace('"albumart"', '"album-art"'))
     elif args.negative_control == "unavailable-callback":
         sections["EXTRACTOR"] = sections["EXTRACTOR"].replace('Open(env, thiz, std::move(source), "MediaDataSource");', '(void)thiz;')
     template = (ROOT / "tests/media/media_callback_host.cc.in").read_text()
@@ -65,7 +70,7 @@ def main():
                     "-I", str(folder), "-I", str(ROOT), "-I", str(java / "include"), "-I", str(java / "include/linux"), str(cpp), str(ROOT / "compat/media/jni/java_data_source.cc"), "-o", str(library)]
         subprocess.run(command, check=True, timeout=120)
         subprocess.run([str(java / "bin/javac"), "-d", str(folder), str(ROOT / "tests/media/MediaCallbackHostTest.java")], check=True, timeout=60)
-        cases = ("retriever",) if args.negative_control == "stale-art" else (("extractor",) if args.negative_control == "unavailable-callback" else (("reentrant",) if args.negative_control else ("adapter", "retriever", "extractor", "release", "reentrant")))
+        cases = ("retriever",) if args.negative_control in ("stale-art", "album-art-key") else (("extractor",) if args.negative_control == "unavailable-callback" else (("reentrant",) if args.negative_control else ("adapter", "retriever", "extractor", "release", "reentrant")))
         for case in cases:
             run = subprocess.run([str(java / "bin/java"), "-Xcheck:jni", "-XX:-CreateCoredumpOnCrash", "-cp", str(folder),
                                   "MediaCallbackHostTest", str(library), case], capture_output=True, text=True, timeout=30)

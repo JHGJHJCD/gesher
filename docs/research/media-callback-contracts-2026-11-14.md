@@ -85,7 +85,8 @@ cleanup.
 `SetFromSource` and `Player::Reset` bodies, with declared container,
 receiver-acquisition, JNI-exception and playback-worker seams. Its Format seam
 retains the real missing-key behavior. The candidate passes **35
-assertions with ASan/UBSan**. The baseline fails six of the original 27 assertions: stale art,
+assertions with ASan/UBSan**. Before the exact-key correction below, the baseline
+failed six of the original 27 assertions: stale art,
 replacement publication and retirement, failed-candidate state, and player
 reset's lock/state publication. A separate observer thread uses a bounded
 mutex check; the old-source control does not attempt a recursive blocking lock.
@@ -100,8 +101,19 @@ alongside the actual receiver lease and extracted JNI entrypoints, passing
 **66 checked-JNI/UBSan assertions**. The adapter suite above has a separate name
 so both original suites remain mandatory in CI. Their assertions, concurrency
 barriers and deadlines are preserved. Disabling receiver reentry admission in
-the disposable negative control still fails the intended assertion; the old
-publication/reset source still fails six of the original 27 state assertions.
+the disposable negative control still fails the intended assertion. The original
+publication/reset comparison is recorded above.
+
+Windows CI [run 43646425737](https://github.com/gesher-runtime/gesher/actions/runs/43646425737)
+exposed an embedded-picture failure in both Windows versions. The retriever used
+`album-art`, while the pinned `NdkMediaFormat.cpp` defines
+`AMEDIAFORMAT_KEY_ALBUMART` as `albumart` and `MP3Extractor.cpp` writes its ID3
+picture under that key. The lookup now uses `albumart`; both host Format seams
+require that exact key instead of ignoring it. All **35 state and 66 receiver
+assertions pass unchanged**. Reading pre-fix published source `77f28e98` with the stricter
+state seam fails both existing artwork assertions. The receiver runner's
+`--negative-control album-art-key` restores only the misspelling in its disposable
+production copy and fails the existing `art belongs to first source` assertion.
 
 The SDK36-only `MediaDataSourceContractTest` compiles successfully. Its Windows
 track exercises the public APIs on ART with actual AOSP readers: generated WAV
@@ -137,11 +149,19 @@ the executor's ptrace environment; CI keeps its sanitizer defaults.
 ```sh
 python3 tools/test_media_callback_adapter.py --java-home /path/to/jdk21
 python3 tools/test_media_callback_state.py --sanitize
+python3 tools/test_media_callback_contracts.py --java-home /path/to/jdk21
 ```
 
 For functional old-source controls, append `--source-ref <baseline>` and select
 the relevant `--group` values. The state runner has `metadata`, `reset` and
 candidate-only `bitrate` groups. Both runners print the production source fingerprint.
+
+The focused artwork controls below are expected to exit 1:
+
+```sh
+python3 tools/test_media_callback_state.py --sanitize --source-ref 77f28e98 --group metadata
+python3 tools/test_media_callback_contracts.py --java-home /path/to/jdk21 --negative-control album-art-key
+```
 
 These results do not establish every Android media API or arbitrary APK
 compatibility. In particular, concurrent context release is covered, while
@@ -158,3 +178,5 @@ work. No physical audio device is needed by the new public callback fixture.
 - [MetadataRetrieverClient, Android 16 r4](https://android.googlesource.com/platform/frameworks/av/+/refs/tags/android-16.0.0_r4/media/libmediaplayerservice/MetadataRetrieverClient.cpp): a successful candidate replaces the current retriever. Decoded source SHA-256 `3dce4143ed7cf464d763cce8c769a2040b1eace6fd99bc183b11eb53a98ab331`.
 - [StagefrightMetadataRetriever, Android 16 r4](https://android.googlesource.com/platform/frameworks/av/+/refs/tags/android-16.0.0_r4/media/libstagefright/StagefrightMetadataRetriever.cpp): floating-point average bitrate calculation. Decoded source SHA-256 `2324dc434e3903f887265708551fe5c02e30b25f05f4295c7ea4903fb7d9ae14`.
 - [MediaMetadataRetriever Java API, pinned framework revision](https://android.googlesource.com/platform/frameworks/base/+/45034f0663f960d9ee5fb0a101a4732b71f6e2f4/media/java/android/media/MediaMetadataRetriever.java): public callback setter and release's declared IOException contract. Decoded source SHA-256 `7289617e075d9e75cc691ca4772fb691196e61377f3c29107fbeaed9d27e03dd`.
+- [NdkMediaFormat, Android 16 r4](https://android.googlesource.com/platform/frameworks/av/+/refs/tags/android-16.0.0_r4/media/ndk/NdkMediaFormat.cpp): `AMEDIAFORMAT_KEY_ALBUMART` is `albumart`. Decoded source SHA-256 `caf6099f6cda1b50724987ba8fdf83b7ed81d25027bdaa209e98416d134cf508`, matching `tests/media/ndk-format/pinned_format_keys.inc`.
+- [MP3Extractor, Android 16 r4](https://android.googlesource.com/platform/frameworks/av/+/refs/tags/android-16.0.0_r4/media/module/extractors/mp3/MP3Extractor.cpp): ID3 artwork is published with `AMEDIAFORMAT_KEY_ALBUMART`. Decoded source SHA-256 `59ea7598bdd2cf48242ffc2cae842ff66f954caaa260ebba2b8b8d29fd6de6f6`.
