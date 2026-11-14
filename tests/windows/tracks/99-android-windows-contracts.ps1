@@ -16,6 +16,13 @@ Check 'media: absent effect engine has typed capability queries and constructor 
   $effectContractOut
 } @('AudioEffectAvailabilityTest all passed:')
 
+$callbackMediaOut = FixesRun ($dvmFixes + 'gesher.services.MediaCallbackContractTest') 120
+$callbackMediaCode = $LASTEXITCODE
+Check 'media: real callback WAV sources, PCM bytes, metadata and receiver release' {
+  $global:LASTEXITCODE = $callbackMediaCode
+  $callbackMediaOut
+} @('MediaCallbackContractTest all passed:')
+
 foreach ($lookupCase in @(
   @{ Exe = 'elf_load_test.exe'; Library = 'lookup_root.so'; Label = 'x86_64'; End = 'elf_load_test all passed' },
   @{ Exe = 'arm64_elf_test.exe'; Library = 'lookup_root_arm64.so'; Label = 'translated ARM64'; End = 'arm64_elf_test all passed' }
@@ -26,6 +33,30 @@ foreach ($lookupCase in @(
     $global:LASTEXITCODE = $lookupCode
     $lookupOut
   } @('elf_lookup_graph all passed', $lookupCase.End)
+}
+
+$adviceModePresent = Test-Path Env:GESHER_MMAP_NO_PLACEHOLDERS
+$adviceModeValue = [Environment]::GetEnvironmentVariable('GESHER_MMAP_NO_PLACEHOLDERS', 'Process')
+try {
+  foreach ($adviceMode in @('placeholders', 'plain mappings')) {
+    if ($adviceMode -eq 'placeholders') { Remove-Item Env:GESHER_MMAP_NO_PLACEHOLDERS -ErrorAction SilentlyContinue }
+    else { $env:GESHER_MMAP_NO_PLACEHOLDERS = '1' }
+    foreach ($adviceCase in @(
+      @{ Exe = 'madvise_probe.exe'; Args = @(); Label = 'host POSIX'; End = @() },
+      @{ Exe = 'elf_load_test.exe'; Args = @((NoDrive "$Dir/madvise_contract.so")); Label = 'x86_64 guest'; End = @('elf_load_test all passed') },
+      @{ Exe = 'arm64_elf_test.exe'; Args = @((NoDrive "$Dir/madvise_contract_arm64.so")); Label = 'ARM64 guest'; End = @('arm64_elf_test all passed') }
+    )) {
+      $adviceOut = RunTimed "$Dir/$($adviceCase.Exe)" $adviceCase.Args 120
+      $adviceCode = $LASTEXITCODE
+      Check "native: madvise provenance and file preservation, $($adviceCase.Label), $adviceMode" {
+        $global:LASTEXITCODE = $adviceCode
+        $adviceOut
+      } (@('madvise contracts (Windows policy):', ' checks, 0 failures') + $adviceCase.End)
+    }
+  }
+} finally {
+  if ($adviceModePresent) { Set-Item Env:GESHER_MMAP_NO_PLACEHOLDERS $adviceModeValue }
+  else { Remove-Item Env:GESHER_MMAP_NO_PLACEHOLDERS -ErrorAction SilentlyContinue }
 }
 
 # Private profile, real WebView2, and intercepted local responses at two origins.

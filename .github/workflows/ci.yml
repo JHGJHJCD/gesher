@@ -120,7 +120,9 @@ jobs:
           "$RUNNER_TEMP/gesher-unc-paths"
 
       - name: Anonymous mapping zeroing and protection contracts
-        run: python3 tools/test_mman_zeroing_mappings.py --sanitize
+        run: |
+          python3 tools/test_mman_zeroing_mappings.py --sanitize
+          python3 tools/test_madvise_reference.py
 
       - name: Filesystem metadata and media source ownership contracts
         run: |
@@ -139,7 +141,9 @@ jobs:
           java-version: 21
 
       - name: Audio JNI buffer contracts with checked JNI and UBSan
-        run: python3 tools/test_audio_buffer_contracts.py
+        run: |
+          python3 tools/test_audio_buffer_contracts.py
+          python3 tools/test_media_callback_contracts.py --java-home "$JAVA_HOME"
 
       - name: WebStorage origin and running-task contracts
         run: |
