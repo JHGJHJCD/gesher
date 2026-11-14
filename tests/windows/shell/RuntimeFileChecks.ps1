@@ -139,10 +139,13 @@ try {
             [IO.File]::WriteAllText($destination, 'old data')
             # PowerShell's provider location differs from the process directory.
             # Relative literal paths must still resolve through Get-Item first.
-            Set-Location -LiteralPath $install
-            $relativeSource = 'build.prop'
-            $relativeDestination = '../profile/system/build.prop'
-            $differentDirectories = [IO.Directory]::GetCurrentDirectory() -ine $install
+            # Windows PowerShell 5.1 escapes brackets in the current location
+            # even for LiteralPath (PowerShell/PowerShell#5896). Keep brackets
+            # in the relative source while using its plain parent as location.
+            Set-Location -LiteralPath $Root
+            $relativeSource = 'install [isolated]/build.prop'
+            $relativeDestination = 'profile/system/build.prop'
+            $differentDirectories = [IO.Directory]::GetCurrentDirectory() -ine $Root
             $state = New-GesherRuntimeSync $install $profile app
             $mapped = [IO.File]::Open($destination, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
             try {
