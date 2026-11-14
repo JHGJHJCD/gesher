@@ -91,6 +91,19 @@ function ConvertTo-GesherUpdateRelease([object] $Metadata) {
 }
 
 function Initialize-GesherUpdateTransport {
+    if ($PSVersionTable.PSEdition -eq 'Desktop') {
+        # Windows PowerShell can target old Framework TLS defaults even when a
+        # newer Framework is installed. Upgrade only a legacy-only process
+        # selection; retain OS defaults (0) and explicit modern selections.
+        # Setting 0 here is not sufficient on old-target Framework hosts whose
+        # cached compatibility switch disallows system-default TLS versions.
+        $protocol = [Net.ServicePointManager]::SecurityProtocol
+        $legacy = [int][Net.SecurityProtocolType]::Ssl3 -bor
+                  [int][Net.SecurityProtocolType]::Tls -bor [int][Net.SecurityProtocolType]::Tls11
+        if ([int]$protocol -ne 0 -and ([int]$protocol -band (-bnot $legacy)) -eq 0) {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        }
+    }
     if ('Gesher.Updates.Transport' -as [type]) { return }
     $compiler = @{ ErrorAction = 'Stop' }
     if ($PSVersionTable.PSEdition -eq 'Desktop') { $compiler.ReferencedAssemblies = @('System.Net.Http') }

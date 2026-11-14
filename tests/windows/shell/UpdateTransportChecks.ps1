@@ -1,8 +1,12 @@
 param([string] $UpdaterPath = (Join-Path $PSScriptRoot '../../../tools/package/gesher-update.ps1'))
 $ErrorActionPreference = 'Stop'
 . $UpdaterPath
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    'INFO: Initial Windows PowerShell TLS selection: {0}' -f [Net.ServicePointManager]::SecurityProtocol
+}
 Initialize-GesherUpdateTransport
-# Exercise the actual compiled HTTP request/redirect code without network access.
+# Exercise the compiled HTTP request/redirect code with in-memory responses.
+# Windows also verifies real HTTPS negotiation from legacy Framework TLS defaults.
 if (-not ('GesherUpdateTests.HttpFixture' -as [type])) {
     $compiler = @{ ErrorAction = 'Stop' }
     if ($PSVersionTable.PSEdition -eq 'Desktop') { $compiler.ReferencedAssemblies = @('System.Net.Http') }
@@ -127,4 +131,36 @@ try {
     Assert-TransportThrows { Invoke-FixtureSend $fixture $latest $true $cts.Token } 'Pre-cancelled request was sent'
     Assert-Transport ($fixture.Handler.Requests.Count -eq 0) 'Cancellation did not reach HttpClient'
 } finally { $cts.Dispose(); $fixture.Client.Dispose() }
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+    $originalProtocol = [Net.ServicePointManager]::SecurityProtocol
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls
+        Initialize-GesherUpdateTransport
+        Assert-Transport ([Net.ServicePointManager]::SecurityProtocol -eq [Net.SecurityProtocolType]::Tls12) 'Legacy Framework TLS selection cannot reach modern release endpoints'
+        # Use the production client and request path, with normal Windows trust.
+        # Any HTTP response proves HTTPS negotiation; 404 (no published release)
+        # and rate-limit responses do not make this connectivity check flaky.
+        $factory = [Gesher.Updates.Transport].GetMethod('CreateClient', [Reflection.BindingFlags]'NonPublic,Static')
+        $client = $factory.Invoke($null, $null)
+        $deadline = [Threading.CancellationTokenSource]::new()
+        $response = $null
+        try {
+            $deadline.CancelAfter([TimeSpan]::FromSeconds(30))
+            $response = $send.Invoke($null, [object[]] @($client, $latest, $true, $deadline.Token))
+            Assert-Transport ([int]$response.StatusCode -ge 200 -and [int]$response.StatusCode -le 599) 'Production updater did not receive a real GitHub HTTPS response'
+            'INFO: Production updater received GitHub HTTPS status {0}' -f [int]$response.StatusCode
+        } finally {
+            if ($response) { $response.Dispose() }
+            $deadline.Dispose()
+            $client.Dispose()
+        }
+        $modern = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls11
+        [Net.ServicePointManager]::SecurityProtocol = $modern
+        Initialize-GesherUpdateTransport
+        Assert-Transport ([Net.ServicePointManager]::SecurityProtocol -eq $modern) 'An explicit modern TLS selection was changed'
+        [Net.ServicePointManager]::SecurityProtocol = [Enum]::ToObject([Net.SecurityProtocolType], 0)
+        Initialize-GesherUpdateTransport
+        Assert-Transport ([int][Net.ServicePointManager]::SecurityProtocol -eq 0) 'An existing OS-default TLS selection was changed'
+    } finally { [Net.ServicePointManager]::SecurityProtocol = $originalProtocol }
+}
 "PASS: updater HTTP request and redirect contracts ($script:Checks checks)"

@@ -92,7 +92,12 @@ release exists, a successful check reports that no release is available.
 
 Network requests use Windows/.NET HTTPS, the default proxy and normal certificate
 validation, including trusted roots installed for a content filter or corporate
-proxy. There is no custom CA bundle or TLS-validation override. GitHub rate
+proxy. Windows PowerShell 5.1 can inherit a legacy-only TLS selection from its
+older Framework target; the updater upgrades that selection to TLS 1.2. An
+existing OS-default or explicit modern TLS selection is retained. This setting
+affects future Framework connections in the panel process, without changing
+Windows configuration. There is no custom CA bundle or certificate-validation
+override. GitHub rate
 limits, offline access, malformed metadata and transfer errors remain retryable;
 they do not stop the running Android device.
 
@@ -118,6 +123,13 @@ deterministic release/download/process boundaries. `ControlPanelUpdateChecks.ps1
 exercises the panel's update state and worker lifecycle. `RuntimeFileChecks.ps1`
 uses real temporary files to cover equal-size upgrades, unchanged launches,
 separate entry-point generations, retry and preservation of app data.
+
+`UpdateTransportChecks.ps1` tests HTTP responses and redirects with in-memory
+fixtures. On Windows it also starts from a legacy TLS selection and makes a
+bounded HTTPS request through the production client to the fixed GitHub API.
+Any HTTP response proves negotiation, so the check does not require a published
+release and tolerates API rate-limit responses. Certificate validation remains
+enabled for this real request.
 
 The early `update-contracts` CI matrix runs Windows PowerShell 5.1 on Windows
 2022 and 2025. The existing package checks also verify that the installed updater
