@@ -1,6 +1,8 @@
 /* Copyright (C) 2026 The Gesher Authors. SPDX-License-Identifier: Apache-2.0 */
 package gesher.services;
 
+import android.app.Application;
+import android.content.Context;
 import android.media.MediaDataSource;
 import android.media.MediaExtractor;
 import android.media.MediaMetadataRetriever;
@@ -8,11 +10,17 @@ import android.media.MediaPlayer;
 import java.io.ByteArrayOutputStream;
 import java.io.FileDescriptor;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -232,9 +240,56 @@ public final class MediaDataSourceContractTest {
             } finally { p.release(); }
         }, "MediaPlayer callback reset/release");
     }
+    private static void bootstrap() throws Exception {
+        // Keep media calls SDK-only. The standalone DEX needs the real app
+        // context/services that FileUtils' FD wrapper and MediaPlayer consult.
+        String root = System.getenv("ANDROID_ROOT");
+        Class.forName("com.gesher.app.Main")
+                .getMethod("bootstrap", String.class, String.class, String.class)
+                .invoke(null, "media-data-source-contract", root + "/build.prop",
+                        root + "/framework/framework-res.apk");
+        Class<?> shared = Class.forName("com.android.internal.os.ApplicationSharedMemory");
+        Object region = shared.getMethod("create").invoke(null);
+        shared.getMethod("setInstance", shared).invoke(null, region);
+        Class<?> services = Class.forName("com.gesher.server.Services");
+        Object registry = services.getMethod("createInProcess", Collection.class)
+                .invoke(null, List.of());
+        services.getMethod("installInProcess", Map.class).invoke(null, registry);
+
+        Class<?> threadType = Class.forName("android.app.ActivityThread");
+        Constructor<?> constructor = threadType.getDeclaredConstructor();
+        constructor.setAccessible(true);
+        Object thread = constructor.newInstance();
+        Context context = (Context) threadType.getMethod("getSystemContext").invoke(thread);
+        Application application = new Application();
+        Method attach = Application.class.getDeclaredMethod("attach", Context.class);
+        attach.setAccessible(true);
+        attach.invoke(application, context);
+        // Publish the same Application in LoadedApk and ActivityThread, as
+        // application binding does. Do not bypass FileUtils' provider lookup.
+        Field packageInfo = context.getClass().getDeclaredField("mPackageInfo");
+        packageInfo.setAccessible(true);
+        Object loaded = packageInfo.get(context);
+        Field loadedApplication = loaded.getClass().getDeclaredField("mApplication");
+        loadedApplication.setAccessible(true);
+        loadedApplication.set(loaded, application);
+        Field initial = threadType.getDeclaredField("mInitialApplication");
+        initial.setAccessible(true);
+        initial.set(thread, application);
+        Field current = threadType.getDeclaredField("sCurrentActivityThread");
+        current.setAccessible(true);
+        current.set(null, thread);
+        application.onCreate();
+        check(threadType.getMethod("currentApplication").invoke(null) == application
+                        && application.getApplicationContext() == application
+                        && application.getPackageManager() != null,
+                "real initial Application supplies the FD conversion context");
+    }
     public static void main(String[] args) throws Exception {
-        System.loadLibrary("android_runtime");
+        bootstrap();
         extractor(); extractorReleaseDuringRead(); retriever(); player();
         System.out.println("MediaDataSourceContractTest all passed: " + checks + " checks; native=true");
+        // In-process services own workers; this isolated fixture has no event loop.
+        System.exit(0);
     }
 }

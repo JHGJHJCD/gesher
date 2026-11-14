@@ -179,6 +179,13 @@ for Java/input, native synchronization and media. QA found and resolved:
 3. A possible legitimate signal/timeout race in the independent Linux reference.
    It now checks timeout without a competing signaler, preserving its external
    deadline and 20 assertions. Shared old/new guest controls remain unchanged.
+4. The first native Windows run caught a missing application context in the new
+   standalone media fixture. Android's public FD wrapper queries the initial
+   application's real PackageManager before native argument validation. The
+   fixture now creates a real ContextImpl/Application with the production
+   bootstrap and in-process services; every media assertion remains intact, and
+   an additional assertion verifies that context. No media-provider cache is
+   bypassed. The PR records the subsequent exact-head Windows result.
 
 Relevant existing location/input, semaphore/wait/futex, media API, retriever,
 source, HTTP, surface and player-priming suites passed. Complete changed pthread
