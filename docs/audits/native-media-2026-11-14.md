@@ -133,3 +133,89 @@ stand-ins (DRM, MediaSync, LinearBlock, etc.), unimplemented retriever image/fra
 variants, arbitrary callback cancellation, real devices and unsupported codecs
 are not qualified by these changes. Existing decoder/graphics methods are not
 replaced by fabricated successful backends.
+
+## AAudio builder validation and actual stream values
+
+AAudio now validates stored direction, sharing, PCM format, sample rate, channel
+count, capacity, callback frame count, usage/content/input-preset and performance
+values before requesting an audio backend. The pinned Android preflight permits
+unspecified values, 1..12 channels (`FCC_LIMIT`), 8000..1600000 Hz and up to
+1048576 frames per callback. Invalid values return the corresponding Android
+error, with a null output stream. An unavailable device or offloaded hardware
+path returns unavailable. The capture engine's narrower supported rate/channel
+range is reported as a failure before allocation. Null builder/output and
+builder/stream allocation failures also have explicit results.
+
+Capacity calculations use wide integers and check the complete frame size. Rings
+above **64 MiB per stream** fail with `AAUDIO_ERROR_NO_MEMORY`; this is an explicit
+host resource ceiling for the no-exceptions backend, not an Android hardware
+capability. It prevents multi-gigabyte requests from reaching vector allocation.
+Smaller allocations can still fail under system memory pressure; this change does
+not make every pre-existing backend/STL allocation recoverable.
+
+A successfully opened stream reports the actual shared mixer and performance
+NONE, plus the capacity returned by its Track/CaptureStream. The requested
+callback block size is separate from the actual hardware/mixer burst. Callback
+loops deliver the negotiated callback size, including a resolved default size.
+An allocated output session ID reaches the Track. Negative buffer-size changes
+are rejected without changing the old size.
+
+Timestamp requests use guest Linux clock IDs, validate the domain, and publish
+both outputs only after a successful backend timestamp. Unsupported clocks leave
+the caller's outputs unchanged. **CLOCK_BOOTTIME is explicitly unimplemented**:
+Gesher's current bionic clock adapter aliases it with QPC-based monotonic clocks,
+and no independently qualified suspend-aware translation exists. AAudio now
+returns `AAUDIO_ERROR_UNIMPLEMENTED` for it instead of silently returning the
+engine's host-monotonic timestamp. Host monotonic operation does not establish
+Android suspend behavior, audio hardware latency accuracy, or full clock parity.
+
+Pinned sources:
+
+- [AAudioStreamParameters validation](https://android.googlesource.com/platform/frameworks/av/+/android-16.0.0_r4/media/libaaudio/src/core/AAudioStreamParameters.cpp)
+- [AudioStreamBuilder callback limits and output initialization](https://android.googlesource.com/platform/frameworks/av/+/android-16.0.0_r4/media/libaaudio/src/core/AudioStreamBuilder.cpp)
+- [Android audio channel/rate limits](https://android.googlesource.com/platform/system/media/+/android-16.0.0_r4/audio/include/system/audio.h)
+- [Public AAudio errors, negotiation and timestamp contract](https://android.googlesource.com/platform/frameworks/av/+/android-16.0.0_r4/media/libaaudio/include/aaudio/AAudio.h)
+
+### AAudio validation and integration
+
+`python3 tools/test_aaudio_builder_contracts.py` compiles verbatim production
+builder, stream, callback-loop and getter bodies with C++ exceptions disabled and
+UBSan. Its declared device seam observes parameters, returns deliberately rounded
+capacities, and supplies timestamps. All **103 checks pass**, including both
+production input/output callback loops. The unchanged assertions fail 49 checks
+under `--negative-control`, which bypasses only builder validation in a disposable
+source copy. No hardware/device execution is implied by this portable test.
+
+The complete production `media_jni.cc` and `aaudio.cc` translation units also
+compile as x86-64 Windows objects with the verified llvm-mingw toolchain,
+`-std=c++23 -fno-exceptions -DGESHER=1 -Wall -Wextra -Werror`, exact patched
+libnativehelper JNI headers and `GESHER_MEDIA_STANDALONE` logging. This checks the
+Windows target and JNI calling convention; the final linked runtime remains a CI
+gate. The existing media API/AAudio I/O regression suite remains unchanged in
+behavior and preserves all 266 assertions.
+
+Build `tests/native/aaudio_builder_contract_test.c` with the real NDK for each
+Windows guest ABI, for example:
+
+```sh
+"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android36-clang" \
+  -std=c11 -O2 -Wall -Wextra -Werror \
+  tests/native/aaudio_builder_contract_test.c -laaudio -o aaudio-builder-x64
+"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android36-clang" \
+  -std=c11 -O2 -Wall -Wextra -Werror \
+  tests/native/aaudio_builder_contract_test.c -laaudio -o aaudio-builder-arm64
+```
+
+Run each ELF through the corresponding `gesher-exec` Windows track with
+`GESHER_AUDIO=null`; require exit zero and
+`AAudio builder guest contracts: <count> checks, 0 failures`. The fixture exercises
+public NDK invalid-input errors, output clearing, actual negotiation, resizing,
+real output timestamps, and actual callback block sizes. A local NDK/Windows
+runtime was unavailable during implementation, so this compilation/execution is
+explicitly left to the required x64/ARM64 CI gates. Existing `recordapp`/media3
+fixtures cover actual input capture and callbacks with RECORD_AUDIO permission.
+
+Remaining AAudio gaps include channel-mask/layout fidelity, ignored newer
+policy/spatialization/capture settings, compressed/offloaded paths, full
+suspend-aware clock translation, callback self-close, and comprehensive
+allocation/stream-lifetime handling under arbitrary concurrent caller use.
