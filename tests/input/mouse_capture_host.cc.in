@@ -69,6 +69,7 @@ constexpr unsigned WM_LBUTTONDOWN = 0x201, WM_LBUTTONUP = 0x202,
 int GET_X_LPARAM(intptr_t value) { return static_cast<int16_t>(value); }
 int GET_Y_LPARAM(intptr_t value) { return static_cast<int16_t>(value >> 16); }
 void SetCapture(HWND);
+HWND GetCapture();
 void ReleaseCapture();
 class Window {
  public:
@@ -101,8 +102,10 @@ Window* capture = nullptr;
 void SetCapture(HWND hwnd) {
   Window* old = capture;
   capture = static_cast<Window*>(hwnd);
-  if (old && old != capture) old->HandleMessage(WM_CAPTURECHANGED);
+  // Windows also notifies the existing owner when it captures itself again.
+  if (old) old->HandleMessage(WM_CAPTURECHANGED, reinterpret_cast<intptr_t>(hwnd));
 }
+HWND GetCapture() { return capture; }
 void ReleaseCapture() {
   Window* old = capture;
   capture = nullptr;
@@ -154,6 +157,35 @@ int main() {
   t.Translate(Event(kCancel), 126, &out);
   check(out.size() == 2 && out.back().action == AMOTION_EVENT_ACTION_UP,
         "normal release followed by capture change is not canceled");
+
+  Window chord, chord_target;
+  chord.route_pointer_ = &chord_target;
+  Send(chord, WM_LBUTTONDOWN);
+  Send(chord, WM_RBUTTONDOWN);
+  check(chord.buttons_ == 3 && capture == &chord && chord_target.received.size() == 2 &&
+        chord_target.received[0].type == WindowEvent::kMouseDown &&
+        chord_target.received[0].button == 1 &&
+        chord_target.received[1].type == WindowEvent::kMouseDown &&
+        chord_target.received[1].button == 2,
+        "second button retains capture and the original gesture without canceling");
+  Send(chord, WM_RBUTTONUP);
+  check(chord.buttons_ == 1 && capture == &chord && chord_target.received.size() == 3 &&
+        chord_target.received.back().type == WindowEvent::kMouseUp &&
+        chord_target.received.back().button == 2,
+        "nonfinal button-up keeps the remaining button and capture");
+  const auto chord_count = chord_target.received.size();
+  SetCapture(chord.hwnd_);
+  check(chord.buttons_ == 1 && capture == &chord &&
+        chord_target.received.size() == chord_count && chord.gesture_active_ &&
+        chord.gesture_target_ == &chord_target,
+        "same-owner capture notification preserves gesture state and routing");
+  Send(chord, WM_LBUTTONUP);
+  check(chord.buttons_ == 0 && capture == nullptr && chord_target.received.size() == 4 &&
+        chord_target.received.back().type == WindowEvent::kMouseUp &&
+        chord_target.received.back().button == 1,
+        "chord final button-up releases capture without cancellation");
+  check(!chord.gesture_active_ && chord.gesture_target_ == nullptr,
+        "completed chord retires its gesture route");
 
   Window origin, first, next, other;
   origin.route_pointer_ = &first;

@@ -916,6 +916,10 @@ intptr_t Window::HandleMessage(unsigned msg, uintptr_t wparam, intptr_t lparam) 
       Queue(e);
       return 0;
     case WM_CAPTURECHANGED:
+      // SetCapture can notify the previous owner even when it is also the
+      // new owner. A same-window notification does not end the gesture.
+      if (reinterpret_cast<HWND>(lparam) == hwnd) return 0;
+      [[fallthrough]];
     case WM_CANCELMODE:
       if (buttons_ != 0) {
         // A modal window or another capture owner may receive the button-up.
@@ -941,7 +945,7 @@ intptr_t Window::HandleMessage(unsigned msg, uintptr_t wparam, intptr_t lparam) 
                                                                     : 4;
       buttons_ = down ? (buttons_ | button) : (buttons_ & ~button);
       if (buttons_ != 0) {
-        SetCapture(hwnd);
+        if (GetCapture() != hwnd) SetCapture(hwnd);
       } else {
         ReleaseCapture();
       }

@@ -153,7 +153,7 @@ the known old null dereference, unbounded owner wait or overflowing expression.
 | [Location](location-terminal-contracts-2026-11-14.md) | Terminal reentry/concurrency exceeded limits; a late fix lost current completion; finite listeners retained resources; current callbacks lacked death links; duration overflowed. | Locked terminal claims before callbacks; record-owned expiry independent of polling; identity-safe death/inactivation. 144 host assertions and seven baseline case failures. |
 | [NSD values](nsd-value-contracts-2026-11-14.md) | TXT bounds differed; Parcel dropped IPv6 scope/type and used a divergent schema. | Complete pinned value implementation with license and build-annotation adaptations only. 41 SDK-bound host checks and four baseline case failures; native Parcel is a separate Windows gate. |
 | [Media callbacks/state](media-callback-contracts-2026-11-14.md) | Extractor/retriever setters silently used stand-ins; player callbacks mishandled status/size/shared buffers; ownership/reentry/replacement retained invalid context/state or stale art. | Shared serialized JNI adapter, actual setters, retained receivers, close/error ownership, coherent replacement and reset outside the lock. 42 checked-JNI/UBSan assertions, eight baseline case failures; 35 sanitized state checks with six safe baseline failures among the original 27. |
-| [Mouse capture](mouse-capture-contracts-2026-11-14.md) | Capture loss/modal cancellation left buttons and old gesture routing active. | One canceled gesture at its original target; Windows default cancellation preserved; next gesture starts cleanly. 20 sanitized checks; 12 baseline failures among 16 reached checks; existing 50 key checks pass. |
+| [Mouse capture](mouse-capture-contracts-2026-11-14.md) | Capture loss/modal cancellation left buttons and old gesture routing active; same-owner notifications must preserve multi-button chords. | One canceled gesture at its original target on actual loss; unchanged ownership preserves the gesture. 25 sanitized checks; 12 baseline failures among 21 reached checks; six failures against the earlier PR revision; existing 50 key checks pass. |
 
 Pinned Android details are deliberate: invalid-clock `sem_clockwait` returns
 positive `EINVAL` with unchanged errno; condvar deadline validation precedes
@@ -186,6 +186,13 @@ for Java/input, native synchronization and media. QA found and resolved:
    bootstrap and in-process services; every media assertion remains intact, and
    an additional assertion verifies that context. No media-provider cache is
    bypassed. The PR records the subsequent exact-head Windows result.
+5. The full Windows Java input test exposed same-owner capture notifications
+   during a multi-button chord. Repeated `SetCapture` can send
+   `WM_CAPTURECHANGED` back to the same HWND. The handler now checks the new
+   owner and avoids redundant capture calls. The host adapter now models this
+   notification faithfully; the strengthened 25-check fixture fails six checks
+   on the earlier PR revision and passes on the correction. All prior host and
+   Java assertions remain, with additional native chord/notification gates.
 
 Relevant existing location/input, semaphore/wait/futex, media API, retriever,
 source, HTTP, surface and player-priming suites passed. Complete changed pthread
