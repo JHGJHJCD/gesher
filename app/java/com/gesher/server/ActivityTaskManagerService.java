@@ -1418,7 +1418,6 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         return null;
     }
 
-    /** Only a package assigned to a live, attached Binder PID can act as that app. */
     /**
      * The package of the attached process that owns {@code pid}, until that process dies.
      * A process told to exit (idle exit, a closed last window, force-stop) still runs
