@@ -1,5 +1,21 @@
 # Runtime contracts added by the November 14 Android/Windows audit.
 # Track 50 supplies bounded RunTimed; track 94 supplies the framework boot path.
+foreach ($serviceFixture in @('RunningTaskSnapshotTest', 'TextServicesContractTest')) {
+  $serviceContractOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' + $serviceFixture) 90
+  $serviceContractCode = $LASTEXITCODE
+  Check "services: $serviceFixture public manager and generated Binder contracts" {
+    $global:LASTEXITCODE = $serviceContractCode
+    $serviceContractOut
+  } @("$serviceFixture all passed:")
+}
+
+$effectContractOut = FixesRun ($dvmFixes + 'gesher.services.AudioEffectAvailabilityTest') 90
+$effectContractCode = $LASTEXITCODE
+Check 'media: absent effect engine has typed capability queries and constructor failure' {
+  $global:LASTEXITCODE = $effectContractCode
+  $effectContractOut
+} @('AudioEffectAvailabilityTest all passed:')
+
 foreach ($lookupCase in @(
   @{ Exe = 'elf_load_test.exe'; Library = 'lookup_root.so'; Label = 'x86_64'; End = 'elf_load_test all passed' },
   @{ Exe = 'arm64_elf_test.exe'; Library = 'lookup_root_arm64.so'; Label = 'translated ARM64'; End = 'arm64_elf_test all passed' }

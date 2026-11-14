@@ -141,8 +141,10 @@ jobs:
       - name: Audio JNI buffer contracts with checked JNI and UBSan
         run: python3 tools/test_audio_buffer_contracts.py
 
-      - name: WebStorage origin dispatch contracts
-        run: python3 tools/test_webstorage_origin_contracts.py --java-home "$JAVA_HOME"
+      - name: WebStorage origin and running-task contracts
+        run: |
+          python3 tools/test_webstorage_origin_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_running_tasks_contracts.py
 
       - name: Settings context bootstrap and deferred construction contracts
         run: python3 tools/test_settings_context_bootstrap.py --java-home "$JAVA_HOME"
