@@ -31,6 +31,10 @@ the Linux kernel:
 
 Full design: [docs/architecture.md](docs/architecture.md).
 
+The [runtime performance audit](docs/research/runtime-performance-audit-2026-11-14.md)
+maps execution paths and records measured allocation, file-I/O and archive-scan
+reductions, frame-cache lifetime repairs, regression coverage and remaining work.
+
 ## Compatibility
 
 The [lifecycle contract audit](docs/research/android-lifecycle-contracts-2026-11-13.md)

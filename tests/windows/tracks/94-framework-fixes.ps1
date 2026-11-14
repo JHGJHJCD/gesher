@@ -88,6 +88,13 @@ Check 'installer: native library filenames and failed extraction preservation' {
   $nativePathsOut
 } @('NativeLibraryPathsTest all passed:')
 
+$standInDispatchOut = FixesRun ($dvmFixes + 'gesher.services.StandInDispatchTest') 90
+$standInDispatchCode = $LASTEXITCODE
+Check 'services: cached dispatch preserves overloads, defaults, strict mode and concurrent calls' {
+  $global:LASTEXITCODE = $standInDispatchCode
+  $standInDispatchOut
+} @('StandInDispatchTest all passed:')
+
 $webviewPathsOut = FixesRun ($dvmFixes + 'gesher.services.WebViewUploadPathsTest') 90
 $webviewPathsCode = $LASTEXITCODE
 Check 'webview: upload paths share the drive and UNC namespace' {
