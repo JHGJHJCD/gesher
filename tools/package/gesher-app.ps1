@@ -178,10 +178,10 @@ foreach ($d in 'system/framework', 'art', 'data', 'i18n/etc/icu', 'tzdata') {
 }
 # ICU's data, the framework's resources and the system properties, where Android
 # keeps them; refreshed when a new version of Gesher brings different ones.
+. (Join-Path $here 'gesher-runtime-files.ps1')
+$runtimeSync = New-GesherRuntimeSync -InstallDirectory $here -ProfileDirectory $root -Component app
 function Install([string] $from, [string] $to) {
-  if (-not (Test-Path $to) -or (Get-Item $to).Length -ne (Get-Item $from).Length) {
-    Copy-Item $from $to
-  }
+  Sync-GesherRuntimeFile -Source $from -Destination $to -State $runtimeSync
 }
 $data = Get-Item (Join-Path $here 'icudt*l.dat')
 Install $data.FullName (Join-Path $root "i18n/etc/icu/$($data.Name)")
@@ -225,6 +225,7 @@ if (Test-Path (Join-Path $here 'media/audio')) {
     Install $f.FullName $to
   }
 }
+Complete-GesherRuntimeSync -State $runtimeSync
 
 $env:ANDROID_ROOT = NoDrive "$root/system"
 $env:ANDROID_ART_ROOT = NoDrive "$root/art"
