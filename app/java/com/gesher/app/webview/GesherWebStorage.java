@@ -7,9 +7,9 @@ import java.util.Collections;
 import java.util.Map;
 
 /**
- * WebStorage over WebView2's profile (docs/webview.md): deleting data clears the
- * profile's DOM storage (local storage, IndexedDB, Web SQL, file systems, cache storage).
- * Quotas and per-origin usage are not reported.
+ * WebStorage over WebView2's profile (docs/webview.md). Origin deletion follows
+ * Chromium's framework API: only that origin's file systems and IndexedDB are
+ * removed. Quotas and per-origin usage are not reported.
  */
 final class GesherWebStorage extends WebStorage {
     static final int DOM_DATA = WebView2Host.DATA_ALL_DOM_STORAGE | WebView2Host.DATA_FILE_SYSTEMS
@@ -34,7 +34,8 @@ final class GesherWebStorage extends WebStorage {
 
     @Override
     public void deleteOrigin(String origin) {
-        deleteAllData();
+        if (origin == null || origin.isEmpty()) return;
+        WebView2Host.clearOriginData(origin, null);
     }
 
     @Override

@@ -2730,6 +2730,37 @@ bool Host::DeleteCookies(int32_t which, int64_t callback_id) {
   });
 }
 
+bool Host::ClearOriginData(const std::wstring& origin, int64_t callback_id) {
+  if (origin.empty()) return false;
+  return PostGlobal([origin, callback_id](const GlobalWork& operation) {
+    WithCoreWebView([operation, origin, callback_id](ICoreWebView2* wv) {
+      if (wv == nullptr) {
+        ReportGlobal(kGlobalDone, callback_id, static_cast<int32_t>(E_FAIL), L"");
+        return;
+      }
+      // Chromium AwQuotaManagerBridge::DeleteOriginFramework clears just these
+      // quota-managed types. The profile-wide API would erase unrelated origins.
+      const std::wstring params = L"{\"origin\":" + JsonString(origin) +
+          L",\"storageTypes\":\"file_systems,indexeddb\"}";
+      auto pending = std::make_shared<GlobalCompletion>(operation);
+      HRESULT hr = wv->CallDevToolsProtocolMethod(
+          L"Storage.clearDataForOrigin", params.c_str(),
+          GESHER_CALLBACK(ICoreWebView2CallDevToolsProtocolMethodCompletedHandler,
+                          [pending, callback_id](HRESULT error, LPCWSTR) -> HRESULT {
+                            GlobalWork work = std::move(pending->operation);
+                            if (!work) return S_OK;
+                            ReportGlobal(kGlobalDone, callback_id, static_cast<int32_t>(error), L"");
+                            return S_OK;
+                          })
+              .get());
+      if (FAILED(hr)) {
+        GlobalWork work = std::move(pending->operation);
+        if (work) ReportGlobal(kGlobalDone, callback_id, static_cast<int32_t>(hr), L"");
+      }
+    });
+  });
+}
+
 bool Host::ClearBrowsingData(int32_t kinds, int64_t callback_id) {
   return PostGlobal([kinds, callback_id](const GlobalWork& operation) {
     WithCoreWebView([operation, kinds, callback_id](ICoreWebView2* wv) {

@@ -273,6 +273,8 @@ class Host {
   static bool DeleteCookies(int32_t which, int64_t callback_id);
   // COREWEBVIEW2_BROWSING_DATA_KINDS.
   static bool ClearBrowsingData(int32_t kinds, int64_t callback_id);
+  // Android WebStorage.deleteOrigin: only this origin's file systems and IndexedDB.
+  static bool ClearOriginData(const std::wstring& origin, int64_t callback_id);
 
   // For the WebView thread (webview_host.cc).
   struct Impl;

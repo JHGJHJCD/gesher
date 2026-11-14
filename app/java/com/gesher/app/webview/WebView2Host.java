@@ -418,6 +418,12 @@ public final class WebView2Host {
         return submitGlobal(callback, id -> nClearBrowsingData(kinds, id));
     }
 
+    /** Clears one origin's file systems and IndexedDB, preserving other storage. */
+    public static boolean clearOriginData(String origin, GlobalCallback callback) {
+        if (origin == null || origin.isEmpty()) return false;
+        return submitGlobal(callback, id -> nClearOriginData(origin, id));
+    }
+
     /**
      * Closes an idle backend and waits at most timeoutMillis (1..0xfffffffe) for its
      * native thread to terminate. Live or pending hosts, an invalid timeout, the owner
@@ -528,4 +534,5 @@ public final class WebView2Host {
     private static native boolean nGetCookies(String url, long callbackId);
     private static native boolean nDeleteCookies(int which, long callbackId);
     private static native boolean nClearBrowsingData(int kinds, long callbackId);
+    private static native boolean nClearOriginData(String origin, long callbackId);
 }

@@ -11,3 +11,24 @@ foreach ($lookupCase in @(
     $lookupOut
   } @('elf_lookup_graph all passed', $lookupCase.End)
 }
+
+# Private profile, real WebView2, and intercepted local responses at two origins.
+$storageContractProfile = Join-Path ([IO.Path]::GetTempPath()) ('gesher-storage-contract-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $storageContractProfile -ErrorAction Stop | Out-Null
+try {
+  $storageContractOut = FixesRun ($dvmFixes + 'gesher.services.WebStorageOriginContractTest' + $storageContractProfile) 180
+  $storageContractCode = $LASTEXITCODE
+  Check 'webview: origin deletion preserves other sites and other storage types' {
+    $global:LASTEXITCODE = $storageContractCode
+    $storageContractOut
+  } @('WebStorageOriginContractTest all passed:', 'two origins, IndexedDB, localStorage, cookies and cache')
+} finally {
+  $storageCleanupDeadline = [DateTime]::UtcNow.AddSeconds(10)
+  while (Test-Path -LiteralPath $storageContractProfile) {
+    try { Remove-Item -LiteralPath $storageContractProfile -Recurse -Force -ErrorAction Stop }
+    catch {
+      if ([DateTime]::UtcNow -ge $storageCleanupDeadline) { throw }
+      Start-Sleep -Milliseconds 200
+    }
+  }
+}
