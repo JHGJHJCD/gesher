@@ -8,6 +8,7 @@ $null = [System.Management.Automation.Language.Parser]::ParseFile(
     [IO.Path]::GetFullPath($UpdaterPath), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
 . $UpdaterPath
+$installerVersionReader = ${function:Get-GesherUpdateInstallerVersion}
 $script:Checks = 0
 function Assert-Update([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw $Message }
@@ -96,6 +97,29 @@ $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
 $work = Join-Path $tempRoot ('gesher update checks ' + [char]0x05E9 + ' ' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $work | Out-Null
 try {
+    Assert-Update ((ConvertTo-GesherInstallerVersion '0.2.0') -ceq '0.2.0') 'Canonical installer version was changed'
+    Assert-Update ((ConvertTo-GesherInstallerVersion ('0.2.0' + (' ' * 43))) -ceq '0.2.0') 'Inno Setup ASCII version padding was not removed'
+    foreach ($invalid in @($null, '', 42, ' 0.2.0', "0.2.0`t", "0.2.0`r`n", '0 .2.0',
+        '0.2.0.0   ', '01.2.0 ', 'v0.2.0 ', '0.2.0-beta ', '0.2.65536 ')) {
+        Assert-Update ($null -eq (ConvertTo-GesherInstallerVersion $invalid)) "Invalid padded installer version accepted: $invalid"
+    }
+    if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
+        # Exercise FileVersionInfo itself via the saved production reader.
+        # A PE version resource with the same padding as the actual Inno artifact
+        # prevents fixture-only normalization from hiding a Windows read failure.
+        $versionFixture = Join-Path $work 'installer-version-fixture.dll'
+        $paddedVersion = '0.2.0' + (' ' * 43)
+        Add-Type -OutputAssembly $versionFixture -TypeDefinition @"
+using System.Reflection;
+[assembly: AssemblyVersion("0.2.0.0")]
+[assembly: AssemblyFileVersion("0.2.0.0")]
+[assembly: AssemblyInformationalVersion("$paddedVersion")]
+public static class GesherInstallerVersionFixture {}
+"@
+        $rawFixtureVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($versionFixture).ProductVersion
+        Assert-Update ($rawFixtureVersion -ceq $paddedVersion) 'Windows fixture did not retain the Inno-style ProductVersion padding'
+        Assert-Update ((& $installerVersionReader -Path $versionFixture) -ceq '0.2.0') 'Actual Windows installer-version reader rejected padded PE metadata'
+    }
     $install = Join-Path $work 'installed Gesher'
     $downloads = Join-Path $work 'downloads'
     New-Item -ItemType Directory -Path $install, $downloads | Out-Null

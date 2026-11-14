@@ -728,11 +728,15 @@ jobs:
             if (-not (Test-Path -LiteralPath (Join-Path $app $file) -PathType Leaf)) { throw "The installer left out $file" }
           }
           . (Join-Path $app 'gesher-update.ps1')
-          if ((Get-GesherInstalledVersion -InstallDirectory $app) -cne $env:GESHER_PACKAGE_VERSION) {
-            throw 'Installed release version does not match the installer version'
+          $installedVersion = Get-GesherInstalledVersion -InstallDirectory $app
+          if ($installedVersion -cne $env:GESHER_PACKAGE_VERSION) {
+            throw "Installed release version mismatch: expected '$env:GESHER_PACKAGE_VERSION', actual '$installedVersion'"
           }
-          if ((Get-GesherUpdateInstallerVersion -Path $setup) -cne $env:GESHER_PACKAGE_VERSION) {
-            throw 'Installer ProductVersion does not match the release version'
+          $rawProductVersion = [Diagnostics.FileVersionInfo]::GetVersionInfo($setup).ProductVersion
+          $installerVersion = Get-GesherUpdateInstallerVersion -Path $setup
+          "INFO: Installer ProductVersion raw='$rawProductVersion' (length $($rawProductVersion.Length)), normalized='$installerVersion', expected='$env:GESHER_PACKAGE_VERSION'"
+          if ($installerVersion -cne $env:GESHER_PACKAGE_VERSION) {
+            throw "Installer ProductVersion mismatch: expected '$env:GESHER_PACKAGE_VERSION', normalized '$installerVersion', raw '$rawProductVersion'"
           }
           'PASS  installer: updater, runtime synchronizer and exact release version are installed' | Tee-Object -Append $env:GITHUB_STEP_SUMMARY
           $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')

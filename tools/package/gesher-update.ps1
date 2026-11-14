@@ -258,9 +258,16 @@ function Invoke-GesherUpdateDownload([string] $Uri, [string] $Path, [long] $Expe
     [Gesher.Updates.Transport]::Download($Uri, $Path, $ExpectedSize, $CancellationToken)
 }
 
+function ConvertTo-GesherInstallerVersion([object] $Value) {
+    if ($Value -isnot [string]) { return $null }
+    # Inno Setup pads its fixed-size textual version resource with ASCII spaces.
+    # Remove only that trailing padding; all release version rules still apply.
+    return ConvertTo-GesherStableVersion -Value $Value.TrimEnd([char]0x20)
+}
+
 function Get-GesherUpdateInstallerVersion([string] $Path) {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'Gesher installers require Windows.' }
-    return [Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion
+    return ConvertTo-GesherInstallerVersion -Value ([Diagnostics.FileVersionInfo]::GetVersionInfo($Path).ProductVersion)
 }
 
 function Assert-GesherUpdateInstaller([string] $Path, [object] $Release, [IO.Stream] $Stream,
