@@ -59,18 +59,29 @@ struct Format {
     *out = 8000; return true;
   }
 };
+enum class SeekMode { kPrevious, kNext, kClosest };
 struct Sample { int64_t time_us = 0; };
-struct TrackReader { int Read(Sample*) { return 1; } };
+struct TrackReader {
+  std::shared_ptr<DataSource> source;
+  int Read(Sample* sample, int64_t = 0, SeekMode = SeekMode::kPrevious) {
+    uint8_t tag = 0;
+    if (source->ReadAt(0, &tag, 1) != 1) return -1;
+    sample->time_us = tag;
+    return 0;
+  }
+};
 struct Extractor {
   uint8_t tag;
+  std::shared_ptr<DataSource> source;
   static std::unique_ptr<Extractor> Open(std::shared_ptr<DataSource> source, std::string*) {
     uint8_t tag = 0;
     if (source->ReadAt(0, &tag, 1) != 1 || tag == 0) return nullptr;
-    return std::unique_ptr<Extractor>(new Extractor{tag});
+    return std::unique_ptr<Extractor>(new Extractor{tag, source});
   }
   Format FileFormat() const { return {tag}; }
   Format TrackFormat(size_t) const { return {tag}; }
   size_t TrackCount() const { return 1; }
+  std::unique_ptr<TrackReader> OpenTrack(size_t) { return std::unique_ptr<TrackReader>(new TrackReader{source}); }
 };
 @RETRIEVER@
 @EXTRACTOR@
@@ -130,6 +141,10 @@ const JNINativeMethod methods[] = {
   {const_cast<char*>("source"), const_cast<char*>("(ZLMediaCallbackHostTest$Source;)V"), reinterpret_cast<void*>(&Source)},
   {const_cast<char*>("metadata"), const_cast<char*>("(I)Ljava/lang/String;"), reinterpret_cast<void*>(&MMR_extractMetadata)},
   {const_cast<char*>("artwork"), const_cast<char*>("(I)[B"), reinterpret_cast<void*>(&MMR_getEmbeddedPicture)},
+  {const_cast<char*>("select"), const_cast<char*>("(I)V"), reinterpret_cast<void*>(&ME_selectTrack)},
+  {const_cast<char*>("unselect"), const_cast<char*>("(I)V"), reinterpret_cast<void*>(&ME_unselectTrack)},
+  {const_cast<char*>("seek"), const_cast<char*>("(JI)V"), reinterpret_cast<void*>(&ME_seekTo)},
+  {const_cast<char*>("time"), const_cast<char*>("()J"), reinterpret_cast<void*>(&ME_getSampleTime)},
   {const_cast<char*>("tracks"), const_cast<char*>("()I"), reinterpret_cast<void*>(&ME_getTrackCount)},
   {const_cast<char*>("read"), const_cast<char*>("(LMediaCallbackHostTest$Source;JI)[B"), reinterpret_cast<void*>(&Read)},
   {const_cast<char*>("probe"), const_cast<char*>("(LMediaCallbackHostTest$Source;I)J"), reinterpret_cast<void*>(&Probe)},

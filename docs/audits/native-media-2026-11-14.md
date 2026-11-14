@@ -64,15 +64,18 @@ entrypoint retains a reference under the class context lock before acquiring the
 receiver's operation lock. Release detaches the field under the context lock and
 drops ownership outside it. A parser already inside a callback may finish, and a
 callback may release its own receiver, without destroying that active receiver
-or source. Independent receiver operations are serialized; reentrant extractor
-setup is rejected while an open is already in progress. New receiver allocation
+or source. Independent receiver operations are serialized; an admission guard rejects
+callback reentry into receiver operations with IllegalStateException, before
+selected readers or a snapshot can be touched. Release remains allowed. New receiver allocation
 uses `new (std::nothrow)` and reports OutOfMemoryError. This does not claim that
 all pre-existing STL allocations in media codecs have recoverable OOM handling.
 
 Retriever builds a fresh source/metadata/artwork snapshot. Successful replacement
 cannot carry artwork from a previous source. A failed replacement clears the
 whole old snapshot, following Stagefright's `clearMetadata()`/source reset
-contract. Inferred bitrate is omitted when its integer numerator cannot be
+contract. The previous snapshot is retired into a local before the new snapshot
+is installed; its Java close runs only after complete publication under the
+admission guard. Inferred bitrate is omitted when its integer numerator cannot be
 represented. Extractor retains its one-successful-source contract, permits retry
 after an initial failure, and closes a rejected callback candidate while keeping
 the original selected source.
@@ -86,7 +89,7 @@ Pinned references:
 
 ### Callback validation and integration
 
-`JAVA_HOME=<jdk> python3 tools/test_media_callback_contracts.py` runs 43 checks
+`JAVA_HOME=<jdk> python3 tools/test_media_callback_contracts.py` runs 57 checks
 against the production callback header, receiver lease header and verbatim JNI
 entrypoints using a real JVM with `-Xcheck:jni`, undefined-behavior sanitization,
 and C++ exceptions disabled. The parser boundary is a deterministic observer;
@@ -100,7 +103,13 @@ explicit barrier. Both receivers keep the source alive until the operation ends.
 
 The unchanged assertions fail under `--negative-control stale-art` (reuse the
 previous artwork) and `--negative-control unavailable-callback` (restore the old
-extractor callback no-op). Negative controls operate in disposable generated
+extractor callback no-op). `--negative-control reentrant-admission` removes the admission check in a
+disposable header and must fail the same-track selection assertion (a safe
+no-op without the guard), before testing any destructive mutation. Additional
+real-JNI checks reject callback select/unselect/seek/repeated-source operations
+and close-time metadata access while allowing close-time release.
+
+Negative controls operate in disposable generated
 files and do not edit production source.
 
 The existing `tools/test_media_api_contracts.py --sanitize` setup assertions are

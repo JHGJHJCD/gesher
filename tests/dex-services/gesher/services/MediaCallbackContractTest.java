@@ -48,7 +48,7 @@ public final class MediaCallbackContractTest {
         volatile int reads, closes;
         boolean unknown, failRead, oversize;
         CountDownLatch entered, resume;
-        ReadAction onRead;
+        ReadAction onRead, onClose;
         Source(byte[] bytes) { this.bytes = bytes; }
         @Override public int readAt(long position, byte[] data, int offset, int size) throws IOException {
             reads++;
@@ -68,7 +68,7 @@ public final class MediaCallbackContractTest {
             return count;
         }
         @Override public long getSize() { return unknown ? -1 : bytes.length; }
-        @Override public void close() { closes++; }
+        @Override public void close() throws IOException { closes++; if (onClose != null) onClose.run(); }
     }
     private static byte[] samples(MediaExtractor extractor) throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -124,6 +124,43 @@ public final class MediaCallbackContractTest {
         check(source.closes == 1, "callback can release its receiver without invalidating active parser");
         reentrant.release();
     }
+    private static void reentrantOperations() throws Exception {
+        for (int which = 0; which < 4; which++) {
+            MediaExtractor extractor = new MediaExtractor();
+            Source source = new Source(wav()), candidate = new Source(wav());
+            extractor.setDataSource(source); extractor.selectTrack(0);
+            final int operation = which;
+            boolean[] rejected = {false};
+            source.onRead = () -> {
+                try {
+                    if (operation == 0) extractor.selectTrack(0);
+                    else if (operation == 1) extractor.unselectTrack(0);
+                    else if (operation == 2) extractor.seekTo(0, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
+                    else extractor.setDataSource(candidate);
+                } catch (IllegalStateException expected) { rejected[0] = true; }
+            };
+            try {
+                byte[] decoded = samples(extractor);
+                check(rejected[0], "reentrant extractor mutation rejected: " + which);
+                check(Arrays.equals(pcm(), decoded), "reentrant rejection preserves actual WAV samples");
+                check(candidate.closes == 0, "reentrant setup never acquires candidate");
+            } finally { extractor.release(); }
+            check(source.closes == 1, "reentrant operation source releases once");
+        }
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        Source old = new Source(wav()), next = new Source(wav());
+        boolean[] rejected = {false};
+        retriever.setDataSource(old);
+        old.onClose = () -> {
+            try { retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION); }
+            catch (IllegalStateException expected) { rejected[0] = true; }
+            retriever.release();
+        };
+        retriever.setDataSource(next);
+        check(rejected[0], "close callback cannot observe a snapshot being replaced");
+        check(old.closes == 1 && next.closes == 1, "close callback can release newly published snapshot");
+        retriever.release();
+    }
     private static void player() throws Exception {
         MediaPlayer player = new MediaPlayer();
         Source source = new Source(wav());
@@ -159,7 +196,7 @@ public final class MediaCallbackContractTest {
     }
     public static void main(String[] args) throws Exception {
         System.loadLibrary("android_runtime");
-        extractor(false); extractor(true); retriever(); player(); releaseRace(false); releaseRace(true);
+        extractor(false); extractor(true); retriever(); reentrantOperations(); player(); releaseRace(false); releaseRace(true);
         System.out.println("MediaCallbackContractTest all passed: " + checks + " checks");
     }
 }

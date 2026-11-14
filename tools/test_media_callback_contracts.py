@@ -27,7 +27,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--java-home", type=Path, default=os.environ.get("JAVA_HOME"))
     parser.add_argument("--cxx", default=os.environ.get("CXX", "c++"))
-    parser.add_argument("--negative-control", choices=("stale-art", "unavailable-callback"))
+    parser.add_argument("--negative-control", choices=("stale-art", "unavailable-callback", "reentrant-admission"))
     args = parser.parse_args()
     java = args.java_home or Path(shutil.which("javac") or "missing-javac").resolve().parent.parent
     retriever = (ROOT / "compat/media/jni/media_jni_others.cc").read_text()
@@ -39,6 +39,8 @@ def main():
         "EXTRACTOR": "\n".join((section(extractor, "jfieldID gContext;", "jobject Boxed("),
                                   section(extractor, "ReceiverLease<JniExtractor> GetForDataSource(", "void JNICALL ME_setDataSourcePath("),
                                   section(extractor, "void JNICALL ME_setDataSourceCallback(", "jobject JNICALL ME_getTrackFormat("),
+                                  section(extractor, "void JNICALL ME_selectTrack(", "jboolean JNICALL ME_advance("),
+                                  section(extractor, "jlong JNICALL ME_getSampleTime(", "jlong JNICALL ME_getSampleSize("),
                                   section(extractor, "void JNICALL ME_setup(", "jobject JNICALL ME_getAudioPresentations("))),
     }
     if args.negative_control == "stale-art":
@@ -53,12 +55,17 @@ def main():
     with tempfile.TemporaryDirectory(prefix="gesher-media-callback-") as tmp:
         folder = Path(tmp); cpp = folder / "callback.cc"; cpp.write_text(template)
         library = folder / "libmedia_callback.so"
+        if args.negative_control == "reentrant-admission":
+            header = folder / "compat/media/jni/receiver_lease.h"
+            header.parent.mkdir(parents=True)
+            text = (ROOT / "compat/media/jni/receiver_lease.h").read_text()
+            header.write_text(text.replace("if (receiver_->operation_active)", "if (false)"))
         command = shlex.split(args.cxx) + ["-std=c++20", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-pthread",
                     "-shared", "-fPIC", "-fsanitize=undefined", "-fno-sanitize-recover=undefined",
-                    "-I", str(ROOT), "-I", str(java / "include"), "-I", str(java / "include/linux"), str(cpp), "-o", str(library)]
+                    "-I", str(folder), "-I", str(ROOT), "-I", str(java / "include"), "-I", str(java / "include/linux"), str(cpp), "-o", str(library)]
         subprocess.run(command, check=True, timeout=120)
         subprocess.run([str(java / "bin/javac"), "-d", str(folder), str(ROOT / "tests/media/MediaCallbackHostTest.java")], check=True, timeout=60)
-        cases = ("retriever",) if args.negative_control == "stale-art" else (("extractor",) if args.negative_control else ("adapter", "retriever", "extractor", "release"))
+        cases = ("retriever",) if args.negative_control == "stale-art" else (("extractor",) if args.negative_control == "unavailable-callback" else (("reentrant",) if args.negative_control else ("adapter", "retriever", "extractor", "release", "reentrant")))
         for case in cases:
             run = subprocess.run([str(java / "bin/java"), "-Xcheck:jni", "-XX:-CreateCoredumpOnCrash", "-cp", str(folder),
                                   "MediaCallbackHostTest", str(library), case], capture_output=True, text=True, timeout=30)

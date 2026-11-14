@@ -128,6 +128,7 @@ void SetFromSource(JNIEnv* env, jobject thiz, std::unique_ptr<DataSource> source
   r->opening = false;
   // Source, metadata and artwork always belong to the same successful open.
   // A failed replacement clears the whole previous source, as Stagefright does.
+  RetrieverSnapshot retired = std::move(r->snapshot);
   r->snapshot = opened ? std::move(next) : RetrieverSnapshot{};
   if (!opened) {
     MEDIA_LOGE("MediaMetadataRetriever: %s", e.c_str());
@@ -174,8 +175,7 @@ void JNICALL MMR_setDataSourceFD(JNIEnv* env, jobject thiz, jobject fileDescript
 }
 
 void JNICALL MMR_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject data_source) {
-  auto r = GetRetriever(env, thiz);
-  if (r == nullptr) {
+  if (GetRetriever(env, thiz) == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
     return;
   }

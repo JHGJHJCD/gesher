@@ -14,6 +14,10 @@ public final class MediaCallbackHostTest {
     private native String metadata(int key);
     private native byte[] artwork(int type);
     private native int tracks();
+    private native void select(int index);
+    private native void unselect(int index);
+    private native void seek(long time, int mode);
+    private native long time();
     private static native byte[] read(Source callback, long offset, int size);
     private static native long probe(Source callback, int mode) throws IOException;
     private static int checks;
@@ -32,11 +36,14 @@ public final class MediaCallbackHostTest {
         long size;
         int invalid;
         boolean failRead, failSize, failClose;
+        Runnable onRead, onClose;
         CountDownLatch entered, resume;
         Source(byte[] bytes) { this.bytes = bytes; size = bytes.length; }
         Source(int tag) { this(new byte[] {(byte) tag}); }
         public int readAt(long offset, byte[] data, int start, int length) throws IOException {
             ++reads;
+            Runnable action = onRead; onRead = null;
+            if (action != null) action.run();
             if (entered != null) {
                 entered.countDown();
                 try { if (!resume.await(10, TimeUnit.SECONDS)) throw new IOException("barrier timeout"); }
@@ -50,7 +57,7 @@ public final class MediaCallbackHostTest {
             return count;
         }
         public long getSize() throws IOException { ++sizes; if (failSize) throw new IOException("size failure"); return size; }
-        public void close() throws IOException { ++closes; if (failClose) throw new IOException("close failure"); }
+        public void close() throws IOException { ++closes; if (onClose != null) onClose.run(); if (failClose) throw new IOException("close failure"); }
     }
     private static void adapter() throws Exception {
         byte[] data = new byte[131077];
@@ -132,6 +139,45 @@ public final class MediaCallbackHostTest {
         check(!open.isAlive() && failure.get() == null, "active setup completes after release");
         check(delayed.closes == 1, "last active operation closes source exactly once");
     }
+    private static void reentrant() throws Exception {
+        for (int which = 0; which < 4; which++) {
+            MediaCallbackHostTest e = new MediaCallbackHostTest(); e.setup(true);
+            Source source = new Source(1), candidate = new Source(2);
+            e.source(true, source); e.select(0);
+            final int operation = which;
+            boolean[] rejected = {false};
+            source.onRead = () -> {
+                try {
+                    // Same-track select is first: without admission it is a safe
+                    // no-op and proves this test fails before any erase/read race.
+                    if (operation == 0) e.select(0);
+                    else if (operation == 1) e.unselect(0);
+                    else if (operation == 2) e.seek(0, 0);
+                    else e.source(true, candidate);
+                } catch (IllegalStateException expected) { rejected[0] = true; }
+                catch (IOException unexpected) { throw new AssertionError(unexpected); }
+            };
+            try {
+                long time = e.time();
+                check(rejected[0], "nested receiver mutation rejected before access: " + which);
+                check(time == 1 && e.time() == 1, "outer reader state preserved after rejected reentry");
+            } finally { e.release(true); }
+            check(source.closes == 1 && candidate.closes == 0, "rejected reentry does not acquire a source");
+        }
+        MediaCallbackHostTest r = new MediaCallbackHostTest(); r.setup(false);
+        Source first = new Source(2), next = new Source(1);
+        boolean[] rejected = {false};
+        r.source(false, first);
+        first.onClose = () -> {
+            try { r.metadata(7); }
+            catch (IllegalStateException expected) { rejected[0] = true; }
+            r.release(false);
+        };
+        r.source(false, next);
+        check(rejected[0], "retired source close cannot observe partial snapshot publication");
+        check(first.closes == 1 && next.closes == 1, "close callback may release receiver after publication");
+        r.release(false);
+    }
     public static void main(String[] args) throws Exception {
         System.load(args[0]);
         switch (args[1]) {
@@ -139,6 +185,7 @@ public final class MediaCallbackHostTest {
             case "retriever": retriever(); break;
             case "extractor": extractor(); break;
             case "release": releaseRace(false); releaseRace(true); break;
+            case "reentrant": reentrant(); break;
             default: throw new AssertionError(args[1]);
         }
         System.out.println("Media callback " + args[1] + ": " + checks + " checks passed");
