@@ -136,6 +136,9 @@ public final class Services {
         // input_method: Windows' text input (docs/input.md "Text input", ADR 0039).
         services.put(Context.INPUT_METHOD_SERVICE, StandIn.of(IInputMethodManager.class,
                 new InputMethodManagerService()).asBinder());
+        services.put(Context.TEXT_SERVICES_MANAGER_SERVICE, StandIn.of(
+                com.android.internal.textservice.ITextServicesManager.class,
+                new TextServicesManagerService()).asBinder());
         services.put(Context.NOTIFICATION_SERVICE,
                 StandIn.of(INotificationManager.class, notifications).asBinder());
         services.put(Context.UI_MODE_SERVICE,
