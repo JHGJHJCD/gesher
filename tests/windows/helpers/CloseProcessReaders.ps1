@@ -27,7 +27,7 @@ function Close-ProcessReaders($Cancellation, [object[]] $Pipes) {
       try {
         if ($null -ne $pipe.Handle) {
           if ([GtestProcessNativeHandles]::CloseOwnedReader($pipe.Reader, $pipe.Handle)) { $closed++ }
-          else { $problems += "$($pipe.Name) owned pipe did not prove immediate native invalidity" }
+          else { $problems += "$($pipe.Name) owned pipe close proof failed: $([GtestProcessNativeHandles]::LastDiagnostic)" }
         } else {
           $pipe.Reader.Dispose()
           $problems += "$($pipe.Name) reader started without captured pipe ownership"
