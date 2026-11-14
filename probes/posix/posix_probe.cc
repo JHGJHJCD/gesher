@@ -555,11 +555,11 @@ static void ReservedNames(const std::string& dir) {
 
   // On the disk: the encoded name, and no stream of a file "frc_1".
   std::wstring windows(sub.begin(), sub.end());
-  for (wchar_t& c : windows) c = c == L'/' ? L'\' : c == L':' ? 0xF03A : c;
+  for (wchar_t& c : windows) c = c == L'/' ? L'\\' : c == L':' ? 0xF03A : c;
   CHECK(GetFileAttributesW(windows.c_str()) != INVALID_FILE_ATTRIBUTES);
-  CHECK(GetFileAttributesW((windows + L"\frc_1\xF03A" L"4\xF03A" L"android\xF03A"
+  CHECK(GetFileAttributesW((windows + L"\\frc_1\xF03A" L"4\xF03A" L"android\xF03A"
                             L"fb5_fireperf_settings.xml").c_str()) != INVALID_FILE_ATTRIBUTES);
-  CHECK(GetFileAttributesW((windows + L"\frc_1").c_str()) == INVALID_FILE_ATTRIBUTES);
+  CHECK(GetFileAttributesW((windows + L"\\frc_1").c_str()) == INVALID_FILE_ATTRIBUTES);
 
   // Every reserved character, renamed in and out; O_EXCL sees the name.
   std::string odd = sub + "/a?b*c<d>e|f\"g";
@@ -773,8 +773,7 @@ int main(int argc, char** argv) {
   Proc(dir);
   fprintf(stderr, "-- %s\n", "Inotify");
   Inotify(dir);
-  fprintf(stderr, "-- %s
-", "ReservedNames");
+  fprintf(stderr, "-- %s\n", "ReservedNames");
   ReservedNames(dir);
   fprintf(stderr, "-- %s\n", "Processes");
   Processes();

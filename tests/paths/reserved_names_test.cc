@@ -54,7 +54,10 @@ int main() {
     std::vector<std::pair<std::wstring, std::wstring>> roots = {
         {L"C:\\data\\a:b", L"C:\\data\\a\xF03A" L"b"},
         {L"c:/data/a:b", L"c:/data/a\xF03A" L"b"},
-        {L"C:relative:name", L"C:relative\xF03A" L"name"},
+        // A letter and a colon before a name is a Linux name, not drive-relative.
+        {L"x:cfg", L"x\xF03A" L"cfg"},
+        {L"C:relative:name", L"C\xF03A" L"relative\xF03A" L"name"},
+        {L"C:", L"C:"},
         {L"\\\\?\\C:\\data\\a?b", L"\\\\?\\C:\\data\\a\xF03F" L"b"},
         {L"//?/C:/data/a|b", L"//?/C:/data/a\xF07C" L"b"},
         {L"\\\\?\\UNC\\server\\share\\a:b", L"\\\\?\\UNC\\server\\share\\a\xF03A" L"b"},
@@ -73,6 +76,11 @@ int main() {
       Check(Encoded(Encoded(path)) == want, "encoding twice changes nothing");
     }
     Check(RootLength(L"C:") == 2, "a bare drive");
+    Check(gesher::reserved_names::DriveRoot("C:") && gesher::reserved_names::DriveRoot("c:/x") &&
+              gesher::reserved_names::DriveRoot(L"D:\\x") &&
+              !gesher::reserved_names::DriveRoot("x:cfg") && !gesher::reserved_names::DriveRoot("ab") &&
+              !gesher::reserved_names::DriveRoot(":"),
+          "a drive root is a letter, a colon, and a separator or the end");
     Check(RootLength(L"\\\\?\\") == 4, "a bare long-path prefix");
     Check(RootLength(L"\\\\server") == 8, "a bare UNC server");
 

@@ -43,7 +43,7 @@ bool IsDriveLetter(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 
 
 // Linux's absolute paths start with '/'; Windows' with a drive or '\'.
 bool IsAbsolute(const char* path) {
-  return path[0] == '/' || path[0] == '\\' || (IsDriveLetter(path[0]) && path[1] == ':');
+  return path[0] == '/' || path[0] == '\\' || reserved_names::DriveRoot(path);
 }
 
 // The parts of an absolute path, without empty and "." components.

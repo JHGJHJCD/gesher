@@ -22,7 +22,7 @@ bool IsSlash(char c) { return c == '/' || c == '\\'; }
 
 bool IsAbsolute(const std::string& p) {
   return (!p.empty() && IsSlash(p[0])) ||
-         (p.size() >= 2 && p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') || (p[0] >= 'a' && p[0] <= 'z')));
+         gesher::reserved_names::DriveRoot(p.c_str());
 }
 
 bool EqualsIgnoreCase(const std::wstring& a, const wchar_t* b) { return _wcsicmp(a.c_str(), b) == 0; }

@@ -57,7 +57,7 @@ constexpr int kODirectory = 0200000;
 // --- paths relative to a directory fd -----------------------------------------
 
 bool IsAbsolute(const char* p) {
-  return p[0] == '/' || p[0] == '\\' || (p[0] != 0 && p[1] == ':');
+  return p[0] == '/' || p[0] == '\\' || gesher::reserved_names::DriveRoot(p);
 }
 
 // The directory an fd refers to, as a path gesher-base's calls accept.

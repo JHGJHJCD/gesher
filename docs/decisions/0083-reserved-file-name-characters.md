@@ -37,7 +37,10 @@ the disk for Linux code turns back:
 
 The Windows root of a path keeps its characters. That means a drive `C:`, the
 `\\?\` and `\\.\` prefixes, and a UNC server and share, so the Windows paths
-that gesher-base also accepts (ADR 0010) mean what they meant. Only the
+that gesher-base also accepts (ADR 0010) mean what they meant. A drive is a
+letter and a colon before a separator or the end. `x:cfg` is a Linux name in
+the current directory, also for the `*at` calls, not a path relative to drive
+X's current directory. Only the
 reserved characters move: `/` and `\` still separate names. `.` and `..` are
 unchanged, and so are a trailing dot or space and the device names (`CON`,
 `NUL`). Those are still Windows' to interpret.
@@ -48,6 +51,9 @@ unchanged, and so are a trailing dot or space and the device names (`CON`,
 - A name with U+F000+`c` in it already (only possible for a name written by
   Windows software) reads as the reserved character. Cygwin has the same
   ambiguity.
+- Gesher's Java code that builds Windows paths itself (`Zygote.windowsPath`,
+  for icons, APKs, logs and caches, and a WebView file upload) does not encode
+  them. None of those names holds a reserved character today.
 - Windows tools such as Explorer, a backup tool or `dir` show the private-use
   characters, usually as boxes. The data directory is the app's, not the user's.
 - Data written before this change: a two-colon name never reached the disk. A

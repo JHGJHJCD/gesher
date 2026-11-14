@@ -43,6 +43,14 @@ inline bool DriveLetter(wchar_t c) {
   return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z');
 }
 
+// A drive root: "C:" alone or before a separator. "x:cfg" is a Linux name
+// with a colon, not a path relative to drive X's current directory.
+template <typename Char>
+inline bool DriveRoot(const Char* p) {
+  return DriveLetter(static_cast<wchar_t>(p[0])) && p[1] == ':' &&
+         (p[2] == 0 || Separator(static_cast<wchar_t>(p[2])));
+}
+
 // How much of `path` is its Windows root, which keeps its ':' and '?':
 // "C:", "\\?\C:", "\\?\UNC\server\share", "\\.\name", "\\server\share".
 inline size_t RootLength(std::wstring_view path) {
@@ -73,7 +81,10 @@ inline size_t RootLength(std::wstring_view path) {
     }
     return p;
   }
-  if (path.size() >= 2 && DriveLetter(path[0]) && path[1] == L':') return 2;
+  if (path.size() >= 2 && DriveLetter(path[0]) && path[1] == L':' &&
+      (path.size() == 2 || Separator(path[2]))) {
+    return 2;
+  }
   return 0;
 }
 

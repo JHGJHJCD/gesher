@@ -95,7 +95,9 @@ int ListOne(const std::string& path, bool long_form, bool all) {
   }
   for (const std::string& n : names) {
     if (long_form) {
-      std::wstring full = (attrs & FILE_ATTRIBUTE_DIRECTORY) ? w + L"\\" + Widen(n) : w;
+      std::wstring name = Widen(n);
+      gesher::reserved_names::EncodeName(&name);  // listed decoded, stored encoded
+      std::wstring full = (attrs & FILE_ATTRIBUTE_DIRECTORY) ? w + L"\\" + name : w;
       WIN32_FILE_ATTRIBUTE_DATA info = {};
       long long size = 0;
       char type = '-';
