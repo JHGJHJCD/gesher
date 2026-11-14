@@ -77,7 +77,9 @@ import java.nio.channels.OverlappingFileLockException;
  *    its subclass from linking even on a device without Bluetooth.
  *  - android.os.Debug's Binder counters (compat/framework/android_runtime.cc):
  *    OsmAnd's diagnostic worker died with UnsatisfiedLinkError; real AOSP
- *    Binder object counts are registered and absent transaction totals stay -1.
+ *    Binder object counts are registered and absent transaction totals stay -1;
+ *    then getMemoryInfo (its MemoryLog sample) died the same way: the Debug
+ *    memory accounting natives report the Windows working set.
  *  - libphonenumber (com.android.i18n.phonenumbers, the ext boot jar's; bundled into
  *    framework.jar with its metadata, tools/framework/plan.py's EXT_BUNDLED): Gmail's
  *    compose window died on a stackless NoClassDefFoundError for
@@ -618,6 +620,72 @@ public final class FrameworkFixesTest {
                 + "and Parcel release; proxy/death counts resolve, transaction totals unavailable");
     }
 
+    private static void debugMemoryInfo() throws Exception {
+        // Make sure part of the Java heap is resident and dirty.
+        byte[][] touched = new byte[16][];
+        for (int i = 0; i < touched.length; i++) {
+            touched[i] = new byte[256 * 1024];
+            java.util.Arrays.fill(touched[i], (byte) i);
+        }
+        android.os.Debug.MemoryInfo info = new android.os.Debug.MemoryInfo();
+        android.os.Debug.getMemoryInfo(info);
+        int pss = info.getTotalPss(), rss = info.getTotalRss();
+        require(pss > 0 && rss >= pss && info.getTotalUss() > 0 && info.getTotalUss() <= pss,
+                "getMemoryInfo totals: pss " + pss + " rss " + rss + " uss " + info.getTotalUss());
+        require(info.dalvikPss > 0 && info.dalvikPrivateDirty == info.dalvikPss,
+                "getMemoryInfo has no resident Java heap: " + info.dalvikPss);
+        require(info.nativePss > 0 && info.otherPss >= 0 && info.otherRss >= 0
+                && info.otherPrivateDirty >= 0 && !info.hasSwappedOutPss
+                && info.getTotalSwappedOut() == 0,
+                "getMemoryInfo categories: native " + info.nativePss + " other " + info.otherPss);
+        require(info.dalvikPss + info.nativePss + info.otherPss == pss,
+                "getMemoryInfo categories do not add up to the total PSS");
+        // The memory summary OsmAnd's MemoryLog and ActivityManager's dumps read.
+        require(info.getMemoryStats().get("summary.total-pss") != null,
+                "MemoryInfo.getMemoryStats lost its summary");
+        int myPid = android.os.Process.myPid();
+        android.os.Debug.MemoryInfo byPid = new android.os.Debug.MemoryInfo();
+        require(android.os.Debug.getMemoryInfo(myPid, byPid) && byPid.getTotalPss() > 0,
+                "getMemoryInfo(myPid) failed");
+        require(!android.os.Debug.getMemoryInfo(-1, new android.os.Debug.MemoryInfo()),
+                "getMemoryInfo of a missing process succeeded");
+        try {
+            android.os.Debug.getMemoryInfo(null);
+            throw new AssertionError("getMemoryInfo(null) accepted");
+        } catch (NullPointerException expected) {
+        }
+
+        long ownPss = android.os.Debug.getPss();
+        long ownRss = android.os.Debug.getRss();
+        long[] ussSwapRss = {-1, -1, -1};
+        long[] memtrack = {-1, -1, -1, -1};
+        long pidPss = android.os.Debug.getPss(myPid, ussSwapRss, memtrack);
+        require(ownPss > 0 && ownRss > 0 && pidPss > 0, "getPss/getRss: " + ownPss + " " + ownRss);
+        require(ussSwapRss[0] > 0 && ussSwapRss[0] <= pidPss && ussSwapRss[1] == 0
+                && ussSwapRss[2] >= pidPss, "getPss outputs " + java.util.Arrays.toString(ussSwapRss));
+        require(memtrack[0] == 0 && memtrack[3] == 0, "no memtrack HAL, but graphics memory reported");
+        require(android.os.Debug.getRss(myPid, null) > 0, "getRss(myPid) failed");
+        require(android.os.Debug.getPss(-1, null, null) == 0 && android.os.Debug.getRss(-1, null) == 0,
+                "a missing process has memory");
+        java.lang.ref.Reference.reachabilityFence(touched);
+
+        long[] system = new long[android.os.Debug.MEMINFO_COUNT];
+        android.os.Debug.getMemInfo(system);
+        long total = system[android.os.Debug.MEMINFO_TOTAL];
+        require(total > 0 && system[android.os.Debug.MEMINFO_FREE] >= 0
+                && system[android.os.Debug.MEMINFO_FREE] <= total
+                && system[android.os.Debug.MEMINFO_CACHED] >= 0
+                && system[android.os.Debug.MEMINFO_SWAP_FREE] <= system[android.os.Debug.MEMINFO_SWAP_TOTAL],
+                "getMemInfo: " + java.util.Arrays.toString(system));
+        try {
+            android.os.Debug.getMemInfo(new long[1]);
+            throw new AssertionError("getMemInfo accepted a short array");
+        } catch (RuntimeException expected) {
+        }
+        System.out.println("FrameworkFixesTest: Debug.getMemoryInfo, getPss, getRss and getMemInfo report "
+                + "the process working set and system memory (pss " + pss + " kB, rss " + rss + " kB)");
+    }
+
     public static void main(String[] args) throws Exception {
         // The FileChannel lock natives and Binder's (gesher-app loads them in an app).
         System.loadLibrary("android_runtime");
@@ -633,6 +701,7 @@ public final class FrameworkFixesTest {
         bluetoothProfiles();
         bluetoothLeCallbacks();
         binderDebugCounters();
+        debugMemoryInfo();
         phoneNumbers();
         handlerThreadQuit();
         System.out.println("FrameworkFixesTest all passed");

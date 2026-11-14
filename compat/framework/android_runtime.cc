@@ -21,6 +21,7 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -521,7 +522,358 @@ jint android_os_Debug_getDeathObjectCount(JNIEnv* env, jobject clazz);
 // Preserve that unavailable result, rather than reporting invented zero totals.
 static jint Debug_binderTransactionsUnavailable(JNIEnv*, jobject) { return -1; }
 
+// --- android.os.Debug memory accounting (getMemoryInfo, getPss, getRss, getMemInfo) ---
+// AOSP reads a process's smaps (meminfo's ProcMemInfo) and /proc/meminfo. The
+// Windows equivalents are the process working set (QueryWorkingSet: one entry
+// per resident page, with its share count and protection) and the system's
+// performance counters (GetPerformanceInfo). Values are kB, as on Android.
+//   - RSS: resident pages. USS: resident pages no other process maps (private,
+//     or shared with a share count of 1). PSS: USS plus each shared page divided
+//     by its share count (Windows caps the count at 7, so PSS errs high for
+//     widely shared DLL pages).
+//   - Dirty: Linux's dirty bit has no Windows equivalent; a resident writable
+//     page counts as dirty, read-only and not-yet-written copy-on-write pages
+//     as clean. Clean pages are file-backed and can be dropped, which is what
+//     AOSP's swappable PSS reports.
+//   - Categories: Windows does not label mappings like "[anon:dalvik-...]".
+//     For the calling process the Java heap's live bytes (Runtime totalMemory
+//     minus freeMemory) are reported as dalvik and the process heap's
+//     allocated bytes (HeapSummary, as getNativeHeapAllocatedSize) as native:
+//     bytes in use have been written, so they are resident private dirty
+//     pages unless paged out. Each is capped by the private dirty memory left;
+//     the rest is "other" (on Windows that includes ART's mapped image and
+//     oat files, private clean as on Linux). Another process is reported entirely as
+//     "other". otherStats stays zero: there is no per-mapping breakdown.
+//   - Swap: Windows pages out to the pagefile, but per-page swap PSS is not
+//     available, so swappedOut is 0 and hasSwappedOutPss false, as on an
+//     Android device without swap PSS. There is no memtrack HAL: graphics
+//     memory is 0.
+// A failure to read another process answers as AOSP does when smaps cannot be
+// read: false or 0. Apps sample these for diagnostics (OsmAnd's
+// OsmAndDiagnosticThread calls getMemoryInfo; an unregistered native killed it
+// with UnsatisfiedLinkError, and OsmAnd then reported a crash on every launch).
+
+namespace {
+
+struct WorkingSetUsage {
+  jlong rss = 0, pss = 0, uss = 0, swappable_pss = 0;
+  jlong private_dirty = 0, private_clean = 0, shared_dirty = 0, shared_clean = 0;
+};
+
+struct WorkingSetEntry {  // psapi.h's PSAPI_WORKING_SET_BLOCK
+  ULONG_PTR flags;
+  unsigned protection() const { return static_cast<unsigned>(flags & 0x1f); }
+  unsigned share_count() const { return static_cast<unsigned>((flags >> 5) & 0x7); }
+  bool shared() const { return ((flags >> 8) & 0x1) != 0; }
+};
+
+using QueryWorkingSetFn = BOOL(WINAPI*)(HANDLE, PVOID, DWORD);
+using GetPerformanceInfoFn = BOOL(WINAPI*)(void*, DWORD);
+using GetProcessMemoryInfoFn = BOOL(WINAPI*)(HANDLE, void*, DWORD);
+
+template <typename Fn>
+Fn Kernel32(const char* name) {
+  return reinterpret_cast<Fn>(
+      reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), name)));
+}
+
+// The process to read, or null. Close it with CloseProcess.
+HANDLE OpenForMemory(jint pid) {
+  if (pid <= 0) return nullptr;
+  if (static_cast<DWORD>(pid) == GetCurrentProcessId()) return GetCurrentProcess();
+  return OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, static_cast<DWORD>(pid));
+}
+
+void CloseProcess(HANDLE process) {
+  if (process != nullptr && process != GetCurrentProcess()) CloseHandle(process);
+}
+
+bool ReadWorkingSet(HANDLE process, WorkingSetUsage* usage) {
+  static const QueryWorkingSetFn query = Kernel32<QueryWorkingSetFn>("K32QueryWorkingSet");
+  if (query == nullptr || process == nullptr) return false;
+  SYSTEM_INFO system;
+  GetSystemInfo(&system);
+  const double page_kb = system.dwPageSize / 1024.0;
+  // ULONG_PTR NumberOfEntries, then the entries. The working set may grow
+  // between calls: retry with the reported size plus headroom.
+  std::vector<ULONG_PTR> buffer(4096);
+  for (int attempt = 0;; attempt++) {
+    DWORD bytes = static_cast<DWORD>(buffer.size() * sizeof(ULONG_PTR));
+    if (query(process, buffer.data(), bytes)) break;
+    if (GetLastError() != ERROR_BAD_LENGTH || attempt == 8) return false;
+    buffer.resize(buffer[0] + buffer[0] / 4 + 1024);
+  }
+  size_t count = buffer[0];
+  if (count > buffer.size() - 1) count = buffer.size() - 1;
+  double rss = 0, pss = 0, uss = 0, swappable = 0;
+  double private_dirty = 0, private_clean = 0, shared_dirty = 0, shared_clean = 0;
+  for (size_t i = 0; i < count; i++) {
+    WorkingSetEntry page{buffer[i + 1]};
+    unsigned access = page.protection() & 0x7;
+    // 4: read/write, 6: execute/read/write. 5 and 7 are copy-on-write pages
+    // not yet written: still the file's (clean).
+    bool dirty = access == 4 || access == 6;
+    bool exclusive = !page.shared() || page.share_count() <= 1;
+    double proportional = exclusive ? page_kb : page_kb / page.share_count();
+    rss += page_kb;
+    pss += proportional;
+    if (!dirty) swappable += proportional;
+    if (exclusive) {
+      uss += page_kb;
+      (dirty ? private_dirty : private_clean) += page_kb;
+    } else {
+      (dirty ? shared_dirty : shared_clean) += page_kb;
+    }
+  }
+  usage->rss = static_cast<jlong>(rss);
+  usage->pss = static_cast<jlong>(pss);
+  usage->uss = static_cast<jlong>(uss);
+  usage->swappable_pss = static_cast<jlong>(swappable);
+  usage->private_dirty = static_cast<jlong>(private_dirty);
+  usage->private_clean = static_cast<jlong>(private_clean);
+  usage->shared_dirty = static_cast<jlong>(shared_dirty);
+  usage->shared_clean = static_cast<jlong>(shared_clean);
+  return true;
+}
+
+// Debug.MemoryInfo's per-category fields (dalvik, native, other), in AOSP's order.
+struct CategoryFields {
+  jfieldID pss, swappable_pss, rss, private_dirty, shared_dirty, private_clean,
+      shared_clean, swapped_out, swapped_out_pss;
+};
+
+bool CategoryFieldsFor(JNIEnv* env, jclass type, const char* prefix, CategoryFields* out) {
+  const char* names[] = {"Pss", "SwappablePss", "Rss", "PrivateDirty", "SharedDirty",
+                         "PrivateClean", "SharedClean", "SwappedOut", "SwappedOutPss"};
+  jfieldID* ids[] = {&out->pss, &out->swappable_pss, &out->rss, &out->private_dirty,
+                     &out->shared_dirty, &out->private_clean, &out->shared_clean,
+                     &out->swapped_out, &out->swapped_out_pss};
+  for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+    std::string name = std::string(prefix) + names[i];
+    *ids[i] = env->GetFieldID(type, name.c_str(), "I");
+    if (*ids[i] == nullptr) return false;
+  }
+  return true;
+}
+
+struct Category {
+  jlong pss = 0, swappable_pss = 0, rss = 0, private_dirty = 0, shared_dirty = 0,
+        private_clean = 0, shared_clean = 0;
+};
+
+void SetCategory(JNIEnv* env, jobject info, const CategoryFields& f, const Category& c) {
+  auto clamp = [](jlong v) { return static_cast<jint>(v < 0 ? 0 : v > INT32_MAX ? INT32_MAX : v); };
+  env->SetIntField(info, f.pss, clamp(c.pss));
+  env->SetIntField(info, f.swappable_pss, clamp(c.swappable_pss));
+  env->SetIntField(info, f.rss, clamp(c.rss));
+  env->SetIntField(info, f.private_dirty, clamp(c.private_dirty));
+  env->SetIntField(info, f.shared_dirty, clamp(c.shared_dirty));
+  env->SetIntField(info, f.private_clean, clamp(c.private_clean));
+  env->SetIntField(info, f.shared_clean, clamp(c.shared_clean));
+  env->SetIntField(info, f.swapped_out, 0);
+  env->SetIntField(info, f.swapped_out_pss, 0);
+}
+
+// The Java heap's live bytes, in kB (Runtime totalMemory - freeMemory), or 0.
+jlong JavaHeapKb(JNIEnv* env) {
+  jclass runtime = env->FindClass("java/lang/Runtime");
+  if (runtime == nullptr) { env->ExceptionClear(); return 0; }
+  jmethodID get = env->GetStaticMethodID(runtime, "getRuntime", "()Ljava/lang/Runtime;");
+  jmethodID total = env->GetMethodID(runtime, "totalMemory", "()J");
+  jmethodID free = env->GetMethodID(runtime, "freeMemory", "()J");
+  jobject instance = get != nullptr ? env->CallStaticObjectMethod(runtime, get) : nullptr;
+  jlong bytes = 0;
+  if (instance != nullptr && total != nullptr && free != nullptr && !env->ExceptionCheck()) {
+    bytes = env->CallLongMethod(instance, total);
+    if (!env->ExceptionCheck()) bytes -= env->CallLongMethod(instance, free);
+  }
+  if (env->ExceptionCheck() || bytes < 0) { env->ExceptionClear(); bytes = 0; }
+  env->DeleteLocalRef(instance);
+  env->DeleteLocalRef(runtime);
+  return bytes / 1024;
+}
+
+}  // namespace
+
+static jboolean Debug_getMemoryInfoPid(JNIEnv* env, jclass, jint pid, jobject info) {
+  if (info == nullptr) {
+    jniThrowNullPointerException(env, "memoryInfo");
+    return JNI_FALSE;
+  }
+  HANDLE process = OpenForMemory(pid);
+  WorkingSetUsage usage;
+  bool read = ReadWorkingSet(process, &usage);
+  bool self = process == GetCurrentProcess();
+  CloseProcess(process);
+  if (!read) return JNI_FALSE;
+
+  jclass type = env->GetObjectClass(info);
+  CategoryFields dalvik_fields, native_fields, other_fields;
+  if (!CategoryFieldsFor(env, type, "dalvik", &dalvik_fields)
+      || !CategoryFieldsFor(env, type, "native", &native_fields)
+      || !CategoryFieldsFor(env, type, "other", &other_fields)) {
+    env->DeleteLocalRef(type);
+    return JNI_FALSE;  // NoSuchFieldError pending
+  }
+  jfieldID has_swap_pss = env->GetFieldID(type, "hasSwappedOutPss", "Z");
+  jfieldID other_stats = env->GetFieldID(type, "otherStats", "[I");
+  env->DeleteLocalRef(type);
+  if (has_swap_pss == nullptr || other_stats == nullptr) return JNI_FALSE;
+
+  // Anonymous heaps are private dirty memory: dalvik and native take their
+  // share of it, capped by what is resident; the rest of every measure is other.
+  Category dalvik, native, other;
+  jlong budget = usage.private_dirty;
+  if (self) {
+    jlong java = JavaHeapKb(env);
+    dalvik.pss = dalvik.rss = dalvik.private_dirty = java < budget ? java : budget;
+    budget -= dalvik.private_dirty;
+    jlong heap = NativeHeapSummary().allocated / 1024;
+    native.pss = native.rss = native.private_dirty = heap < budget ? heap : budget;
+  }
+  other.pss = usage.pss - dalvik.pss - native.pss;
+  other.rss = usage.rss - dalvik.rss - native.rss;
+  other.private_dirty = usage.private_dirty - dalvik.private_dirty - native.private_dirty;
+  other.swappable_pss = usage.swappable_pss;
+  other.shared_dirty = usage.shared_dirty;
+  other.private_clean = usage.private_clean;
+  other.shared_clean = usage.shared_clean;
+  SetCategory(env, info, dalvik_fields, dalvik);
+  SetCategory(env, info, native_fields, native);
+  SetCategory(env, info, other_fields, other);
+  env->SetBooleanField(info, has_swap_pss, JNI_FALSE);
+
+  jintArray stats = static_cast<jintArray>(env->GetObjectField(info, other_stats));
+  if (stats != nullptr) {
+    jsize length = env->GetArrayLength(stats);
+    std::vector<jint> zeros(static_cast<size_t>(length), 0);
+    env->SetIntArrayRegion(stats, 0, length, zeros.data());
+    env->DeleteLocalRef(stats);
+  }
+  return JNI_TRUE;
+}
+
+static void Debug_getMemoryInfo(JNIEnv* env, jclass clazz, jobject info) {
+  Debug_getMemoryInfoPid(env, clazz, static_cast<jint>(GetCurrentProcessId()), info);
+}
+
+// No memtrack HAL: the graphics entries are 0, as AOSP's memtrack slots are
+// when read_memtrack_memory finds nothing.
+static void ZeroMemtrack(JNIEnv* env, jlongArray out) {
+  if (out == nullptr) return;
+  jsize length = env->GetArrayLength(out);
+  if (length > 4) length = 4;
+  if (length <= 0) return;
+  jlong zeros[4] = {0, 0, 0, 0};
+  env->SetLongArrayRegion(out, 0, length, zeros);
+}
+
+static jlong Debug_getPssPid(JNIEnv* env, jclass, jint pid, jlongArray outUssSwapPssRss,
+                             jlongArray outMemtrack) {
+  HANDLE process = OpenForMemory(pid);
+  WorkingSetUsage usage;
+  bool read = ReadWorkingSet(process, &usage);
+  CloseProcess(process);
+  if (!read) return 0;
+  if (outUssSwapPssRss != nullptr) {
+    jsize length = env->GetArrayLength(outUssSwapPssRss);
+    if (length > 3) length = 3;
+    jlong values[3] = {usage.uss, 0, usage.rss};
+    if (length > 0) env->SetLongArrayRegion(outUssSwapPssRss, 0, length, values);
+  }
+  ZeroMemtrack(env, outMemtrack);
+  return usage.pss;
+}
+
+static jlong Debug_getPss(JNIEnv* env, jclass clazz) {
+  return Debug_getPssPid(env, clazz, static_cast<jint>(GetCurrentProcessId()), nullptr, nullptr);
+}
+
+static jlong Debug_getRssPid(JNIEnv* env, jclass, jint pid, jlongArray outMemtrack) {
+  struct Counters {  // psapi.h's PROCESS_MEMORY_COUNTERS
+    DWORD cb;
+    DWORD page_fault_count;
+    SIZE_T peak_working_set, working_set, quota_peak_paged, quota_paged,
+        quota_peak_nonpaged, quota_nonpaged, pagefile, peak_pagefile;
+  };
+  static const GetProcessMemoryInfoFn info =
+      Kernel32<GetProcessMemoryInfoFn>("K32GetProcessMemoryInfo");
+  HANDLE process = OpenForMemory(pid);
+  Counters counters = {};
+  counters.cb = sizeof(counters);
+  bool read = info != nullptr && process != nullptr && info(process, &counters, sizeof(counters));
+  CloseProcess(process);
+  if (!read) return 0;
+  ZeroMemtrack(env, outMemtrack);
+  return static_cast<jlong>(counters.working_set / 1024);
+}
+
+static jlong Debug_getRss(JNIEnv* env, jclass clazz) {
+  return Debug_getRssPid(env, clazz, static_cast<jint>(GetCurrentProcessId()), nullptr);
+}
+
+// Debug.MEMINFO_* (AOSP's enum in android_os_Debug.cpp).
+enum {
+  kMemTotal, kMemFree, kMemBuffers, kMemCached, kMemShmem, kMemSlab, kMemSlabReclaimable,
+  kMemSlabUnreclaimable, kMemSwapTotal, kMemSwapFree, kMemZramTotal, kMemMapped,
+  kMemVmallocUsed, kMemPageTables, kMemKernelStack, kMemKernelReclaimable, kMemActive,
+  kMemInactive, kMemUnevictable, kMemAvailable, kMemActiveAnon, kMemInactiveAnon,
+  kMemActiveFile, kMemInactiveFile, kMemCmaTotal, kMemCmaFree, kMemSwapCached, kMemCount
+};
+
+// /proc/meminfo's counterparts from GetPerformanceInfo: physical memory, the
+// file cache, the kernel pools (as slab) and the pagefile's share of the commit
+// limit (as swap). Fields with no Windows counterpart are 0.
+static void Debug_getMemInfo(JNIEnv* env, jclass, jlongArray out) {
+  if (out == nullptr) {
+    jniThrowNullPointerException(env, "out == null");
+    return;
+  }
+  if (env->GetArrayLength(out) < kMemCount) {
+    jniThrowRuntimeException(env, "outLen < MEMINFO_COUNT");
+    return;
+  }
+  struct Performance {  // psapi.h's PERFORMANCE_INFORMATION
+    DWORD cb;
+    SIZE_T commit_total, commit_limit, commit_peak, physical_total, physical_available,
+        system_cache, kernel_total, kernel_paged, kernel_nonpaged, page_size;
+    DWORD handles, processes, threads;
+  };
+  static const GetPerformanceInfoFn performance =
+      Kernel32<GetPerformanceInfoFn>("K32GetPerformanceInfo");
+  Performance p = {};
+  p.cb = sizeof(p);
+  if (performance == nullptr || !performance(&p, sizeof(p))) {
+    jniThrowRuntimeException(env, "SysMemInfo read failed");
+    return;
+  }
+  auto kb = [&](SIZE_T pages) { return static_cast<jlong>(pages) * static_cast<jlong>(p.page_size) / 1024; };
+  jlong values[kMemCount] = {};
+  values[kMemTotal] = kb(p.physical_total);
+  values[kMemAvailable] = kb(p.physical_available);
+  values[kMemCached] = kb(p.system_cache);
+  values[kMemFree] = p.physical_available > p.system_cache
+                         ? kb(p.physical_available - p.system_cache) : 0;
+  values[kMemSlab] = kb(p.kernel_total);
+  values[kMemSlabReclaimable] = kb(p.kernel_paged);
+  values[kMemSlabUnreclaimable] = kb(p.kernel_nonpaged);
+  values[kMemKernelReclaimable] = kb(p.kernel_paged);
+  if (p.commit_limit > p.physical_total) {
+    values[kMemSwapTotal] = kb(p.commit_limit - p.physical_total);
+    jlong free_commit = p.commit_limit > p.commit_total ? kb(p.commit_limit - p.commit_total) : 0;
+    values[kMemSwapFree] = free_commit < values[kMemSwapTotal] ? free_commit : values[kMemSwapTotal];
+  }
+  env->SetLongArrayRegion(out, 0, kMemCount, values);
+}
+
 static const JNINativeMethod gDebugMethods[] = {
+    {"getMemoryInfo", "(Landroid/os/Debug$MemoryInfo;)V", GESHER_JNI(Debug_getMemoryInfo)},
+    {"getMemoryInfo", "(ILandroid/os/Debug$MemoryInfo;)Z", GESHER_JNI(Debug_getMemoryInfoPid)},
+    {"getPss", "()J", GESHER_JNI(Debug_getPss)},
+    {"getPss", "(I[J[J)J", GESHER_JNI(Debug_getPssPid)},
+    {"getRss", "()J", GESHER_JNI(Debug_getRss)},
+    {"getRss", "(I[J)J", GESHER_JNI(Debug_getRssPid)},
+    {"getMemInfo", "([J)V", GESHER_JNI(Debug_getMemInfo)},
     {"getNativeHeapSize", "()J", GESHER_JNI(Debug_getNativeHeapSize)},
     {"getNativeHeapAllocatedSize", "()J", GESHER_JNI(Debug_getNativeHeapAllocatedSize)},
     {"getNativeHeapFreeSize", "()J", GESHER_JNI(Debug_getNativeHeapFreeSize)},
