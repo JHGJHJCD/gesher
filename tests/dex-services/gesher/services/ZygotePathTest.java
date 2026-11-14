@@ -28,6 +28,7 @@ public final class ZygotePathTest {
             throw new AssertionError("Expected a Windows runtime executable path, got " + exe);
         }
         String drive = exe.substring(0, 2);
+        String other = Character.toUpperCase(exe.charAt(0)) == 'C' ? "D:" : "C:";
         equal("C:\\Users\\runneradmin\\AppData\\Local\\Temp\\gms-fixture\\קיצור בדיקה.lnk",
                 Zygote.windowsPath("/mnt/c/Users/runneradmin/AppData/Local/Temp/gms-fixture/קיצור בדיקה.lnk"),
                 "Other-drive Unicode ShellLink destination");
@@ -41,10 +42,14 @@ public final class ZygotePathTest {
         equal("\\\\server\\share\\a\uF03Ab\uF03F", Zygote.windowsPath("/mnt/unc/server/share/a:b?"),
                 "UNC root kept, names under it encoded");
         for (String reserved : new String[]{"/data/frc_1:4:android:x.xml", "/data/a?b*c<d>e|f\"g",
-                "/mnt/c/a:b", "/mnt/unc/server/share/a:b"}) {
+                "/mnt/" + Character.toLowerCase(other.charAt(0)) + "/a:b",
+                "/mnt/unc/server/share/a:b"}) {
             equal(reserved, Zygote.fromWindowsPath(Zygote.windowsPath(reserved)),
                     "Reserved characters round trip " + reserved);
         }
+        equal("/a:b", Zygote.fromWindowsPath(Zygote.windowsPath(
+                "/mnt/" + Character.toLowerCase(drive.charAt(0)) + "/a:b")),
+                "Runtime mounted drive canonicalizes while reserved characters round trip");
         String privateUse = "a" + (char) 0xF061 + "b" + (char) 0xF000;
         equal("/" + privateUse, Zygote.fromWindowsPath(drive + "\\" + privateUse),
                 "Only encoded reserved characters decode");
@@ -67,7 +72,6 @@ public final class ZygotePathTest {
             equal(drive + path.replace(':', '\uF03A').replace('/', '\\'), Zygote.windowsPath(path),
                     "Ordinary mount-like path " + path);
         }
-        String other = Character.toUpperCase(exe.charAt(0)) == 'C' ? "D:" : "C:";
         String suffix = "\\Users\\test user\\קיצור 😀.lnk";
         String guest = Zygote.fromWindowsPath(other + suffix);
         equal("/mnt/" + Character.toLowerCase(other.charAt(0)) + suffix.replace('\\', '/'),
