@@ -5,6 +5,7 @@
 
 #include <sys/mman.h>
 
+#include <errno.h>
 #include <io.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -27,6 +28,8 @@ void Check(const char* what, bool ok) {
 }
 
 constexpr size_t kPage = 4096;
+
+#include "../../tests/mman/noreplace_holes.inc"
 
 // A temporary file of `size` bytes, byte i = (i / kPage) + 1 ... as an fd.
 int TempFile(size_t size, wchar_t* path_out) {
@@ -135,6 +138,7 @@ int main() {
   wchar_t path[MAX_PATH];
   const int fd = TempFile(10 * kPage + 100, path);  // 10 whole pages and a partial one
   Check("a test file", fd >= 0);
+  if (fd >= 0) NoreplaceHoleContracts(fd);
 
   // 1. Anonymous memory: unmap a middle page, map it again with MAP_FIXED.
   uint8_t* a = static_cast<uint8_t*>(mmap(nullptr, 8 * kPage, PROT_READ | PROT_WRITE,

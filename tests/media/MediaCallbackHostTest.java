@@ -90,33 +90,59 @@ public final class MediaCallbackHostTest {
         try { probe(closeFailure, 2); throw new AssertionError("pending error lost"); }
         catch (IOException expected) { check("original failure".equals(expected.getMessage()), "close preserves pending exception"); }
         check(closeFailure.closes == 1, "throwing close invoked once");
+        Source ordinaryCloseFailure = new Source(1); ordinaryCloseFailure.failClose = true;
+        requires(IOException.class, () -> probe(ordinaryCloseFailure, 0), "ordinary close exception propagates");
+        check(ordinaryCloseFailure.closes == 1, "ordinary throwing close invokes callback once");
         requires(IllegalArgumentException.class, () -> read(null, 0, 1), "null source rejected");
     }
     private static void retriever() throws Exception {
         MediaCallbackHostTest r = new MediaCallbackHostTest(); r.setup(false);
         Source art = new Source(2), plain = new Source(1), bad = new Source(0), next = new Source(3);
+        Source badArt = new Source(0); badArt.failClose = true;
         try {
             r.source(false, art);
             check(Arrays.equals(r.artwork(-1), new byte[] {11, 22, 33}), "art belongs to first source");
             check("2".equals(r.metadata(7)), "first metadata is readable");
+            requires(RuntimeException.class, () -> r.source(false, badArt), "setup failure takes precedence over candidate close failure");
+            check(Arrays.equals(r.artwork(-1), new byte[] {11, 22, 33}) && "2".equals(r.metadata(7)),
+                    "failed replacement preserves the complete previous art and metadata snapshot");
+            check(art.closes == 0 && badArt.closes == 1, "failed art replacement retains accepted callback ownership");
             r.source(false, plain);
             check(r.artwork(-1) == null && "1".equals(r.metadata(7)), "replacement clears absent art and replaces metadata");
             check(art.closes == 1, "replacement closes original source");
             requires(RuntimeException.class, () -> r.source(false, bad), "unreadable callback is rejected");
-            check(r.artwork(-1) == null && r.metadata(7) == null, "failed replacement clears coherent snapshot");
-            check(plain.closes == 1 && bad.closes == 1, "failed replacement closes both unused sources");
+            check(r.artwork(-1) == null && "1".equals(r.metadata(7)), "failed replacement preserves coherent snapshot");
+            check(plain.closes == 0 && bad.closes == 1, "failed replacement closes only rejected source");
             next.size = Long.MAX_VALUE; r.source(false, next);
             check("3".equals(r.metadata(7)) && r.metadata(20) == null, "retry succeeds; overflowing derived bitrate is absent");
+            check(plain.closes == 1, "successful retry retires the previously retained source");
         } finally { r.release(false); r.release(false); }
         check(next.closes == 1, "retriever releases source once");
         requires(IllegalStateException.class, () -> r.metadata(7), "released retriever rejects metadata");
         requires(IllegalStateException.class, () -> r.artwork(-1), "released retriever rejects artwork");
+        Source large = new Source(1); large.size = 2_000_000_000_000L;
+        MediaCallbackHostTest huge = new MediaCallbackHostTest(); huge.setup(false);
+        try {
+            huge.source(false, large);
+            check("16000000000000".equals(huge.metadata(20)), "large callback source retains representable average bitrate");
+        } finally { huge.release(false); }
+        Source throwingClose = new Source(1); throwingClose.failClose = true;
+        MediaCallbackHostTest closing = new MediaCallbackHostTest(); closing.setup(false);
+        closing.source(false, throwingClose);
+        requires(IOException.class, () -> closing.release(false), "retriever release exposes callback IOException");
+        closing.release(false);
+        check(throwingClose.closes == 1, "throwing release still detaches receiver and closes once");
     }
     private static void extractor() throws Exception {
         MediaCallbackHostTest e = new MediaCallbackHostTest(); e.setup(true);
         Source bad = new Source(0), good = new Source(1), second = new Source(2);
+        bad.failClose = true;
         try {
-            requires(IOException.class, () -> e.source(true, bad), "first invalid extractor source rejected");
+            try { e.source(true, bad); throw new AssertionError("first invalid extractor source rejected"); }
+            catch (IOException expected) {
+                check("Failed to instantiate extractor.".equals(expected.getMessage()),
+                        "failed source close cannot replace extractor setup error");
+            }
             check(bad.closes == 1, "failed extractor source closes");
             e.source(true, good); check(e.tracks() == 1, "retry extractor succeeds");
             requires(IOException.class, () -> e.source(true, second), "second extractor source rejected");

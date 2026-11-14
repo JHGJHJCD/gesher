@@ -101,17 +101,18 @@ bool Fill(RetrieverSnapshot* r, std::shared_ptr<DataSource> source, std::string*
     int32_t bitrate;
     if (file.GetInt32("bitrate", &bitrate)) {
       r->metadata[20] = std::to_string(bitrate);
-    } else if (size > 0 && duration > 0 &&
-               size <= std::numeric_limits<int64_t>::max() / 8000000) {
-      r->metadata[20] = std::to_string(size * 8000000 / duration);
+    } else if (size > 0 && duration > 0) {
+      // Stagefright uses a floating-point average. Avoid an overflowing
+      // integer numerator while retaining large sources with a valid result.
+      const double average = static_cast<double>(size) * 8E6 / static_cast<double>(duration);
+      if (average < 0x1p63) r->metadata[20] = std::to_string(static_cast<int64_t>(average));
     }
   }
   return true;
 }
 
 void SetFromSource(JNIEnv* env, jobject thiz, std::unique_ptr<DataSource> source,
-                   const std::string& error,
-                   const char* exception = "java/lang/IllegalArgumentException") {
+                   const std::string& error) {
   auto r = GetRetriever(env, thiz);
   if (r == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
@@ -126,14 +127,18 @@ void SetFromSource(JNIEnv* env, jobject thiz, std::unique_ptr<DataSource> source
   r->opening = true;
   const bool opened = source != nullptr && Fill(&next, std::move(source), &e);
   r->opening = false;
-  // Source, metadata and artwork always belong to the same successful open.
-  // A failed replacement clears the whole previous source, as Stagefright does.
-  RetrieverSnapshot retired = std::move(r->snapshot);
-  r->snapshot = opened ? std::move(next) : RetrieverSnapshot{};
   if (!opened) {
+    // MetadataRetrieverClient creates a fresh Stagefright retriever and only
+    // publishes it on success. The public receiver retains its old snapshot
+    // when opening a replacement fails, including its callback ownership.
     MEDIA_LOGE("MediaMetadataRetriever: %s", e.c_str());
-    jniThrow(env, exception, "setDataSource failed");
+    jniThrow(env, "java/lang/RuntimeException", "setDataSource failed");
+    return;
   }
+  // Retire the prior source only after all new metadata/artwork is published,
+  // while the receiver lease still rejects nested operations from close().
+  RetrieverSnapshot retired = std::move(r->snapshot);
+  r->snapshot = std::move(next);
 }
 
 void JNICALL MMR_setDataSourcePath(JNIEnv* env, jobject thiz, jobject, jstring uri, jobjectArray keys,
@@ -163,12 +168,20 @@ void JNICALL MMR_setDataSourcePath(JNIEnv* env, jobject thiz, jobject, jstring u
 
 void JNICALL MMR_setDataSourceFD(JNIEnv* env, jobject thiz, jobject fileDescriptor, jlong offset,
                                  jlong length) {
-  if (fileDescriptor == nullptr) {
+  if (GetRetriever(env, thiz) == nullptr) {
+    jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
+    return;
+  }
+  if (fileDescriptor == nullptr || offset < 0 || length < 0) {
     jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
     return;
   }
   jclass fdc = env->FindClass("java/io/FileDescriptor");
   jint fd = env->GetIntField(fileDescriptor, env->GetFieldID(fdc, "descriptor", "I"));
+  if (fd < 0) {
+    jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
+    return;
+  }
   std::string error;
   auto source = OpenFdSource(fd, offset, length >= 0x7fffffffffffffLL ? -1 : length, &error);
   SetFromSource(env, thiz, std::move(source), error);
@@ -181,7 +194,7 @@ void JNICALL MMR_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject data_s
   }
   auto source = JavaDataSource::Create(env, data_source);
   if (source == nullptr) return;
-  SetFromSource(env, thiz, std::move(source), "MediaDataSource", "java/lang/RuntimeException");
+  SetFromSource(env, thiz, std::move(source), "MediaDataSource");
 }
 
 jstring JNICALL MMR_extractMetadata(JNIEnv* env, jobject thiz, jint key) {

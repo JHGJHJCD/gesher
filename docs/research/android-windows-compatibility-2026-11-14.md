@@ -132,7 +132,7 @@ strict warnings for x64 and ARM64 Windows. These are not Windows execution.
 Independent service QA reproduced task25 and media-routing21 host passes and
 the old task-source failure, inspected pinned framework semantics, reviewed
 identity/death/callback locking, and verified public and remote test wiring.
-Independent media QA reproduced 24 effect, 57 callback, 103 AAudio and all 266
+Independent media QA reproduced 24 effect, 66 callback, 103 AAudio and all 266
 existing media contract checks. Local LeakSanitizer detection alone is disabled
 where ptrace prevents thread inspection; ASan/UBSan remain enabled.
 

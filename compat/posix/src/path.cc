@@ -23,6 +23,7 @@
 #include <shellapi.h>
 #include <gesher/font_paths.h>
 #include <gesher/font_environment.h>
+#include <gesher/reserved_names.h>
 #include <gesher/unc_paths.h>
 
 #include <string>
@@ -42,7 +43,7 @@ bool IsDriveLetter(char c) { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 
 
 // Linux's absolute paths start with '/'; Windows' with a drive or '\'.
 bool IsAbsolute(const char* path) {
-  return path[0] == '/' || path[0] == '\\' || (IsDriveLetter(path[0]) && path[1] == ':');
+  return path[0] == '/' || path[0] == '\\' || reserved_names::DriveRoot(path);
 }
 
 // The parts of an absolute path, without empty and "." components.
@@ -332,13 +333,15 @@ static int SystemFontPath(const char* path, std::wstring* windows) {
   if (unc == unc_paths::Match::kInvalid) return -1;
   if (unc == unc_paths::Match::kUnrelated && !DrivePath(target.c_str(), windows))
     *windows = Widen(target.c_str());
+  reserved_names::Encode(windows);
   Lengthen(windows);
   return 1;
 }
 
 PathKind MapPath(const char* path, std::wstring* windows) {
   // "//name" is left to Windows as a UNC path; POSIX lets an implementation
-  // give a leading "//" its own meaning.
+  // give a leading "//" its own meaning. A name with a character Windows
+  // reserves (':' and the like) is stored encoded (gesher/reserved_names.h).
   if (path[0] == '/' && path[1] != '/') {
     auto unc = unc_paths::ToWindows(Widen(path), windows);
     if (unc == unc_paths::Match::kInvalid) {
@@ -346,6 +349,7 @@ PathKind MapPath(const char* path, std::wstring* windows) {
       return PathKind::kMissing;
     }
     if (unc == unc_paths::Match::kMapped) {
+      reserved_names::Encode(windows);
       Lengthen(windows);
       return PathKind::kFile;
     }
@@ -354,11 +358,13 @@ PathKind MapPath(const char* path, std::wstring* windows) {
     int font = SystemFontPath(path, windows);
     if (font != 0) return font > 0 ? PathKind::kFile : PathKind::kMissing;
     if (DrivePath(path, windows)) {
+      reserved_names::Encode(windows);
       Lengthen(windows);
       return PathKind::kFile;
     }
   }
   *windows = Widen(path);
+  reserved_names::Encode(windows);
   Lengthen(windows);
   return PathKind::kFile;
 }
@@ -402,9 +408,11 @@ int CurrentDrive() {
 }
 
 std::string LinuxPath(const wchar_t* windows) {
-  std::wstring unc;
-  if (unc_paths::FromWindows(windows, &unc)) return Narrow(unc.c_str());
+  // Decode only names under the native root, before UNC namespace conversion.
   std::wstring path = windows;
+  reserved_names::DecodePath(&path);
+  std::wstring unc;
+  if (unc_paths::FromWindows(path, &unc)) return Narrow(unc.c_str());
   if (path.rfind(L"\\\\?\\UNC\\", 0) == 0) {
     path = L"\\\\" + path.substr(8);
   } else if (path.rfind(L"\\\\?\\", 0) == 0) {

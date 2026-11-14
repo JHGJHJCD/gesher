@@ -58,6 +58,9 @@ native EOF, checks callback return counts and offset arithmetic, and latches
 callback errors. Size (including unknown size) is cached as in AOSP. The native
 owner closes the accepted callback once when its last source owner disappears.
 An exception from `close()` cannot replace a pending entrypoint exception.
+An ordinary `close()` exception remains pending and propagates from public
+retriever release, as its Java contract requires. Failed setup consumes cleanup
+exceptions before publishing the appropriate setup error.
 
 Retriever and Extractor Java context fields now own intrusive references. Each
 entrypoint retains a reference under the class context lock before acquiring the
@@ -71,12 +74,14 @@ uses `new (std::nothrow)` and reports OutOfMemoryError. This does not claim that
 all pre-existing STL allocations in media codecs have recoverable OOM handling.
 
 Retriever builds a fresh source/metadata/artwork snapshot. Successful replacement
-cannot carry artwork from a previous source. A failed replacement clears the
-whole old snapshot, following Stagefright's `clearMetadata()`/source reset
-contract. The previous snapshot is retired into a local before the new snapshot
+cannot carry artwork from a previous source. Failed replacement preserves the
+accepted snapshot and its source: `MetadataRetrieverClient` constructs a fresh
+Stagefright candidate and publishes it only after successful setup. Stagefright's
+internal clearing does not discard the previously published client retriever.
+The previous snapshot is retired into a local before the new snapshot
 is installed; its Java close runs only after complete publication under the
-admission guard. Inferred bitrate is omitted when its integer numerator cannot be
-represented. Extractor retains its one-successful-source contract, permits retry
+admission guard. Inferred bitrate uses Stagefright's floating-point average,
+omitting only an out-of-range final result. Extractor retains its one-successful-source contract, permits retry
 after an initial failure, and closes a rejected callback candidate while keeping
 the original selected source.
 
@@ -85,11 +90,13 @@ Pinned references:
 - [MediaDataSource native callback adapter](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r4/media/jni/android_media_MediaDataSource.cpp)
 - [MediaExtractor callback overload and error cleanup](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r4/media/jni/android_media_MediaExtractor.cpp)
 - [Retriever callback overload and retained receivers](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r4/media/jni/android_media_MediaMetadataRetriever.cpp)
+- [Retriever client success-only publication](https://android.googlesource.com/platform/frameworks/av/+/android-16.0.0_r4/media/libmediaplayerservice/MetadataRetrieverClient.cpp)
+- [Public release and close exception contract](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r4/media/java/android/media/MediaMetadataRetriever.java)
 - [Stagefright metadata replacement and clearMetadata](https://android.googlesource.com/platform/frameworks/av/+/android-16.0.0_r4/media/libmediaplayerservice/StagefrightMetadataRetriever.cpp)
 
 ### Callback validation and integration
 
-`JAVA_HOME=<jdk> python3 tools/test_media_callback_contracts.py` runs 57 checks
+`JAVA_HOME=<jdk> python3 tools/test_media_callback_contracts.py` runs 66 checks
 against the production callback header, receiver lease header and verbatim JNI
 entrypoints using a real JVM with `-Xcheck:jni`, undefined-behavior sanitization,
 and C++ exceptions disabled. The parser boundary is a deterministic observer;
@@ -97,8 +104,9 @@ it supplies a source with artwork, a source without artwork and an unreadable
 source. It is not an AOSP parser emulation or a Windows runtime qualification.
 Tests include partial reads through multiple chunks, EOF, size caching, negative
 and overflowing offsets, invalid callback counts, IOException handling, a
-throwing close while an exception is pending, concurrent readers, snapshot
-replacement, failed setup/retry, and release while a callback is blocked on an
+throwing close with and without an earlier exception, concurrent readers, snapshot
+replacement, retention after failed setup, retry, representable large-source
+bitrate, and release while a callback is blocked on an
 explicit barrier. Both receivers keep the source alive until the operation ends.
 
 The unchanged assertions fail under `--negative-control stale-art` (reuse the
@@ -111,6 +119,13 @@ and close-time metadata access while allowing close-time release.
 
 Negative controls operate in disposable generated
 files and do not edit production source.
+
+Independent PR review corrected the failed-replacement expectation after checking
+the enclosing `MetadataRetrieverClient` publication logic. Restoring the original
+PR retriever source fails the prior-artwork retention assertion; restoring its
+callback header fails ordinary-close/release exception assertions; restoring its
+extractor cleanup produces checked-JNI pending-exception failures. These controls
+use the corrected assertions unchanged, in disposable source copies.
 
 The existing `tools/test_media_api_contracts.py --sanitize` setup assertions are
 preserved. Only its source-section boundary and setup-only ownership seam were

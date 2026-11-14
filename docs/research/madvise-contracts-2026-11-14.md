@@ -87,6 +87,35 @@ production objects compile with the pinned llvm-mingw toolchain; local Linux
 and compilation results do not establish Windows runtime correctness. The PR's
 Windows CI results supply that final evidence.
 
+## Follow-up: ART fallback and unmapped placeholders
+
+The initial full CI run failed while building the boot image: ART moved a
+private mapping's used prefix and could not recreate its old address with
+`MAP_FIXED_NOREPLACE`. The truthful rejection of unsupported shared-anonymous
+`mremap` makes ART's shared-memory capability probe select this fallback.
+Partial `munmap` retains a Windows placeholder while neighboring pages remain
+live; the previous allocator incorrectly treated that logical hole as an
+occupied Linux mapping.
+
+Grouped anonymous and file mappings now admit `NOREPLACE` only when the complete
+requested range consists of logical holes. Live `PROT_NONE` mappings and mixed
+hole/live ranges still fail with `EEXIST` before mutation, including when
+`MAP_FIXED` is also supplied. Plain replacement paths preserve that flag
+precedence, and a fixed file request cannot silently relocate. Unsupported
+shared/file remapping remains unsupported.
+
+The exact production allocation helpers pass 57 ASan/UBSan host checks; the
+old helpers fail 22 unchanged assertions. A shared public-API fixture exercises
+ART's partial move/recreation, adjacent holes, repeated reuse, live collisions,
+file contents and copy-on-write. Its Linux reference passes 68 assertions.
+The complete Windows probe and production source cross-compile for x64 and
+ARM64. CI runs the current native probe under a 90-second bound before
+`dex2oat`, as well as retaining the existing Windows suites. Native Windows
+runtime acceptance is required on the corrected published tree.
+
+The causal path is in pinned Android 16
+[`HaveMremapDontunmap` and `KernelPrepareRangeForUffd`](https://android.googlesource.com/platform/art/+/android-16.0.0_r4/runtime/gc/collector/mark_compact.cc).
+
 ## Primary contracts
 
 - [Android 16 kernel memory advice](https://android.googlesource.com/kernel/common/+/refs/heads/android16-6.12-2025-05-exp/mm/madvise.c)

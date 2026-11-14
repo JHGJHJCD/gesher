@@ -58,7 +58,10 @@ class JavaDataSource final : public DataSource {
     if (pending != nullptr) env->ExceptionClear();
     if (source_ != nullptr) {
       env->CallVoidMethod(source_, close_);
-      CheckException(env, "MediaDataSource.close");
+      // Ordinary release exposes close's IOException through the public JNI
+      // entrypoint. Cleanup must only discard it when preserving an earlier
+      // failure; MediaMetadataRetriever.release/close document this contract.
+      if (pending != nullptr) CheckException(env, "MediaDataSource.close");
       env->DeleteGlobalRef(source_);
     }
     if (buffer_ != nullptr) env->DeleteGlobalRef(buffer_);

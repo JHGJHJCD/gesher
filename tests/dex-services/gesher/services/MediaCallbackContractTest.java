@@ -46,7 +46,7 @@ public final class MediaCallbackContractTest {
     private static final class Source extends MediaDataSource {
         final byte[] bytes;
         volatile int reads, closes;
-        boolean unknown, failRead, oversize;
+        boolean unknown, failRead, failClose, oversize;
         CountDownLatch entered, resume;
         ReadAction onRead, onClose;
         Source(byte[] bytes) { this.bytes = bytes; }
@@ -68,7 +68,11 @@ public final class MediaCallbackContractTest {
             return count;
         }
         @Override public long getSize() { return unknown ? -1 : bytes.length; }
-        @Override public void close() throws IOException { closes++; if (onClose != null) onClose.run(); }
+        @Override public void close() throws IOException {
+            closes++;
+            if (onClose != null) onClose.run();
+            if (failClose) throw new IOException("fixture close failure");
+        }
     }
     private static byte[] samples(MediaExtractor extractor) throws IOException {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
@@ -104,6 +108,7 @@ public final class MediaCallbackContractTest {
     private static void retriever() throws Exception {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         Source first = new Source(wav()), second = new Source(wav()), bad = new Source(new byte[128]);
+        bad.failClose = true;
         try {
             retriever.setDataSource(first);
             check("1000".equals(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)), "callback duration");
@@ -112,17 +117,33 @@ public final class MediaCallbackContractTest {
             second.unknown = true; retriever.setDataSource(second);
             check(first.closes == 1, "replacement releases original callback");
             requires(RuntimeException.class, () -> retriever.setDataSource(bad), "invalid callback container rejected");
-            check(second.closes == 1 && bad.closes == 1, "failed replacement releases sources");
-            check(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION) == null,
-                    "failed replacement clears old metadata");
-            check(retriever.getEmbeddedPicture() == null, "failed replacement clears old artwork");
+            check(second.closes == 0 && bad.closes == 1, "failed replacement retains accepted source");
+            check("1000".equals(retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)),
+                    "failed replacement retains old metadata");
+            check(retriever.getEmbeddedPicture() == null, "failed replacement retains coherent artwork");
+            requires(IllegalArgumentException.class,
+                    () -> retriever.setDataSource(new java.io.FileDescriptor(), -1, 1),
+                    "negative descriptor offset rejected before opening");
+            requires(IllegalArgumentException.class,
+                    () -> retriever.setDataSource(new java.io.FileDescriptor(), 0, -1),
+                    "negative descriptor length rejected before opening");
+            requires(IllegalArgumentException.class,
+                    () -> retriever.setDataSource(new java.io.FileDescriptor(), 0, 1),
+                    "invalid descriptor rejected before opening");
         } finally { retriever.release(); retriever.release(); }
+        check(second.closes == 1, "retained source closes on receiver release");
         requires(IllegalStateException.class, () -> retriever.extractMetadata(9), "released retriever rejects access");
         MediaMetadataRetriever reentrant = new MediaMetadataRetriever();
         Source source = new Source(wav()); source.onRead = reentrant::release;
         reentrant.setDataSource(source);
         check(source.closes == 1, "callback can release its receiver without invalidating active parser");
         reentrant.release();
+        MediaMetadataRetriever throwing = new MediaMetadataRetriever();
+        Source closing = new Source(wav()); closing.failClose = true;
+        throwing.setDataSource(closing);
+        requires(IOException.class, throwing::release, "release propagates callback close IOException");
+        throwing.release();
+        check(closing.closes == 1, "throwing callback close still releases ownership once");
     }
     private static void reentrantOperations() throws Exception {
         for (int which = 0; which < 4; which++) {

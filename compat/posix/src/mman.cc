@@ -424,6 +424,22 @@ bool RangeIsOurs(State& s, uintptr_t begin, uintptr_t end) {
   return it != s.regions.end() && it->first < end;
 }
 
+// A placeholder retained after munmap is address-space bookkeeping, not a
+// live Linux mapping. MAP_FIXED_NOREPLACE may reuse an entirely unmapped range
+// inside a group, but must reject the complete request before touching even
+// one page when any part is still mapped (including PROT_NONE reservations).
+bool RangeIsHole(State& s, uintptr_t begin, uintptr_t end) {
+  auto it = FindRegion(s, begin);
+  for (uintptr_t at = begin; at < end; ++it) {
+    if (it == s.regions.end() || it->first > at || it->second.group == 0 ||
+        it->second.kind != Kind::kHole) {
+      return false;
+    }
+    at = it->first + it->second.size;
+  }
+  return true;
+}
+
 // Maps a view of `mapping` into the hole exactly at [start, start + size).
 bool MapViewInto(HANDLE mapping, uintptr_t start, size_t size, uint64_t offset, ULONG protection) {
   return Placeholders().map3(mapping, GetCurrentProcess(), reinterpret_cast<void*>(start), offset,
@@ -602,7 +618,11 @@ void* GroupAnonymous(State& s, void* start, size_t len, int prot, int flags) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(start);
   const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
   std::map<uintptr_t, Region>::iterator hole;
-  if ((flags & MAP_FIXED) != 0 && CoveringGroup(s, addr, addr + len) != 0) {
+  if (fixed && CoveringGroup(s, addr, addr + len) != 0) {
+    if ((flags & MAP_FIXED_NOREPLACE) != 0 && !RangeIsHole(s, addr, addr + len)) {
+      errno = EEXIST;
+      return MAP_FAILED;
+    }
     hole = Punch(s, addr, addr + len);
   } else {
     if (fixed && RangeIsOurs(s, addr, addr + len)) {
@@ -725,7 +745,12 @@ void* GroupFile(State& s, void* start, size_t len, int prot, int flags, int fd, 
   const uintptr_t addr = reinterpret_cast<uintptr_t>(start);
   const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
   std::map<uintptr_t, Region>::iterator hole;
-  if ((flags & MAP_FIXED) != 0 && CoveringGroup(s, addr, addr + len) != 0) {
+  if (fixed && CoveringGroup(s, addr, addr + len) != 0) {
+    if ((flags & MAP_FIXED_NOREPLACE) != 0 && !RangeIsHole(s, addr, addr + len)) {
+      if (mapping != nullptr) CloseHandle(mapping);
+      errno = EEXIST;
+      return MAP_FAILED;
+    }
     hole = Punch(s, addr, addr + len);
   } else {
     uintptr_t at = 0;
@@ -837,7 +862,7 @@ void* MapAnonymous(State& s, void* start, size_t len, int prot, int flags) {
 
   // MAP_FIXED inside one of our anonymous regions: replace those pages with
   // fresh zero pages, as mmap does.
-  if ((flags & MAP_FIXED) != 0) {
+  if ((flags & MAP_FIXED) != 0 && (flags & MAP_FIXED_NOREPLACE) == 0) {
     auto it = FindRegion(s, addr);
     if (it != s.regions.end() && it->second.kind == Kind::kAnon &&
         addr + len <= it->first + it->second.size) {
@@ -915,6 +940,7 @@ void* CopyFileInto(State& s, void* start, size_t len, int prot, int fd, off_t of
 
 void* MapFile(State& s, void* start, size_t len, int prot, int flags, int fd, off_t offset) {
   const uintptr_t addr = reinterpret_cast<uintptr_t>(start);
+  const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
   // The public entry point has already validated page-aligned file offsets.
   if (Placeholders().available() && static_cast<uint64_t>(offset) % s.page_size == 0) {
     auto it = FindRegion(s, addr);
@@ -922,13 +948,14 @@ void* MapFile(State& s, void* start, size_t len, int prot, int flags, int fd, of
       void* result = GroupFile(s, start, len, prot, flags, fd, offset);
       if (result != MAP_FAILED || errno != 0) return result;
       // A shared mapping that ends in a partial page: a plain view.
-      if ((flags & MAP_FIXED) != 0) {
+      if (fixed) {
         errno = EINVAL;
         return MAP_FAILED;
       }
     }
   }
-  if ((flags & MAP_FIXED) != 0 && (flags & MAP_SHARED) == 0) {
+  if ((flags & MAP_FIXED) != 0 && (flags & MAP_FIXED_NOREPLACE) == 0 &&
+      (flags & MAP_SHARED) == 0) {
     auto it = FindRegion(s, addr);
     if (it != s.regions.end() && it->second.kind == Kind::kAnon && it->second.group == 0 &&
         addr + len <= it->first + it->second.size) {
@@ -987,12 +1014,12 @@ void* MapFile(State& s, void* start, size_t len, int prot, int flags, int fd, of
   DWORD low = static_cast<DWORD>(file_offset & 0xffffffffu);
   void* want = start == nullptr ? nullptr : static_cast<uint8_t*>(start) - padding;
   void* view = MapViewOfFileEx(mapping, view_access, high, low, view_length, want);
-  if (view == nullptr && want != nullptr && (flags & MAP_FIXED) == 0) {
+  if (view == nullptr && want != nullptr && !fixed) {
     view = MapViewOfFileEx(mapping, view_access, high, low, view_length, nullptr);
   }
   if (view == nullptr) {
     CloseHandle(mapping);
-    errno = (flags & MAP_FIXED) != 0 ? EINVAL : ENOMEM;
+    errno = (flags & MAP_FIXED_NOREPLACE) != 0 ? EEXIST : fixed ? EINVAL : ENOMEM;
     return MAP_FAILED;
   }
 

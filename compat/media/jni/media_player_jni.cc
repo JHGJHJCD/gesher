@@ -182,10 +182,13 @@ void JNICALL MP_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject dataSou
     jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
     return;
   }
-  auto source = JavaDataSource::Create(env, dataSource);
+  std::shared_ptr<DataSource> source = JavaDataSource::Create(env, dataSource);
   if (source == nullptr) return;
-  Process(env, mp, mp->SetDataSource(std::move(source)),
-          "java/lang/RuntimeException", "setDataSourceCallback failed.");
+  const int status = mp->SetDataSource(source);
+  // Close a rejected candidate before the public error mapper invokes JNI.
+  source.reset();
+  if (status != kPlayerOk) CheckException(env, "MediaPlayer rejected source close");
+  Process(env, mp, status, "java/lang/RuntimeException", "setDataSourceCallback failed.");
 }
 
 jint JNICALL MP_prepare(JNIEnv* env, jobject thiz, jobject) {

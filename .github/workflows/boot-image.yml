@@ -36,6 +36,22 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/surface/assemble-artifacts.py --source ci-suppliers/windows_x64 --destination dist --ledger ci-owners-dist.json --owner windows_x64
 
+      - name: Verify native mmap contracts before ART compaction
+        shell: pwsh
+        run: |
+          python -c @'
+          import pathlib
+          import subprocess
+          import sys
+          probe = pathlib.Path('dist/mman_probe.exe').resolve()
+          result = subprocess.run([str(probe)], capture_output=True, text=True, timeout=90)
+          print(result.stdout, end='')
+          print(result.stderr, end='', file=sys.stderr)
+          if result.returncode != 0 or 'mman probe: all passed' not in result.stdout:
+              raise SystemExit('Native mmap contracts failed before boot-image compilation')
+          '@
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Strict current framework artifact
         env:
           GH_TOKEN: ${{ github.token }}

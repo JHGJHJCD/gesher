@@ -11,6 +11,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <gesher/reserved_names.h>
 namespace {
 using NftwFn = int (*)(const char*, const struct stat*, int, struct FTW*);
 using FtwFn = int (*)(const char*, const struct stat*, int);
@@ -116,7 +118,7 @@ int WalkTree(const char* directory, NftwFn nftw_fn, FtwFn ftw_fn, int nfds, int 
     if (saved_cwd < 0) return -1;
     walk.original_directory_fd = saved_cwd;
     bool absolute = path.front() == '/' || path.front() == '\\' ||
-                    (path.size() > 1 && path[1] == ':');
+                    gesher::reserved_names::DriveRoot(path.c_str());
     if (!absolute) access_path = walk.original_directory + "/" + path;
   }
   int result = walk.Walk(path, access_path, walk.original_directory, 0);

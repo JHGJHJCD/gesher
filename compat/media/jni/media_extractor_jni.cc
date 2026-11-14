@@ -202,6 +202,7 @@ void Open(JNIEnv* env, jobject thiz, std::unique_ptr<DataSource> source, const s
   e->opening = false;
   if (extractor == nullptr) {
     owner.reset();  // MediaDataSource.close runs before the public exception.
+    CheckException(env, "MediaExtractor failed source close");
     MEDIA_LOGE("MediaExtractor: %s", err.c_str());
     jniThrow(env, "java/io/IOException", "Failed to instantiate extractor.");
     return;

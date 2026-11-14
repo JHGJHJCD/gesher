@@ -22,6 +22,19 @@ jobs:
       policy_ref: ${{ github.repository }}/.github/workflows/ci.yml@${{ github.sha }}
     steps:
       - run: echo "SOURCE_IDENTITY source=${{ github.sha }}"
+  reader-ownership:
+    needs: [source-identity]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Exact native reader ownership and handle reuse controls
+        shell: pwsh
+        run: tests/windows/test-process-reader-handles.ps1
   union-tsf:
     needs: [artifact-preflight]
     uses: ./.github/workflows/tsf-format-component.yml
@@ -32,7 +45,7 @@ jobs:
     needs: [artifact-preflight]
     uses: ./.github/workflows/native3-locks-blocking.yml
   artifact-preflight:
-    needs: [source-identity]
+    needs: [source-identity, reader-ownership]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +84,8 @@ jobs:
         run: |
           python3 tools/test_bionic_key_contracts.py --sanitize
           python3 tools/test_bionic_wait_contracts.py --sanitize
+          python3 tools/test_libcore_process_logging.py --sanitize
+          python3 tools/test_debug_memory_contracts.py --sanitize
           python3 tools/test_bionic_dns_contracts.py --sanitize
           python3 tools/test_ordinary_os_contracts.py --sanitize
           python3 tools/test_statvfs_contracts.py --sanitize
@@ -114,15 +129,20 @@ jobs:
           CXX='c++ -fsanitize=thread -fno-omit-frame-pointer' \
             python3 tools/test_futex_contracts.py --group guest --group concurrency
 
-      - name: Temporary directory and UNC namespace contracts
+      - name: Temporary directory, UNC namespace and reserved file-name contracts
         run: |
           python3 tools/test_temp_directory.py
           c++ -std=c++17 -Wall -Wextra -Werror tests/paths/unc_paths_test.cc -o "$RUNNER_TEMP/gesher-unc-paths"
           "$RUNNER_TEMP/gesher-unc-paths"
+          c++ -std=c++17 -Wall -Wextra -Werror tests/paths/reserved_names_test.cc -o "$RUNNER_TEMP/gesher-reserved-names"
+          "$RUNNER_TEMP/gesher-reserved-names"
 
       - name: Anonymous mapping zeroing and protection contracts
         run: |
           python3 tools/test_mman_zeroing_mappings.py --sanitize
+          python3 tools/test_mmap_noreplace_contracts.py --sanitize
+          c++ -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all tests/mman/noreplace_holes_linux.cc -o "$RUNNER_TEMP/gesher-noreplace-holes"
+          "$RUNNER_TEMP/gesher-noreplace-holes"
           python3 tools/test_madvise_reference.py
 
       - name: Filesystem metadata and media source ownership contracts
