@@ -38,8 +38,9 @@ semantics and deliberately removes that profile.
 
 The Android runtime (`compat/`), Java application/framework services (`app/`)
 and ARM64 translation keep their existing installation layout. Updates replace
-the complete runtime with a tested installer, so binaries, boot images and
-framework files come from the same package. This feature does not apply APK
+the complete runtime with the release installer, so binaries, boot images and
+framework files come from the same package. Maintainers must publish the installer
+that passed CI; the updater does not inspect CI attestations. This feature does not apply APK
 updates or update individual DLLs independently.
 
 ## Release contract

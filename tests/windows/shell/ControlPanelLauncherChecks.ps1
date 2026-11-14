@@ -113,8 +113,16 @@ function Wait-PanelProbe([string] $Directory) {
 
 function Get-PanelProbeProcess([object] $Record) {
     $process = Get-Process -Id $Record.ProcessId -ErrorAction Stop
-    if ($process.StartTime.ToFileTimeUtc() -ne $Record.StartTime) { throw 'The probe process identity changed.' }
-    return $process
+    try {
+        # Retain the kernel process object even after the detached native parent
+        # exits; a temporary WaitForExit handle alone cannot preserve ExitCode.
+        $null = $process.Handle
+        if ($process.StartTime.ToFileTimeUtc() -ne $Record.StartTime) { throw 'The probe process identity changed.' }
+        return $process
+    } catch {
+        $process.Dispose()
+        throw
+    }
 }
 
 function Assert-LauncherReplaceable([string] $Path) {
