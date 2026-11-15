@@ -137,6 +137,8 @@ class Socket {
   virtual int Read(uint8_t* buffer, int length) = 0;
   // Bytes written, or a negative Winsock error.
   virtual int Write(const uint8_t* buffer, int length) = 0;
+  // Bytes that can be read without blocking.
+  virtual int Available() = 0;
   virtual int Channel() = 0;
   virtual uint64_t Remote() = 0;
   virtual void Close() = 0;

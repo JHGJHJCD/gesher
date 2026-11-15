@@ -314,6 +314,11 @@ class TestSocket final : public Socket {
     out_->Write(buffer, length);
     return length;
   }
+  int Available() override {
+    if (closed_.load()) return 0;
+    std::lock_guard<std::mutex> lock(in_->mu);
+    return static_cast<int>(in_->bytes.size());
+  }
   int Channel() override { return channel_; }
   uint64_t Remote() override { return remote_; }
   void Close() override {

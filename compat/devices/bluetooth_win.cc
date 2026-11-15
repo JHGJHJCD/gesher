@@ -1484,6 +1484,12 @@ class WinSocket final : public Socket {
     return done;
   }
 
+  int Available() override {
+    u_long n = 0;
+    if (closed_.load() || ioctlsocket(s_, FIONREAD, &n) != 0) return 0;
+    return static_cast<int>(n);
+  }
+
   int Channel() override { return channel_; }
   uint64_t Remote() override { return remote_; }
 

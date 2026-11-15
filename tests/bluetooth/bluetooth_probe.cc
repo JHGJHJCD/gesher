@@ -180,6 +180,7 @@ void CheckTestRadio(bt::Backend& backend) {
     const uint8_t hello[] = {0x08, 0xEE, 0x00, 0x00, 0x00, 0x01, 0x01, 0x0A, 0x00, 0x02};
     uint8_t back[16] = {};
     Check(socket->Write(hello, sizeof(hello)) == static_cast<int>(sizeof(hello)) &&
+              socket->Available() == static_cast<int>(sizeof(hello)) &&
               socket->Read(back, sizeof(back)) == static_cast<int>(sizeof(hello)) &&
               memcmp(back, hello, sizeof(hello)) == 0,
           "RFCOMM echo of a 10-byte packet");

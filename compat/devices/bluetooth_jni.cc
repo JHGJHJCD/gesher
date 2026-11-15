@@ -392,6 +392,11 @@ jint WindowsBluetooth_rfcommWrite(JNIEnv* env, jclass, jlong handle, jbyteArray 
   return done;
 }
 
+jint WindowsBluetooth_rfcommAvailable(JNIEnv*, jclass, jlong handle) {
+  std::shared_ptr<bt::Socket> socket = Sockets().Get(handle);
+  return socket ? socket->Available() : 0;
+}
+
 void WindowsBluetooth_rfcommClose(JNIEnv*, jclass, jlong handle) {
   std::shared_ptr<bt::Socket> socket = Sockets().Remove(handle);
   if (socket) socket->Close();
@@ -467,6 +472,7 @@ const JNINativeMethod gMethods[] = {
      GESHER_JNI(WindowsBluetooth_rfcommConnect)},
     {"nativeRfcommRead", "(J[BII)I", GESHER_JNI(WindowsBluetooth_rfcommRead)},
     {"nativeRfcommWrite", "(J[BII)I", GESHER_JNI(WindowsBluetooth_rfcommWrite)},
+    {"nativeRfcommAvailable", "(J)I", GESHER_JNI(WindowsBluetooth_rfcommAvailable)},
     {"nativeRfcommClose", "(J)V", GESHER_JNI(WindowsBluetooth_rfcommClose)},
     {"nativeRfcommListen", "(Ljava/lang/String;Ljava/lang/String;Z[I)J",
      GESHER_JNI(WindowsBluetooth_rfcommListen)},
