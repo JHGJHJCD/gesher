@@ -40,6 +40,7 @@ jobs:
         shell: pwsh
         run: |
           python -c @'
+          import os
           import pathlib
           import subprocess
           import sys
@@ -49,6 +50,14 @@ jobs:
           print(result.stderr, end='', file=sys.stderr)
           if result.returncode != 0 or 'mman probe: all passed' not in result.stdout:
               raise SystemExit('Native mmap contracts failed before boot-image compilation')
+          plain_environment = os.environ.copy()
+          plain_environment['GESHER_MMAP_NO_PLACEHOLDERS'] = '1'
+          plain = subprocess.run([str(probe), '--plain-anonymous'], env=plain_environment,
+                                 capture_output=True, text=True, timeout=90)
+          print(plain.stdout, end='')
+          print(plain.stderr, end='', file=sys.stderr)
+          if plain.returncode != 0 or 'mman plain anonymous probe: all passed' not in plain.stdout:
+              raise SystemExit('Native plain anonymous mmap contracts failed before boot-image compilation')
           '@
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

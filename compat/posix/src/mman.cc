@@ -845,35 +845,46 @@ void* GroupFile(State& s, void* start, size_t len, int prot, int flags, int fd, 
 // --- plain allocations and views (no placeholders) --------------------------
 
 void* MapAnonymous(State& s, void* start, size_t len, int prot, int flags) {
+  const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
+  const bool no_replace = (flags & MAP_FIXED_NOREPLACE) != 0;
   if (Placeholders().available()) {
-    // MAP_FIXED over a plain region (made before placeholders were used, or
-    // by the binder layer) falls through to the plain path.
+    // Fixed mappings within a plain region (made before placeholders were
+    // used, or by the binder layer) fall through to its per-page bookkeeping.
     const uintptr_t addr = reinterpret_cast<uintptr_t>(start);
     auto it = FindRegion(s, addr);
-    if (it == s.regions.end() || it->second.group != 0 || (flags & MAP_FIXED) == 0) {
+    if (it == s.regions.end() || it->second.group != 0 || !fixed) {
       return GroupAnonymous(s, start, len, prot, flags);
     }
   }
   DWORD protection = PageProtection(prot);
   uintptr_t addr = reinterpret_cast<uintptr_t>(start);
-  bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
   const Origin origin = (flags & MAP_SHARED) != 0 ? Origin::kSharedAnonymous
                                                 : Origin::kPrivateAnonymous;
 
-  // MAP_FIXED inside one of our anonymous regions: replace those pages with
-  // fresh zero pages, as mmap does.
-  if ((flags & MAP_FIXED) != 0 && (flags & MAP_FIXED_NOREPLACE) == 0) {
+  // A partial munmap leaves dead pages inside the plain Windows reservation.
+  // NOREPLACE may reuse those holes, but a live page (including PROT_NONE)
+  // rejects the entire request before any native or bookkeeping mutation.
+  if (fixed) {
     auto it = FindRegion(s, addr);
-    if (it != s.regions.end() && it->second.kind == Kind::kAnon &&
+    if (it != s.regions.end() && it->second.kind == Kind::kAnon && it->second.group == 0 &&
         addr + len <= it->first + it->second.size) {
-      VirtualFree(start, len, MEM_DECOMMIT);
+      Region& region = it->second;
+      const size_t first = (addr - it->first) / s.page_size;
+      const size_t last = first + len / s.page_size;
+      if (no_replace && std::any_of(region.live.begin() + first, region.live.begin() + last,
+                                   [](bool live) { return live; })) {
+        errno = EEXIST;
+        return MAP_FAILED;
+      }
+      // Holes were already decommitted by munmap. Retain them on recommit
+      // failure; ordinary MAP_FIXED still discards the pages it replaces.
+      if (!no_replace) VirtualFree(start, len, MEM_DECOMMIT);
       if ((AnonymousCommit(prot) & MEM_COMMIT) != 0 &&
           VirtualAlloc(start, len, MEM_COMMIT, protection) == nullptr) {
         errno = ENOMEM;
         return MAP_FAILED;
       }
-      Region& region = it->second;
-      for (size_t i = (addr - it->first) / s.page_size, n = i + len / s.page_size; i < n; ++i) {
+      for (size_t i = first; i < last; ++i) {
         region.origins[i] = origin;
         if (!region.live[i]) {
           region.live[i] = true;
