@@ -133,7 +133,34 @@ void ConcurrentZeroing() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+  if (argc == 2 && strcmp(argv[1], "--plain-anonymous") == 0) {
+    char mode[2] = {};
+    if (GetEnvironmentVariableA("GESHER_MMAP_NO_PLACEHOLDERS", mode, sizeof(mode)) != 1 ||
+        mode[0] != '1') {
+      fprintf(stderr, "plain anonymous probe requires GESHER_MMAP_NO_PLACEHOLDERS=1\n");
+      return 2;
+    }
+    // Exercise the same public anonymous-hole contracts in the retained
+    // VirtualAlloc reservation backend. The default probe still requires
+    // every placeholder and file-mapping contract below.
+    wchar_t path[MAX_PATH];
+    int fd = TempFile(16 * kPage, path);
+    Check("plain anonymous probe temporary file", fd >= 0);
+    if (fd >= 0) {
+      NoreplaceArtMove();
+      NoreplaceAdjacentHoles();
+      NoreplaceAtomicCollisions(fd);
+      _close(fd);
+    }
+    printf(failures == 0 ? "mman plain anonymous probe: all passed\n"
+                         : "mman plain anonymous probe: %d failed\n", failures);
+    return failures == 0 ? 0 : 1;
+  }
+  if (argc != 1) {
+    fprintf(stderr, "usage: mman_probe [--plain-anonymous]\n");
+    return 2;
+  }
   setvbuf(stdout, nullptr, _IONBF, 0);
   wchar_t path[MAX_PATH];
   const int fd = TempFile(10 * kPage + 100, path);  // 10 whole pages and a partial one
