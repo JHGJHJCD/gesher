@@ -828,11 +828,269 @@ function Set-PanelInstallationBusy([bool] $busy) {
     else { Set-Busy $false }
 }
 
+function Show-ModernConfirmDialog {
+    param(
+        [Parameter(Mandatory)] [string] $Title,
+        [Parameter(Mandatory)] [string] $Message,
+        [string] $Detail = $null,
+        [string] $ConfirmText = (Get-GesherText 'cp_btn_uninstall'),
+        [string] $CancelText = (Get-GesherText 'cp_update_cancel'),
+        [switch] $IsDanger,
+        [switch] $IsWarning,
+        $IconImage = $null,
+        [string] $SubTitle = $null
+    )
+
+    $badgeBg = if ($IsDanger) { '#FEE4E2' } elseif ($IsWarning) { '#FEF0C7' } else { '#F2F4F7' }
+    $badgeFg = if ($IsDanger) { '#D92D20' } elseif ($IsWarning) { '#DC6803' } else { '#344054' }
+    $btnStyle = if ($IsDanger) { 'DangerActionButton' } else { 'PrimaryButton' }
+    $escapedTitle = [System.Security.SecurityElement]::Escape($Title)
+    $escapedMessage = [System.Security.SecurityElement]::Escape($Message)
+    $escapedDetail = if ($Detail) { [System.Security.SecurityElement]::Escape($Detail) } else { '' }
+    $escapedSubTitle = if ($SubTitle) { [System.Security.SecurityElement]::Escape($SubTitle) } else { '' }
+    $escapedConfirm = [System.Security.SecurityElement]::Escape($ConfirmText)
+    $escapedCancel = [System.Security.SecurityElement]::Escape($CancelText)
+
+    [xml]$dialogXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$escapedTitle"
+        Width="460" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        FlowDirection="$flowDirection"
+        FontFamily="Segoe UI, Tahoma, Arial"
+        Background="#FFFFFF">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="#D0D5DD"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#344054"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#F2F4F7"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="PrimaryButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#1570EF"/>
+            <Setter Property="BorderBrush" Value="#1570EF"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#175CD3"/>
+                    <Setter Property="BorderBrush" Value="#175CD3"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+        <Style x:Key="DangerActionButton" TargetType="Button" BasedOn="{StaticResource {x:Type Button}}">
+            <Setter Property="Background" Value="#D92D20"/>
+            <Setter Property="BorderBrush" Value="#D92D20"/>
+            <Setter Property="Foreground" Value="#FFFFFF"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#B42318"/>
+                    <Setter Property="BorderBrush" Value="#B42318"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+    <Border Padding="22">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="20"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            
+            <Grid Grid.Row="0" Margin="0,0,0,14">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="14"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Border Name="IconContainer" Grid.Column="0" Width="44" Height="44" CornerRadius="10" Background="$badgeBg" VerticalAlignment="Top">
+                    <Image Name="AppIconImage" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+                </Border>
+                <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                    <TextBlock Text="$escapedTitle" FontSize="16" FontWeight="Bold" Foreground="#101828"/>
+                    $(if ($SubTitle) { "<TextBlock Text=""$escapedSubTitle"" FontSize=""12"" Foreground=""#667085"" Margin=""0,2,0,0""/>" })
+                </StackPanel>
+            </Grid>
+
+            <StackPanel Grid.Row="1">
+                <TextBlock Text="$escapedMessage" FontSize="13" FontWeight="SemiBold" Foreground="#344054" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                $(if ($Detail) { "<TextBlock Text=""$escapedDetail"" FontSize=""12"" Foreground=""#667085"" TextWrapping=""Wrap""/>" })
+            </StackPanel>
+
+            <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Name="BtnCancel" Content="$escapedCancel" IsCancel="True" MinWidth="85"/>
+                <Border Width="10"/>
+                <Button Name="BtnConfirm" Style="{StaticResource $btnStyle}" Content="$escapedConfirm" IsDefault="True" MinWidth="85"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+"@
+    $reader = [System.Xml.XmlNodeReader]::new($dialogXaml)
+    $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+    $dialog.Owner = $window
+    if ($window.Icon) { $dialog.Icon = $window.Icon }
+
+    $btnConfirm = $dialog.FindName('BtnConfirm')
+    $iconContainer = $dialog.FindName('IconContainer')
+    $appIconImage = $dialog.FindName('AppIconImage')
+
+    if ($IconImage) {
+        $appIconImage.Source = $IconImage
+        $appIconImage.Visibility = [System.Windows.Visibility]::Visible
+        $iconContainer.Background = [System.Windows.Media.BrushConverter]::new().ConvertFromString('#F2F4F7')
+    } else {
+        $iconText = [System.Windows.Controls.TextBlock]::new()
+        $iconText.Text = if ($IsDanger) { [char]0x2716 } elseif ($IsWarning) { [char]0x26A0 } else { [char]0x2139 }
+        $iconText.FontSize = 18
+        $iconText.FontWeight = [System.Windows.FontWeights]::Bold
+        $iconText.Foreground = [System.Windows.Media.BrushConverter]::new().ConvertFromString($badgeFg)
+        $iconText.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Center
+        $iconText.VerticalAlignment = [System.Windows.VerticalAlignment]::Center
+        $iconContainer.Child = $iconText
+    }
+
+    $btnConfirm.Add_Click({
+        $dialog.DialogResult = $true
+        $dialog.Close()
+    })
+
+    return ($dialog.ShowDialog() -eq $true)
+}
+
+function Show-UninstallConfirmDialog([string] $pkg, [string] $label = $pkg, $iconImage = $null) {
+    return Show-ModernConfirmDialog `
+        -Title (Get-GesherText 'cp_uninstall_title') `
+        -SubTitle (if ($label -ne $pkg) { $pkg } else { $null }) `
+        -Message (Get-GesherText 'cp_uninstall_confirm' @($label)) `
+        -Detail (Get-GesherText 'cp_uninstall_detail') `
+        -ConfirmText (Get-GesherText 'cp_btn_uninstall') `
+        -CancelText (Get-GesherText 'cp_update_cancel') `
+        -IsDanger `
+        -IconImage $iconImage
+}
+
+function Show-ModernMessageDialog {
+    param(
+        [Parameter(Mandatory)] [string] $Title,
+        [Parameter(Mandatory)] [string] $Message,
+        [bool] $IsError = $false
+    )
+
+    $okText = [System.Security.SecurityElement]::Escape((Get-GesherText 'cp_dialog_ok'))
+    $escapedTitle = [System.Security.SecurityElement]::Escape($Title)
+    $escapedMessage = [System.Security.SecurityElement]::Escape($Message)
+    $badgeBg = if ($IsError) { '#FEE4E2' } else { '#E0F2FE' }
+    $badgeFg = if ($IsError) { '#D92D20' } else { '#0284C7' }
+
+    [xml]$dialogXaml = @"
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="$escapedTitle"
+        Width="440" SizeToContent="Height"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        FlowDirection="$flowDirection"
+        FontFamily="Segoe UI, Tahoma, Arial"
+        Background="#FFFFFF">
+    <Window.Resources>
+        <Style TargetType="Button">
+            <Setter Property="Padding" Value="16,8"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="BorderBrush" Value="#D0D5DD"/>
+            <Setter Property="Background" Value="#FFFFFF"/>
+            <Setter Property="Foreground" Value="#344054"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#F2F4F7"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+    <Border Padding="22">
+        <Grid>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="20"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+            <Grid Grid.Row="0">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="14"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.Column="0" Width="40" Height="40" CornerRadius="20" Background="$badgeBg" VerticalAlignment="Top">
+                    <TextBlock Text="$(if ($IsError) { '!' } else { 'i' })" FontWeight="Bold" FontSize="18" Foreground="$badgeFg" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <TextBlock Grid.Column="2" Text="$escapedMessage" FontSize="13" Foreground="#344054" TextWrapping="Wrap" VerticalAlignment="Center"/>
+            </Grid>
+            <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Name="BtnOk" Content="$okText" IsDefault="True" IsCancel="True" MinWidth="85"/>
+            </StackPanel>
+        </Grid>
+    </Border>
+</Window>
+"@
+    $reader = [System.Xml.XmlNodeReader]::new($dialogXaml)
+    $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+    $dialog.Owner = $window
+    if ($window.Icon) { $dialog.Icon = $window.Icon }
+    $btnOk = $dialog.FindName('BtnOk')
+    $btnOk.Add_Click({ $dialog.Close() })
+    $dialog.ShowDialog() | Out-Null
+}
+
 function Confirm-PanelUpdateInstallation {
-    return [System.Windows.MessageBox]::Show($window,
-        (Get-GesherText 'cp_update_confirm' @($script:UpdateState.Release.Version)),
-        (Get-GesherText 'cp_update_title'), [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning) -eq [System.Windows.MessageBoxResult]::Yes
+    return Show-ModernConfirmDialog `
+        -Title (Get-GesherText 'cp_update_title') `
+        -Message (Get-GesherText 'cp_update_confirm' @($script:UpdateState.Release.Version)) `
+        -ConfirmText (Get-GesherText 'cp_update_install') `
+        -CancelText (Get-GesherText 'cp_update_cancel') `
+        -IsWarning
 }
 
 function Start-PanelUpdateInstallation {
@@ -982,9 +1240,12 @@ $btnEnableMicrog.Add_Click({
     try {
         & (Join-Path $here 'gesher-app.ps1') shutdown
         & (Join-Path $here 'gesher-app-microg.ps1') -AutoDownload
+        if ($LASTEXITCODE -ne 0) {
+            throw (Get-GesherText 'cp_staging')
+        }
         & (Join-Path $here 'gesher-app.ps1') start
     } catch {
-        [System.Windows.MessageBox]::Show($_.Exception.Message, "Gesher", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+        Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
     } finally {
         Complete-DashboardAction
     }
@@ -1020,8 +1281,11 @@ $btnInstallStore.Add_Click({
             Invoke-WebRequest -Uri 'https://auroraoss.com/downloads/AuroraStore/Release/AuroraStore-4.6.1.apk' -OutFile $storeApk -UseBasicParsing
         }
         & (Join-Path $here 'gesher-app.ps1') install "$storeApk"
+        if ($LASTEXITCODE -ne 0) {
+            throw (Get-GesherText 'cp_install_failed' @('Aurora Store'))
+        }
     } catch {
-        [System.Windows.MessageBox]::Show($_.Exception.Message, "Gesher", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+        Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
     } finally {
         Complete-DashboardAction
     }
@@ -1037,12 +1301,16 @@ $btnInstallApk.Add_Click({
     $ofd.Filter = "Android Packages (*.apk;*.apks;*.xapk)|*.apk;*.apks;*.xapk|All Files (*.*)|*.*"
     if ($ofd.ShowDialog() -eq $true) {
         $file = $ofd.FileName
-        Set-Busy $true (Get-GesherText 'cp_installing' @([System.IO.Path]::GetFileName($file)))
+        $fileName = [System.IO.Path]::GetFileName($file)
+        Set-Busy $true (Get-GesherText 'cp_installing' @($fileName))
         $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
         try {
             & (Join-Path $here 'gesher-app.ps1') install "$file"
+            if ($LASTEXITCODE -ne 0) {
+                throw (Get-GesherText 'cp_install_failed' @($fileName))
+            }
         } catch {
-            [System.Windows.MessageBox]::Show($_.Exception.Message, "Gesher", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+            Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
         } finally {
             Complete-DashboardAction
         }
@@ -1058,12 +1326,16 @@ $window.Add_Drop({
             foreach ($file in $files) {
                 $ext = [System.IO.Path]::GetExtension($file).ToLower()
                 if ($ext -in '.apk', '.apks', '.xapk') {
-                    Set-Busy $true (Get-GesherText 'cp_installing' @([System.IO.Path]::GetFileName($file)))
+                    $fileName = [System.IO.Path]::GetFileName($file)
+                    Set-Busy $true (Get-GesherText 'cp_installing' @($fileName))
                     $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
                     try {
                         & (Join-Path $here 'gesher-app.ps1') install "$file"
+                        if ($LASTEXITCODE -ne 0) {
+                            throw (Get-GesherText 'cp_install_failed' @($fileName))
+                        }
                     } catch {
-                        [System.Windows.MessageBox]::Show($_.Exception.Message, "Gesher", [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error)
+                        Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
                     }
                 }
             }
@@ -1081,16 +1353,18 @@ $script:OnAppLaunch = {
 
 $script:OnAppUninstall = {
     param($pkg)
-    $confirm = [System.Windows.MessageBox]::Show(
-        (Get-GesherText 'cp_uninstall_confirm' @($pkg)),
-        (Get-GesherText 'cp_title'),
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
-    if ($confirm -eq [System.Windows.MessageBoxResult]::Yes) {
+    $item = $appsList.ItemsSource | Where-Object { $_.Package -eq $pkg } | Select-Object -First 1
+    $label = if ($item -and $item.Label) { $item.Label } else { $pkg }
+    $iconImage = if ($item) { $item.IconImage } else { $null }
+    if (Show-UninstallConfirmDialog -pkg $pkg -label $label -iconImage $iconImage) {
         Set-Busy $true
         try {
             & (Join-Path $here 'gesher-app.ps1') uninstall $pkg
+            if ($LASTEXITCODE -ne 0) {
+                throw (Get-GesherText 'cp_uninstall_failed' @($label))
+            }
+        } catch {
+            Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
         } finally {
             Complete-DashboardAction
         }

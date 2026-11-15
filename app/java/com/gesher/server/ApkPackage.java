@@ -214,7 +214,15 @@ public final class ApkPackage {
         if (signing != null) {
             pkg.setSigningDetails(signing);
         }
-        return new ApkPackage(apkPath, pkg);
+        ApkPackage appPkg = new ApkPackage(apkPath, pkg);
+        if (pkg.getSigningDetails() == null || pkg.getSigningDetails() == SigningDetails.UNKNOWN) {
+            Signature[] verified = appPkg.verifiedSignatures();
+            if (verified != null) {
+                pkg.setSigningDetails(new SigningDetails(verified,
+                        SigningDetails.SignatureSchemeVersion.JAR, null, null));
+            }
+        }
+        return appPkg;
     }
 
     /**
@@ -361,10 +369,19 @@ public final class ApkPackage {
     }
 
     private static VerifiedIdentity verifyIdentity(String path) {
+        File apkFile = new File(path);
         try {
             com.android.apksig.ApkVerifier.Result result = new com.android.apksig.ApkVerifier
-                    .Builder(new File(path)).setMinCheckedPlatformVersion(36)
+                    .Builder(apkFile).setMinCheckedPlatformVersion(36)
                     .setMaxCheckedPlatformVersion(36).build().verify();
+            if (!result.isVerified()) {
+                // If verification at platform 36 failed (e.g. v1-only JAR signature on an APK
+                // targeting API 30+, which platform 36 disallows by default), retry verification
+                // at platform 24 so genuine v1-signed APKs can be verified.
+                result = new com.android.apksig.ApkVerifier
+                        .Builder(apkFile).setMinCheckedPlatformVersion(24)
+                        .setMaxCheckedPlatformVersion(24).build().verify();
+            }
             if (result.isVerified() && !result.getSignerCertificates().isEmpty()) {
                 Signature[] signatures = new Signature[result.getSignerCertificates().size()];
                 for (int i = 0; i < signatures.length; i++) {
