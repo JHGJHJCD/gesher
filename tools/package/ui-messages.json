@@ -416,9 +416,29 @@
       "en": "Uninstall",
       "he": "הסר"
     },
+    "cp_uninstall_title": {
+      "en": "Uninstall Application",
+      "he": "הסרת יישום"
+    },
     "cp_uninstall_confirm": {
       "en": "Are you sure you want to uninstall {0}?",
       "he": "האם להסיר את היישום {0}?"
+    },
+    "cp_uninstall_detail": {
+      "en": "This application and its local data will be removed from Gesher.",
+      "he": "היישום וכל הנתונים המקומיים שלו יוסרו מגשר."
+    },
+    "cp_uninstall_failed": {
+      "en": "Failed to uninstall {0}.",
+      "he": "הסרת {0} נכשלה."
+    },
+    "cp_install_failed": {
+      "en": "Failed to install {0}.",
+      "he": "התקנת {0} נכשלה."
+    },
+    "cp_dialog_ok": {
+      "en": "OK",
+      "he": "אישור"
     },
     "cp_status_ready": {
       "en": "Ready",

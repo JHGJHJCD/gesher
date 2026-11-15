@@ -17,6 +17,7 @@
 
 #define WIN32_LEAN_AND_MEAN 1
 #include <windows.h>
+#include "../../locale/preferred_languages.h"
 
 namespace {
 
@@ -49,53 +50,12 @@ jstring JNICALL WindowsFonts_nativeFontsDirectory(JNIEnv* env, jclass) {
 jobjectArray JNICALL SystemLocale_nativePreferredUiLanguages(JNIEnv* env, jclass) {
   std::vector<std::wstring> names;
 
-  // 1. Preferred languages for apps and websites from Windows user profile (Settings -> Language list).
-  HKEY hkey = nullptr;
-  if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\International\\User Profile", 0,
-                    KEY_QUERY_VALUE, &hkey) == ERROR_SUCCESS) {
-    DWORD type = 0;
-    DWORD bytes = 0;
-    if (RegQueryValueExW(hkey, L"Languages", nullptr, &type, nullptr, &bytes) == ERROR_SUCCESS &&
-        (type == REG_MULTI_SZ || type == REG_SZ) && bytes > sizeof(wchar_t)) {
-      std::vector<wchar_t> reg_buf((bytes / sizeof(wchar_t)) + 2, L'\0');
-      if (RegQueryValueExW(hkey, L"Languages", nullptr, &type,
-                           reinterpret_cast<LPBYTE>(reg_buf.data()), &bytes) == ERROR_SUCCESS) {
-        for (const wchar_t* p = reg_buf.data();
-             p < reg_buf.data() + (bytes / sizeof(wchar_t)) && *p != L'\0';) {
-          std::wstring name(p);
-          p += name.size() + 1;
-          if (!name.empty()) {
-            names.push_back(name);
-          }
-        }
-      }
+  wchar_t* preferred = GesherPreferredLanguages();
+  if (preferred != nullptr) {
+    for (const wchar_t* name = preferred; *name != L'\0'; name += wcslen(name) + 1) {
+      names.emplace_back(name);
     }
-    RegCloseKey(hkey);
-  }
-
-  // 2. Windows UI display languages (GetUserPreferredUILanguages).
-  ULONG count = 0;
-  ULONG size = 0;
-  if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, nullptr, &size) && size > 0) {
-    std::vector<wchar_t> buf(size);
-    if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, buf.data(), &size)) {
-      for (const wchar_t* p = buf.data(); p < buf.data() + buf.size() && *p != L'\0';) {
-        std::wstring name(p);
-        p += name.size() + 1;
-        if (!name.empty()) {
-          bool exists = false;
-          for (const auto& existing : names) {
-            if (_wcsicmp(existing.c_str(), name.c_str()) == 0) {
-              exists = true;
-              break;
-            }
-          }
-          if (!exists) {
-            names.push_back(name);
-          }
-        }
-      }
-    }
+    HeapFree(GetProcessHeap(), 0, preferred);
   }
 
   if (names.empty()) {

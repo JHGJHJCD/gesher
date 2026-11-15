@@ -46,11 +46,13 @@ jobs:
         shell: powershell
         run: |
           tests/windows/shell/UiLocalizationChecks.ps1
+          tests/windows/shell/PreferredLanguagesChecks.ps1
           tests/windows/shell/MicrogDefaultsChecks.ps1
           tests/windows/shell/ControlPanelRefreshChecks.ps1
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1
+          tests/windows/shell/Issue32And33Contracts.ps1
           tests/windows/shell/RuntimeFileChecks.ps1
   reader-ownership:
     needs: [source-identity]
@@ -229,6 +231,7 @@ jobs:
       - name: Validate user interface translations
         run: |
           python3 tools/i18n/check.py --check
+          python3 tools/test_preferred_languages.py --sanitize
 
   build-framework-assets:
     needs: [artifact-preflight, source-identity]
@@ -665,11 +668,13 @@ jobs:
         shell: powershell
         run: |
           tests/windows/shell/UiLocalizationChecks.ps1
+          tests/windows/shell/PreferredLanguagesChecks.ps1
           tests/windows/shell/MicrogDefaultsChecks.ps1
           tests/windows/shell/ControlPanelRefreshChecks.ps1
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1
+          tests/windows/shell/Issue32And33Contracts.ps1
           tests/windows/shell/RuntimeFileChecks.ps1
 
       - name: Verify and assemble windows-x64 artifact

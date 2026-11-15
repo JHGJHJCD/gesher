@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include "ui_messages.h"
+#include "preferred_languages.h"
 
 // Same preference order as SystemLocale, including its explicit test/launch override.
 // Read at presentation time so a later Windows language change is picked up.
@@ -24,63 +25,14 @@ static inline enum GesherUiLanguage GesherUiCurrentLanguage(void) {
     }
   }
 
-  wchar_t all_tags[1024];
-  all_tags[0] = L'\0';
-  size_t offset = 0;
-
-  // 1. User preferred languages for apps & websites (Settings -> Language list).
-  HKEY key = NULL;
-  if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Control Panel\\International\\User Profile", 0, KEY_QUERY_VALUE, &key) == ERROR_SUCCESS) {
-    DWORD type = 0, bytes = 0;
-    if (RegQueryValueExW(key, L"Languages", NULL, &type, NULL, &bytes) == ERROR_SUCCESS &&
-        (type == REG_MULTI_SZ || type == REG_SZ) && bytes > sizeof(wchar_t)) {
-      wchar_t* reg_tags = (wchar_t*)HeapAlloc(GetProcessHeap(), 0, bytes + 2 * sizeof(wchar_t));
-      if (reg_tags != NULL) {
-        if (RegQueryValueExW(key, L"Languages", NULL, &type, (LPBYTE)reg_tags, &bytes) == ERROR_SUCCESS) {
-          DWORD chars = bytes / sizeof(wchar_t);
-          for (DWORD i = 0; i < chars && offset + 1 < sizeof(all_tags)/sizeof(all_tags[0]); ++i) {
-            if (reg_tags[i] == L'\0') {
-              if (offset > 0 && all_tags[offset - 1] != L',' && i + 1 < chars && reg_tags[i + 1] != L'\0') {
-                all_tags[offset++] = L',';
-              }
-            } else {
-              all_tags[offset++] = reg_tags[i];
-            }
-          }
-          all_tags[offset] = L'\0';
-        }
-        HeapFree(GetProcessHeap(), 0, reg_tags);
-      }
-    }
-    RegCloseKey(key);
+  wchar_t* tags = GesherPreferredLanguages();
+  if (tags == NULL) return GESHER_UI_EN;
+  // Flatten the owned list in place for the existing comma-separated selector.
+  for (wchar_t* end = tags; *end != L'\0';) {
+    end += wcslen(end);
+    if (end[1] != L'\0') *end++ = L',';
   }
-
-  // 2. Windows UI display languages (GetUserPreferredUILanguages).
-  ULONG count = 0, length = 0;
-  if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, NULL, &length) && length > 1) {
-    wchar_t* tags = (wchar_t*)HeapAlloc(GetProcessHeap(), 0, length * sizeof(wchar_t));
-    if (tags != NULL) {
-      if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, tags, &length)) {
-        if (offset > 0 && offset + 1 < sizeof(all_tags)/sizeof(all_tags[0]) && all_tags[offset - 1] != L',') {
-          all_tags[offset++] = L',';
-        }
-        for (ULONG i = 0; i < length && offset + 1 < sizeof(all_tags)/sizeof(all_tags[0]); ++i) {
-          if (tags[i] == L'\0') {
-            if (offset > 0 && all_tags[offset - 1] != L',' && i + 1 < length && tags[i + 1] != L'\0') {
-              all_tags[offset++] = L',';
-            }
-          } else {
-            all_tags[offset++] = tags[i];
-          }
-        }
-        all_tags[offset] = L'\0';
-      }
-      HeapFree(GetProcessHeap(), 0, tags);
-    }
-  }
-
-  if (all_tags[0] != L'\0') {
-    return GesherUiMatch(all_tags);
-  }
-  return GESHER_UI_EN;
+  enum GesherUiLanguage language = GesherUiMatch(tags);
+  HeapFree(GetProcessHeap(), 0, tags);
+  return language;
 }
