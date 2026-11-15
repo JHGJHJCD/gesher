@@ -140,7 +140,9 @@ jobs:
             echo "--android-shlib refused; packing as a plain shared library"
             "$upx" -o dist-native/raw_syscall_upx.so "$RUNNER_TEMP/raw_syscall_upx.so"
           fi
-          "$bin/llvm-readelf" -lhd dist-native/raw_syscall_upx.so | sed -n '1,60p'
+          # UPX leaves a section header table past the end of the file, as in
+          # the packers' libraries: llvm-readelf then stops with an error.
+          { "$bin/llvm-readelf" -lh dist-native/raw_syscall_upx.so 2>&1 || true; } | sed -n '1,60p'
           grep -c 'This file is packed with the UPX' dist-native/raw_syscall_upx.so
           ls -l "$RUNNER_TEMP/raw_syscall_upx.so" dist-native/raw_syscall_upx.so
 

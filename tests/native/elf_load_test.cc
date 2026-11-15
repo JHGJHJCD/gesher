@@ -122,8 +122,7 @@ int main(int argc, char** argv) {
       " (%zu bytes decoded, %zu skipped, code from %s)\n",
       fs.stack_guard, fs.thread_pointer, fs.stubbed, fs.trapped, fs.bytes_decoded,
       fs.decode_errors, fs.used_unwind_info ? "unwind info" : "sections");
-  std::printf("raw syscalls rewritten at load: %zu; code unpacked at run time: %s
-", fs.syscalls,
+  std::printf("raw syscalls rewritten at load: %zu; code unpacked at run time: %s\n", fs.syscalls,
               fs.self_unpacking ? "yes" : "no");
   if (auto expect = reinterpret_cast<int (SYSV*)()>(elf::Lookup(lib, "gesher_fs_expect"))) {
     int e = expect();
