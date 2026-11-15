@@ -1,10 +1,12 @@
 # Gesher's interface language
 
-Gesher's own interface supports Hebrew and English. It follows Windows' display
-language preferences automatically, in order, matching the language portion of
-BCP 47 tags (`he-IL`, `he`, and the legacy `iw` alias all select Hebrew).
-If none of the preferred languages is supported, English is used. Regional number
-and date settings do not override the display language.
+Gesher's own interface supports Hebrew and English. It follows Windows'
+language preferences automatically, in order (the user's preferred languages
+for apps and websites in Windows Settings, followed by Windows display language
+preferences), matching the language portion of BCP 47 tags (`he-IL`, `he`, and
+the legacy `iw` alias all select Hebrew). If none of the preferred languages is
+supported, English is used. Regional number and date settings do not override
+the language preference.
 
 The launcher splash, native permission/account consent dialogs and account chooser, command-line
 launcher messages, microG addon setup, WebView file filters, Start menu descriptions,

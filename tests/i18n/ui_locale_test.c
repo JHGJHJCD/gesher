@@ -17,5 +17,8 @@ int main(void) {
   assert(GesherUiCurrentLanguage() == GESHER_UI_EN);
   SetEnvironmentVariableW(L"GESHER_LOCALES", L"fr-FR");
   assert(GesherUiCurrentLanguage() == GESHER_UI_EN);
+  SetEnvironmentVariableW(L"GESHER_LOCALES", NULL);
+  enum GesherUiLanguage default_lang = GesherUiCurrentLanguage();
+  assert(default_lang == GESHER_UI_HE || default_lang == GESHER_UI_EN);
   return 0;
 }

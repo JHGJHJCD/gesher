@@ -109,11 +109,29 @@ public static class Mui {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
   static extern bool GetUserPreferredUILanguages(uint flags, out uint count, char[] buf, ref uint size);
   public static string Languages() {
+    var list = new System.Collections.Generic.List<string>();
+    try {
+      using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\International\User Profile")) {
+        if (key != null) {
+          var langs = key.GetValue("Languages") as string[];
+          if (langs != null) {
+            foreach (var l in langs) {
+              if (!string.IsNullOrWhiteSpace(l) && !list.Contains(l)) list.Add(l);
+            }
+          }
+        }
+      }
+    } catch {}
     uint count, size = 0;
-    GetUserPreferredUILanguages(8, out count, null, ref size);
-    var buf = new char[size];
-    GetUserPreferredUILanguages(8, out count, buf, ref size);
-    return string.Join(",", new string(buf).Split(new[] { '\0' }, StringSplitOptions.RemoveEmptyEntries));
+    if (GetUserPreferredUILanguages(8, out count, null, ref size) && size > 1) {
+      var buf = new char[size];
+      if (GetUserPreferredUILanguages(8, out count, buf, ref size)) {
+        foreach (var l in new string(buf).Split(new[] { '\0' }, StringSplitOptions.RemoveEmptyEntries)) {
+          if (!string.IsNullOrWhiteSpace(l) && !list.Contains(l)) list.Add(l);
+        }
+      }
+    }
+    return list.Count > 0 ? string.Join(",", list) : "en-US";
   }
 }
 "@

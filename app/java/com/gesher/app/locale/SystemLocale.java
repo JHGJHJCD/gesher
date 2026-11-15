@@ -24,8 +24,8 @@ import java.util.Set;
  * Configuration, Gesher takes from the user's Windows settings:
  *
  * <ul>
- * <li>the locale list is Windows' preferred UI (display) languages, in order
- *     ({@code GetUserPreferredUILanguages});
+ * <li>the locale list is Windows' preferred languages (from user profile and UI display languages),
+ *     in order ({@code GetUserPreferredUILanguages});
  * <li>the first locale takes the user's regional format ({@code GetUserDefaultLocaleName})
  *     when it is the same language (an en-US display with en-GB formats is en-GB);
  * <li>the regional settings that differ from that locale's own defaults become Unicode

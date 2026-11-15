@@ -15,19 +15,42 @@ function Get-GesherUiLanguage([string] $Tags) {
 if (-not ('Gesher.UiLanguages' -as [type])) {
   Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 namespace Gesher {
   public static class UiLanguages {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetUserPreferredUILanguages(uint flags, out uint count, IntPtr buffer, ref uint size);
     public static string Read() {
-      uint count, size = 0;
-      if (!GetUserPreferredUILanguages(8, out count, IntPtr.Zero, ref size) || size < 2) return "en";
-      IntPtr buffer = Marshal.AllocHGlobal(checked((int)size * 2));
+      var list = new List<string>();
       try {
-        if (!GetUserPreferredUILanguages(8, out count, buffer, ref size)) return "en";
-        return Marshal.PtrToStringUni(buffer, (int)size).TrimEnd('\0').Replace('\0', ',');
-      } finally { Marshal.FreeHGlobal(buffer); }
+        using (var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\International\User Profile")) {
+          if (key != null) {
+            string[] langs = key.GetValue("Languages") as string[];
+            if (langs != null) {
+              foreach (var l in langs) {
+                if (!string.IsNullOrWhiteSpace(l) && !list.Contains(l)) list.Add(l);
+              }
+            }
+          }
+        }
+      } catch {}
+      uint count, size = 0;
+      if (GetUserPreferredUILanguages(8, out count, IntPtr.Zero, ref size) && size >= 2) {
+        IntPtr buffer = Marshal.AllocHGlobal(checked((int)size * 2));
+        try {
+          if (GetUserPreferredUILanguages(8, out count, buffer, ref size)) {
+            string ui = Marshal.PtrToStringUni(buffer, (int)size);
+            if (!string.IsNullOrEmpty(ui)) {
+              foreach (var l in ui.Split(new char[] {'\0'}, StringSplitOptions.RemoveEmptyEntries)) {
+                if (!string.IsNullOrWhiteSpace(l) && !list.Contains(l)) list.Add(l);
+              }
+            }
+          }
+        } finally { Marshal.FreeHGlobal(buffer); }
+      }
+      return list.Count > 0 ? string.Join(",", list) : "en";
     }
   }
 }
