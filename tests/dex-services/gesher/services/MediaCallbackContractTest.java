@@ -216,7 +216,6 @@ public final class MediaCallbackContractTest {
         check(source.closes == 1, "last receiver lease closes callback source once");
     }
     public static void main(String[] args) throws Exception {
-        System.loadLibrary("android_runtime");
         MediaTestBootstrap.initialize("media-callback-contract");
         extractor(false); extractor(true); retriever(); reentrantOperations(); player(); releaseRace(false); releaseRace(true);
         System.out.println("MediaCallbackContractTest all passed: " + checks + " checks");

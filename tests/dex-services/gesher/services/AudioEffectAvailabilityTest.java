@@ -19,7 +19,6 @@ public final class AudioEffectAvailabilityTest {
         throw new AssertionError(label);
     }
     public static void main(String[] args) throws Exception {
-        System.loadLibrary("android_runtime");
         MediaTestBootstrap.initialize("audio-effect-availability-contract");
         AudioEffect.Descriptor[] effects = AudioEffect.queryEffects();
         check(effects != null && effects.getClass() == AudioEffect.Descriptor[].class && effects.length == 0,
