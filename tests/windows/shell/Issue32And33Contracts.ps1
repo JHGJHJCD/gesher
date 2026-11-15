@@ -78,13 +78,14 @@ if ($env:OS -ne 'Windows_NT') {
 # two-minute timeout. That bound also covers a blocked dispatcher/Click handler.
 Assert-Dialog ([Threading.Thread]::CurrentThread.ApartmentState -eq 'STA') 'WPF checks run in STA'
 Write-Host 'WPF PHASE: loading assemblies'
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, UIAutomationProvider, UIAutomationTypes
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Xaml, UIAutomationProvider, UIAutomationTypes
 . ([scriptblock]::Create($script:DialogFunctions['Show-ModernConfirmDialog']))
 
 $references = @(
     [System.Windows.Window].Assembly.Location,
     [System.Windows.Media.Visual].Assembly.Location,
     [System.Windows.DependencyObject].Assembly.Location,
+    [System.Windows.Markup.IQueryAmbient].Assembly.Location,
     [System.Windows.Automation.Provider.IInvokeProvider].Assembly.Location,
     [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location
 )
