@@ -1,8 +1,22 @@
-# Bluetooth callback and value types
+# The Bluetooth module's API
 
-The adapter remains unavailable (`BluetoothManager.getAdapter()` and
-`BluetoothAdapter.getDefaultAdapter()` return null). Apps may create BLE
-callbacks before checking for an adapter; OsmAnd 5.4.9 does so during startup.
+Since the bluetooth track ([docs/bluetooth.md](../../../../docs/bluetooth.md), ADR 0084)
+these classes run over the host's radio (`com.gesher.server.WindowsBluetooth`): there is
+an adapter when Windows has a Bluetooth radio (or with `GESHER_BLUETOOTH_TEST=1`), and
+none otherwise (`BluetoothManager.getAdapter()` and `BluetoothAdapter.getDefaultAdapter()`
+return null, as before; apps may still create BLE callbacks before checking, as OsmAnd
+5.4.9 does during startup).
+
+Gesher's own: BluetoothManager, BluetoothAdapter, BluetoothDevice, BluetoothGatt,
+BluetoothSocket, BluetoothServerSocket, BluetoothA2dp, BluetoothHeadset (with
+BluetoothAudioProfile), BluetoothProfile, BluetoothGattServer and its callback (types
+only), BluetoothHost (permissions, adapter, what the process knows of devices),
+le/BluetoothLeScanner and le/BluetoothLeAdvertiser. Unmodified AOSP sources from the
+same tag (below): BluetoothClass, BluetoothGattService, BluetoothGattCharacteristic,
+BluetoothGattDescriptor, BluetoothGattIncludedService; BluetoothGattCallback with its
+flag annotation spelled as a string and the subrate callback's annotations removed.
+
+## Callback and value types
 
 `Attributable.java`, `BluetoothUuid.java`, and the six files under `le/` are
 unmodified AOSP sources from `packages/modules/Bluetooth`, tag
@@ -36,5 +50,6 @@ BluetoothValueContractTest passed 31 assertions in a separate Windows runtime
 with isolated ART data and no Binder connection. It covers settings defaults
 and validation, real advertisement parsing, compound and masked filter matches
 and mismatches, builder conflicts, and complete parcel consumption for seven
-value types. Adapter availability remains null before and after all tests.
-It does not test scanning, advertising, connections or any Bluetooth hardware.
+value types. Adapter availability remains null before and after all tests (the
+runners have no radio). Scanning, GATT, sockets and broadcasts are tested by
+BluetoothHostTest over the test radio (tests/windows/tracks/61-bluetooth.ps1).
