@@ -29,6 +29,9 @@ try {
   if ($hadTest) { $env:GESHER_BLUETOOTH_TEST = $savedTest } else { Remove-Item Env:GESHER_BLUETOOTH_TEST -ErrorAction SilentlyContinue }
 }
 
+# Every section's line, in the log (each Check also needs "all passed", which the test
+# prints only when every assertion of every section held).
+($btOut -split "`n" | Where-Object { $_ -match '^BluetoothHostTest' }) | ForEach-Object { Write-Host $_ }
 foreach ($c in @(
   @('system features: FEATURE_BLUETOOTH and FEATURE_BLUETOOTH_LE from the radio', 'BluetoothHostTest: features: bluetooth true, bluetooth_le true'),
   @('permissions: BLUETOOTH_CONNECT/BLUETOOTH_SCAN on API 31+, legacy BLUETOOTH below', 'BluetoothHostTest: permissions:'),
@@ -37,7 +40,10 @@ foreach ($c in @(
   @('A2DP and headset profile proxies list the connected headset', 'BluetoothHostTest: profiles:'),
   @('LE scan: filters, advertisement merged with its scan response, legacy startLeScan', 'BluetoothHostTest: LE scan:'),
   @('GATT client: connect, discovery, read, CCCD notifications, write and echo, MTU, disconnect', 'BluetoothHostTest: GATT:'),
+  @('GATT: included secondary services, read by UUID, PHY reported and declined, two clients of one device',
+    'an included secondary one, read 87 (by UUID too), notifications through the CCCD, write/echo, MTU 247, PHY, two clients'),
   @('RFCOMM: service UUID and channel sockets, available(), listener accept', 'BluetoothHostTest: RFCOMM:'),
+  @('RFCOMM: isEncrypted only for a secure socket, close() cancels a blocked connect', 'encrypted secure link, close() cancels a connect'),
   @('system broadcasts: radio off/on, ACL and A2DP state, discovery, ACTION_UUID', 'BluetoothHostTest: broadcasts:'),
   @('pairing through Windows: createBond BONDING>BONDED, removeBond BONDED>NONE, a failed pairing', 'BluetoothHostTest: pairing:')
 )) {

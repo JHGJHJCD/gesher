@@ -589,7 +589,7 @@ public final class BluetoothHostTest {
         client.close();
         accepted.close();
         server.close();
-        step("RFCOMM: vendor service echo, available(), refused service, createRfcommSocket(1), listener accept and exchange");
+        step("RFCOMM: vendor service echo, available(), encrypted secure link, close() cancels a connect, refused service, createRfcommSocket(1), listener accept and exchange");
     }
 
     private static List<String> actions(LinkedBlockingQueue<Intent> broadcasts, int count) throws Exception {
