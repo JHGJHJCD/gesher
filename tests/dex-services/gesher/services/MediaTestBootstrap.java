@@ -17,6 +17,8 @@ final class MediaTestBootstrap {
     static void initialize(String tag) throws Exception {
         // AudioEffect attribution, FileUtils' FD conversion and MediaPlayer
         // consult the process Application and services before entering JNI.
+        // Main owns android_runtime loading on the boot class path. Loading it
+        // first from this DEX would bind it to the test's PathClassLoader.
         String root = System.getenv("ANDROID_ROOT");
         Class.forName("com.gesher.app.Main")
                 .getMethod("bootstrap", String.class, String.class, String.class)
