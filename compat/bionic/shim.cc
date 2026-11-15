@@ -884,8 +884,7 @@ void* DlOpenImpl(const char* filename);
 void* BIONIC_SYSV DlOpen(const char* filename, int /*flags*/) {
   void* handle = DlOpenImpl(filename);
   if (TraceDl()) {
-    std::fprintf(stderr, "gesher dl: dlopen(\"%s\") = %s%s%s
-", filename ? filename : "(null)",
+    std::fprintf(stderr, "gesher dl: dlopen(\"%s\") = %s%s%s\n", filename ? filename : "(null)",
                  handle ? "ok" : "null", handle ? "" : ": ", handle ? "" : t_dlerror.c_str());
   }
   return handle;
@@ -949,8 +948,7 @@ void* BIONIC_SYSV DlSym(void* handle, const char* symbol) {
   if (p == nullptr) {
     t_dlerror = std::string("undefined symbol: ") + symbol;
     t_has_dlerror = true;
-    if (TraceDl()) std::fprintf(stderr, "gesher dl: dlsym(%p, \"%s\") = null
-", handle, symbol);
+    if (TraceDl()) std::fprintf(stderr, "gesher dl: dlsym(%p, \"%s\") = null\n", handle, symbol);
   }
   return p;
 }
