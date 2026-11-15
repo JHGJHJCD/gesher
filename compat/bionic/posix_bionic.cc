@@ -454,9 +454,7 @@ int BIONIC_SYSV Linkat(int olddir, const char* a, int newdir, const char* b, int
   return link(x.c_str(), y.c_str());
 }
 int BIONIC_SYSV Ftruncate(int fd, int64_t length) {
-  if (length < 0) return errno = kEINVAL, -1;
-  int rc = _chsize_s(fd, length);
-  return rc == 0 ? 0 : (errno = rc == EBADF ? kEBADF : kEINVAL, -1);
+  return gesher_ftruncate(fd, length);
 }
 int BIONIC_SYSV Truncate(const char* path, int64_t length) {
   int fd = open(path, O_WRONLY);

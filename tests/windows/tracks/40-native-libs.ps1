@@ -110,6 +110,18 @@ Check 'native libs: a UPX-packed .so unpacks itself with raw syscalls and runs i
 } @('unpacks its code at run time (UPX)', 'code unpacked at run time: yes',
     'raw_syscall: all passed', 'elf_load_test all passed')
 
+# A memfd whose size ends inside a page: what a shared mapping writes past EOF
+# in that last page is seen by the next mapping (as on Linux, where UPX 5
+# writes its return stub there), without growing the file; ftruncate to the
+# same size discards it.
+Check 'native libs: memfd final-page bytes survive remapping without extending the file' {
+  & "$Dir/elf_load_test.exe" (NoDrive "$Dir/memfd_tail_test.so")
+} @('memfd_tail: all passed', 'elf_load_test all passed')
+
+Check 'bionic shim: ftruncate rights, cursor and same-size final-page invalidation' {
+  & "$Dir/bionic_ftruncate_test.exe"
+} @('bionic_ftruncate_test all passed')
+
 # Step 4, the JNI path: dalvikvm runs gesher.JniTest (tests/native/java), whose
 # System.load of jni_test.so goes through ART's host libnativeloader path to
 # gesher-base's dlopen, the ELF loader and the JNI bridge

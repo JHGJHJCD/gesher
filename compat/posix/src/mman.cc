@@ -83,6 +83,11 @@
 
 namespace {
 
+// Loader copy bookkeeping needs to distinguish a failed plain MAP_FIXED that
+// already decommitted its old pages from a failure before replacement. The
+// result is consumed immediately after mmap on the same thread.
+thread_local bool g_mmap_replaced_private_pages = false;
+
 // The placeholder functions, looked up at run time (kernelbase.dll, Windows
 // 10 1803 and later).
 struct PlaceholderApi {
@@ -652,18 +657,26 @@ void* GroupAnonymous(State& s, void* start, size_t len, int prot, int flags) {
   return reinterpret_cast<void*>(result);
 }
 
-// The file's bytes from `offset` into [dest, dest + len) (zeros past its end),
-// through a temporary view (the descriptor's file position stays).
+// The file's mapped bytes from `offset` into [dest, dest + len), including
+// cached bytes beyond EOF in its final partial page. They are visible to a
+// later mmap without extending st_size or becoming readable by pread(EOF).
+// A native view supplies both file identity and cache lifetime; no fd-number
+// cache or write past the logical EOF is involved.
 bool CopyFromFile(State& s, HANDLE file, uint64_t file_size, uint64_t offset, uint8_t* dest,
                   size_t len) {
-  if (offset >= file_size) return true;
-  const size_t available = static_cast<size_t>(std::min<uint64_t>(len, file_size - offset));
+  const uint64_t mapped_size = (file_size + s.page_size - 1) / s.page_size * s.page_size;
+  if (offset >= mapped_size) return true;
+  const size_t available = static_cast<size_t>(std::min<uint64_t>(len, mapped_size - offset));
   const size_t padding = static_cast<size_t>(offset % s.granularity);
   const uint64_t view_offset = offset - padding;
+  // Explicit view lengths cannot exceed the logical section size. Zero maps
+  // through its end, including the physical last page, without growing it.
+  const size_t view_len = offset < file_size && available <= file_size - offset
+                             ? available + padding : 0;
   HANDLE mapping = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
   void* view = mapping == nullptr ? nullptr
       : MapViewOfFile(mapping, FILE_MAP_READ, static_cast<DWORD>(view_offset >> 32),
-                      static_cast<DWORD>(view_offset & 0xffffffffu), available + padding);
+                      static_cast<DWORD>(view_offset & 0xffffffffu), view_len);
   if (view == nullptr) {
     if (mapping != nullptr) CloseHandle(mapping);
     return false;
@@ -878,7 +891,13 @@ void* MapAnonymous(State& s, void* start, size_t len, int prot, int flags) {
       }
       // Holes were already decommitted by munmap. Retain them on recommit
       // failure; ordinary MAP_FIXED still discards the pages it replaces.
-      if (!no_replace) VirtualFree(start, len, MEM_DECOMMIT);
+      if (!no_replace) {
+        if (!VirtualFree(start, len, MEM_DECOMMIT)) {
+          errno = gesher::ErrnoFromWin32(GetLastError());
+          return MAP_FAILED;
+        }
+        g_mmap_replaced_private_pages = true;
+      }
       if ((AnonymousCommit(prot) & MEM_COMMIT) != 0 &&
           VirtualAlloc(start, len, MEM_COMMIT, protection) == nullptr) {
         errno = ENOMEM;
@@ -1269,7 +1288,11 @@ extern "C" {
 // executable file views): ART's JIT asks before taking its dual view.
 int gesher_mmap_placeholders(void) { return Placeholders().available() ? 1 : 0; }
 
+// Internal outcome of the most recent mmap, not a guest libc interface.
+int gesher_mmap_replaced_private_pages(void) { return g_mmap_replaced_private_pages ? 1 : 0; }
+
 void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
+  g_mmap_replaced_private_pages = false;
   State& s = state();
   const bool fixed = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
   const int type = flags & 0x0f;

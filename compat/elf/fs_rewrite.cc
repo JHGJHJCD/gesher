@@ -9,6 +9,7 @@
 #include <windows.h>
 
 #include <errno.h>
+#include <io.h>
 
 #include <algorithm>
 #include <atomic>
@@ -16,11 +17,15 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
 #include "tls.h"
 #include "x86_decode.h"
+
+// Internal POSIX mapper outcome, consumed immediately after a failed mmap.
+extern "C" int gesher_mmap_replaced_private_pages(void);
 
 namespace gesher::elf {
 
@@ -1470,52 +1475,167 @@ uintptr_t PageEnd(uintptr_t addr, size_t len) {
   return end < addr ? UINTPTR_MAX & ~(kPage - 1) : PageOf(end + kPage - 1);
 }
 
-// The copies CopyFileMapping made of shared mappings, written back to their
-// file (a duplicate of the descriptor they were mapped from) by msync and
-// before munmap. Under g_lazy_lock.
+// A native shared view owns the file object and its final partial page. In
+// particular, bytes written after EOF in that page belong to the mapping's
+// cache, not to the file's logical contents. Writing them with pwrite would
+// extend the file; omitting them would lose them on a subsequent mmap.
+struct SharedMapping {
+  HANDLE section = nullptr;
+  uint8_t* view = nullptr;
+  uint8_t* data = nullptr;
+  bool writable = false;
+  // A non-writable page was synchronized before losing write access (or has
+  // never been writable). Its backing is current, including with PROT_NONE.
+  std::vector<bool> readonly_clean;
+  ~SharedMapping() {
+    if (view != nullptr) UnmapViewOfFile(view);
+    if (section != nullptr) CloseHandle(section);
+  }
+};
+
+// The live page ranges of copied shared mappings. Split ranges share one
+// native backing view; descriptor reuse cannot change its identity. These
+// copies publish changes at msync/unmap/replacement; they do not provide
+// live coherence with another anonymous copy. Under g_lazy_lock.
 struct SharedCopy {
-  uintptr_t start;
-  size_t len;
-  int fd;
-  int64_t offset;
+  uintptr_t start = 0;
+  size_t len = 0;  // whole mapped pages, including the partial EOF page
+  size_t backing_offset = 0;
+  std::shared_ptr<SharedMapping> backing;
 };
 std::vector<SharedCopy>& SharedCopies() {
   static std::vector<SharedCopy> v;
   return v;
 }
 
-// Writes what [lo, hi) holds of each copy back to its file; with `forget`,
-// drops the copies [lo, hi) covers entirely.
-void WriteBackLocked(uintptr_t lo, uintptr_t hi, bool forget) {
-  auto& copies = SharedCopies();
-  for (auto it = copies.begin(); it != copies.end();) {
-    const uintptr_t a = std::max(lo, it->start), b = std::min(hi, it->start + it->len);
+bool OverlapsSharedCopyLocked(uintptr_t lo, uintptr_t hi) {
+  for (const SharedCopy& copy : SharedCopies()) {
+    if (copy.start < hi && lo < copy.start + copy.len) return true;
+  }
+  return false;
+}
+
+// Copy whole affected pages into the native view, including its EOF tail.
+// ReadProcessMemory reports inaccessible source pages instead of crashing
+// the host. No guest page protections are changed to perform writeback.
+bool WriteBackLocked(uintptr_t lo, uintptr_t hi) {
+  for (const SharedCopy& copy : SharedCopies()) {
+    const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, copy.start + copy.len);
+    if (a >= b || !copy.backing->writable) continue;
     for (uintptr_t at = a; at < b;) {
-      const ssize_t put = pwrite(it->fd, reinterpret_cast<const void*>(at),
-                                 std::min<size_t>(b - at, 1u << 30),
-                                 static_cast<off_t>(it->offset + (at - it->start)));
-      if (put <= 0) break;
-      at += static_cast<uintptr_t>(put);
+      const size_t offset = copy.backing_offset + (at - copy.start);
+      if (copy.backing->readonly_clean[offset / kPage]) { at += kPage; continue; }
+      uintptr_t end = at + kPage;
+      while (end < b && !copy.backing->readonly_clean[
+                                  (copy.backing_offset + end - copy.start) / kPage]) end += kPage;
+      uint8_t* target = copy.backing->data + offset;
+      SIZE_T copied = 0;
+      if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(at),
+                             target, end - at, &copied) || copied != end - at) {
+        errno = EFAULT;
+        return false;
+      }
+      if (!FlushViewOfFile(target, end - at)) {
+        errno = EIO;
+        return false;
+      }
+      at = end;
     }
-    if (forget && lo <= it->start && it->start + it->len <= hi) {
-      close(it->fd);
-      it = copies.erase(it);
-    } else {
-      ++it;
+  }
+  return true;
+}
+
+// Observe actual protection even after a partially applied mprotect failure.
+// Pages losing write access were synchronized first; writable pages can change
+// again after this call, so a successful msync alone never marks them clean.
+void SharedCopyAccessLocked(uintptr_t lo, uintptr_t hi) {
+  for (SharedCopy& copy : SharedCopies()) {
+    const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, copy.start + copy.len);
+    for (uintptr_t at = a; at < b; at += kPage) {
+      MEMORY_BASIC_INFORMATION info;
+      if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) == 0) continue;
+      const DWORD access = info.Protect & 0xff;
+      const bool writable = access == PAGE_READWRITE || access == PAGE_WRITECOPY ||
+                            access == PAGE_EXECUTE_READWRITE || access == PAGE_EXECUTE_WRITECOPY;
+      copy.backing->readonly_clean[(copy.backing_offset + at - copy.start) / kPage] = !writable;
     }
   }
 }
 
-// A shared file mapping that gesher-base cannot place with MAP_FIXED (a
-// file whose size ends in a partial page: UPX 5 ftruncates a memfd to its
-// unpacked code's size and maps it MAP_SHARED|MAP_FIXED over the library's
-// text): a private copy of the file's bytes there instead, written back to
-// the file by msync and munmap (UPX writes its code into the mapping, then
-// unmaps it and maps the memfd again, privately, to run it). With
-// g_lazy_lock held.
-void* CopyFileMapping(void* addr, size_t len, int prot, int flags, int fd, int64_t offset) {
+// Retire only pages that were successfully unmapped/replaced. In particular,
+// removing a prefix must not leave a later writeback reading its freed pages.
+void ForgetSharedCopiesLocked(uintptr_t lo, uintptr_t hi) {
+  auto& copies = SharedCopies();
+  for (size_t i = 0; i < copies.size();) {
+    SharedCopy& copy = copies[i];
+    const uintptr_t end = copy.start + copy.len;
+    const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, end);
+    if (a >= b) { ++i; continue; }
+    if (a == copy.start && b == end) {
+      copies.erase(copies.begin() + i);
+      continue;
+    }
+    if (a == copy.start) {
+      copy.backing_offset += b - copy.start;
+      copy.start = b;
+      copy.len = end - b;
+    } else if (b == end) {
+      copy.len = a - copy.start;
+    } else {
+      SharedCopy suffix = copy;
+      suffix.backing_offset += b - copy.start;
+      suffix.start = b;
+      suffix.len = end - b;
+      copy.len = a - copy.start;
+      copies.push_back(std::move(suffix));
+    }
+    ++i;
+  }
+}
+
+// A base mapping can fail after removing destination pages. Preserve records
+// for untouched pages, but never read a now-free/reserved/replaced page later.
+// Plain in-place anonymous replacement needs the mapper's explicit outcome:
+// its new allocation may have the same VirtualQuery identity as the old one.
+void ReconcileFailedMappingLocked(uintptr_t lo, uintptr_t hi, bool private_replaced) {
+  const int saved_errno = errno;
+  if (private_replaced) {
+    ForgetSharedCopiesLocked(lo, hi);
+  } else {
+    std::vector<std::pair<uintptr_t, uintptr_t>> retired;
+    for (const SharedCopy& copy : SharedCopies()) {
+      const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, copy.start + copy.len);
+      for (uintptr_t at = a; at < b;) {
+        MEMORY_BASIC_INFORMATION info;
+        if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) == 0) break;
+        const uintptr_t end = std::min(b,
+            reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize);
+        if (end <= at) break;
+        if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE) retired.emplace_back(at, end);
+        at = end;
+      }
+    }
+    for (const auto& range : retired) ForgetSharedCopiesLocked(range.first, range.second);
+  }
+  errno = saved_errno;
+}
+
+// A shared file view with a partial final page cannot replace a Windows
+// placeholder. Retain a native view elsewhere and copy its mapped pages at
+// the requested address, with writeback on synchronization or retirement.
+// Publish the returned record only after the old mapping's record is retired.
+void* CopyFileMapping(void* addr, size_t len, int prot, int flags, int fd, int64_t offset,
+                      SharedCopy* copy) {
   const int keep = dup(fd);
   if (keep < 0) return MAP_FAILED;
+  auto backing = std::make_shared<SharedMapping>();
+  HANDLE file = reinterpret_cast<HANDLE>(_get_osfhandle(keep));
+  LARGE_INTEGER file_length;
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  const size_t span = (len + kPage - 1) & ~(kPage - 1);
+  const uint64_t begin = static_cast<uint64_t>(offset);
+  const size_t padding = static_cast<size_t>(begin % info.dwAllocationGranularity);
   auto fail = [&](void* mapped) {
     const int saved_errno = errno;
     if (mapped != nullptr) munmap(mapped, len);
@@ -1523,19 +1643,48 @@ void* CopyFileMapping(void* addr, size_t len, int prot, int flags, int fd, int64
     errno = saved_errno;
     return MAP_FAILED;
   };
+  if (!GetFileSizeEx(file, &file_length)) {
+    errno = EBADF;
+    return fail(nullptr);
+  }
+  if (file_length.QuadPart <= 0) { errno = EINVAL; return fail(nullptr); }
+  const uint64_t file_size = static_cast<uint64_t>(file_length.QuadPart);
+  // Whole pages past EOF would need SIGBUS behavior, not anonymous zeros.
+  if (begin >= file_size || span > ((file_size - begin + kPage - 1) & ~(kPage - 1)) ||
+      span > SIZE_MAX - padding) {
+    errno = EINVAL;
+    return fail(nullptr);
+  }
+  backing->section = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+  backing->writable = backing->section != nullptr;
+  if (backing->section == nullptr && (prot & PROT_WRITE) == 0) {
+    backing->section = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+  }
+  if (backing->section == nullptr) { errno = EACCES; return fail(nullptr); }
+  const uint64_t view_offset = begin - padding;
+  // A zero view length includes the physical partial page without extending
+  // the section or the file's EOF. Never request a larger section maximum.
+  const size_t view_len = span <= file_size - begin ? span + padding : 0;
+  backing->view = static_cast<uint8_t*>(MapViewOfFile(backing->section,
+      backing->writable ? FILE_MAP_WRITE : FILE_MAP_READ,
+      static_cast<DWORD>(view_offset >> 32), static_cast<DWORD>(view_offset), view_len));
+  if (backing->view == nullptr) { errno = ENOMEM; return fail(nullptr); }
+  backing->data = backing->view + padding;
+  backing->readonly_clean.assign(span / kPage, (prot & PROT_WRITE) == 0);
   void* p = mmap(addr, len, PROT_READ | PROT_WRITE,
                  (flags & MAP_FIXED) | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (p == MAP_FAILED) return fail(nullptr);
-  auto* out = static_cast<uint8_t*>(p);
-  for (size_t done = 0; done < len;) {
-    const size_t want = std::min<size_t>(len - done, 1u << 30);
-    const ssize_t got = pread(fd, out + done, want, static_cast<off_t>(offset + done));
-    if (got < 0) return fail(p);
-    if (got == 0) break;  // past the end of the file: zeros, as Linux reads them
-    done += static_cast<size_t>(got);
+  if (p == MAP_FAILED) {
+    ReconcileFailedMappingLocked(reinterpret_cast<uintptr_t>(addr),
+        PageEnd(reinterpret_cast<uintptr_t>(addr), len), gesher_mmap_replaced_private_pages() != 0);
+    return fail(nullptr);
   }
+  // The previous pages are already gone, even if a later protection step
+  // fails. Do not retain their records for a future read from freed memory.
+  ForgetSharedCopiesLocked(reinterpret_cast<uintptr_t>(p), PageEnd(reinterpret_cast<uintptr_t>(p), len));
+  std::memcpy(p, backing->data, span);
   if (prot != (PROT_READ | PROT_WRITE) && mprotect(p, len, prot) != 0) return fail(p);
-  SharedCopies().push_back({reinterpret_cast<uintptr_t>(p), len, keep, offset});
+  *copy = {reinterpret_cast<uintptr_t>(p), span, 0, std::move(backing)};
+  close(keep);  // The retained native section/view now owns the file reference.
   return p;
 }
 
@@ -1557,21 +1706,32 @@ LazyObject* NewCodeObjectLocked(uintptr_t lo, uintptr_t hi) {
 int ProtectLoadedMemory(void* addr, size_t len, int prot, bool raw_syscall) {
   const auto start = reinterpret_cast<uintptr_t>(addr);
   if (len == 0 || (start & (kPage - 1)) != 0) return mprotect(addr, len, prot);
+  if (len > UINTPTR_MAX - start || start + len > UINTPTR_MAX - (kPage - 1)) {
+    errno = EINVAL;
+    return -1;
+  }
   const uintptr_t end = PageEnd(start, len);
   AcquireSRWLockExclusive(&g_lazy_lock);
   if (!OverlapsObjectLocked(start, end)) {
-    if (!raw_syscall || (prot & PROT_EXEC) == 0) {
+    if ((!raw_syscall || (prot & PROT_EXEC) == 0) && !OverlapsSharedCopyLocked(start, end)) {
       ReleaseSRWLockExclusive(&g_lazy_lock);
       return mprotect(addr, len, prot);
     }
-    NewCodeObjectLocked(start, end);
+    if (raw_syscall && (prot & PROT_EXEC) != 0) NewCodeObjectLocked(start, end);
+  }
+  if ((prot & PROT_WRITE) == 0 && !SharedCopies().empty() && !WriteBackLocked(start, end)) {
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    return -1;
   }
   int saved_errno = 0;
   bool ok = ForEachObjectRun(start, end,
       [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
         const int host = (prot & PROT_EXEC) ? PendingProt(prot) : prot;
-        if (mprotect(reinterpret_cast<void*>(lo), hi - lo, host) != 0) {
-          saved_errno = errno;
+        const int result = mprotect(reinterpret_cast<void*>(lo), hi - lo, host);
+        const int error = errno;
+        SharedCopyAccessLocked(lo, hi);
+        if (result != 0) {
+          saved_errno = error;
           return false;
         }
         if (prot & PROT_EXEC) DeferPagesLocked(o, lo, hi, prot);
@@ -1579,8 +1739,11 @@ int ProtectLoadedMemory(void* addr, size_t len, int prot, bool raw_syscall) {
         return true;
       },
       [&](uintptr_t lo, uintptr_t hi) {
-        if (mprotect(reinterpret_cast<void*>(lo), hi - lo, prot) == 0) return true;
-        saved_errno = errno;
+        const int result = mprotect(reinterpret_cast<void*>(lo), hi - lo, prot);
+        const int error = errno;
+        SharedCopyAccessLocked(lo, hi);
+        if (result == 0) return true;
+        saved_errno = error;
         return false;
       });
   ReleaseSRWLockExclusive(&g_lazy_lock);
@@ -1592,25 +1755,49 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
                       bool raw_syscall) {
   const auto hint = reinterpret_cast<uintptr_t>(addr);
   const bool fixed = (flags & MAP_FIXED) != 0;
+  const bool enforced = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
+  const bool replace = fixed && (flags & MAP_FIXED_NOREPLACE) == 0;
   const bool exec = (prot & PROT_EXEC) != 0;
+  const int type = flags & 0x0f;
+  // Delegate these basic invalid requests before synchronizing a copy. The
+  // base layer still decides access rights and allocation-time failures.
+  if (len == 0 || len > SIZE_MAX - (kPage - 1) ||
+      (enforced && ((hint & (kPage - 1)) != 0 ||
+                  ((len + kPage - 1) & ~(kPage - 1)) > UINTPTR_MAX - hint)) ||
+      offset < 0 || (static_cast<uint64_t>(offset) & (kPage - 1)) != 0 ||
+      (type != MAP_SHARED && type != MAP_PRIVATE && type != MAP_SHARED_VALIDATE) ||
+      (type == MAP_SHARED_VALIDATE && (flags & MAP_ANONYMOUS) != 0) ||
+      ((flags & MAP_ANONYMOUS) == 0 && (fd < 0 || _get_osfhandle(fd) == -1))) {
+    return mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
+  }
   AcquireSRWLockExclusive(&g_lazy_lock);
   // A copy MAP_FIXED replaces: its writes reach the file first.
-  if (fixed && len != 0 && !SharedCopies().empty()) WriteBackLocked(hint, hint + len, true);
+  if (replace && !SharedCopies().empty() && !WriteBackLocked(hint, PageEnd(hint, len))) {
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    return MAP_FAILED;
+  }
   const bool into_object = fixed && len != 0 && OverlapsObjectLocked(hint, PageEnd(hint, len));
-  if (!into_object && !(raw_syscall && exec && len != 0)) {
+  if (!into_object && !(raw_syscall && exec && len != 0) &&
+      !(replace && OverlapsSharedCopyLocked(hint, PageEnd(hint, len)))) {
     ReleaseSRWLockExclusive(&g_lazy_lock);
     return mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
   }
   // Mapped as asked (a file view keeps its right to execute), then code
   // waits non-executable until it runs.
+  SharedCopy copied;
   void* p = mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
-  if (p == MAP_FAILED && errno == EINVAL && fixed && (flags & MAP_ANONYMOUS) == 0 &&
+  if (p == MAP_FAILED && replace) {
+    ReconcileFailedMappingLocked(hint, PageEnd(hint, len), gesher_mmap_replaced_private_pages() != 0);
+  }
+  if (p == MAP_FAILED && errno == EINVAL && replace && (flags & MAP_ANONYMOUS) == 0 &&
       (flags & (MAP_SHARED | MAP_PRIVATE)) != MAP_PRIVATE) {
-    p = CopyFileMapping(addr, len, prot, flags, fd, offset);
+    p = CopyFileMapping(addr, len, prot, flags, fd, offset, &copied);
   }
   if (p != MAP_FAILED) {
     const auto start = reinterpret_cast<uintptr_t>(p);
     const uintptr_t end = PageEnd(start, len);
+    if (replace) ForgetSharedCopiesLocked(start, end);
+    if (copied.backing) SharedCopies().push_back(std::move(copied));
     if (!OverlapsObjectLocked(start, end)) NewCodeObjectLocked(start, end);
     ForEachObjectRun(start, end,
         [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
@@ -1630,22 +1817,35 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
 
 int SyncLoadedMemory(void* addr, size_t len, int flags) {
   const auto start = reinterpret_cast<uintptr_t>(addr);
+  if (len > UINTPTR_MAX - start || start + len > UINTPTR_MAX - (kPage - 1)) {
+    errno = EINVAL;
+    return -1;
+  }
+  // Invalid flags, alignment or unmapped pages must not publish copy changes.
+  if (msync(addr, len, flags) != 0) return -1;
   AcquireSRWLockExclusive(&g_lazy_lock);
-  if (!SharedCopies().empty() && len != 0) WriteBackLocked(start, start + len, false);
+  const bool ok = len == 0 || SharedCopies().empty() || WriteBackLocked(start, PageEnd(start, len));
   ReleaseSRWLockExclusive(&g_lazy_lock);
-  return msync(addr, len, flags);
+  return ok ? 0 : -1;
 }
 
 int UnmapLoadedMemory(void* addr, size_t len) {
   const auto start = reinterpret_cast<uintptr_t>(addr);
+  if (len == 0 || (start & (kPage - 1)) != 0) return munmap(addr, len);
+  if (len > UINTPTR_MAX - start || start + len > UINTPTR_MAX - (kPage - 1)) {
+    errno = EINVAL;
+    return -1;
+  }
+  const uintptr_t end = PageEnd(start, len);
   AcquireSRWLockExclusive(&g_lazy_lock);
-  if (!SharedCopies().empty() && len != 0) WriteBackLocked(start, start + len, true);
-  ReleaseSRWLockExclusive(&g_lazy_lock);
+  if (!SharedCopies().empty() && !WriteBackLocked(start, end)) {
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    return -1;
+  }
   const int r = munmap(addr, len);
-  if (r == 0 && len != 0 && (start & (kPage - 1)) == 0) {
-    const int saved_errno = errno;
-    AcquireSRWLockExclusive(&g_lazy_lock);
-    const uintptr_t end = PageEnd(start, len);
+  const int saved_errno = errno;
+  if (r == 0) {
+    ForgetSharedCopiesLocked(start, end);
     if (OverlapsObjectLocked(start, end)) {
       ForEachObjectRun(start, end,
           [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
@@ -1661,9 +1861,9 @@ int UnmapLoadedMemory(void* addr, size_t len) {
                                    }),
                     objects.end());
     }
-    ReleaseSRWLockExclusive(&g_lazy_lock);
-    errno = saved_errno;
   }
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  errno = saved_errno;
   return r;
 }
 

@@ -173,6 +173,11 @@ add_executable(elf_load_test tests/native/elf_load_test.cc)
 target_compile_options(elf_load_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(elf_load_test PRIVATE gesher_bionic gesher_elf)
 
+# Actual Bionic truncate exports, access rights and shared cursor contracts.
+add_executable(bionic_ftruncate_test tests/native/bionic_ftruncate_test.cc)
+target_compile_options(bionic_ftruncate_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(bionic_ftruncate_test PRIVATE gesher_bionic gesher_elf)
+
 # Raw system calls and code made at run time (ADR 0084), on hand-assembled
 # code through the loader's rewriter; no NDK library needed.
 add_executable(elf_deferred_code_test tests/native/elf_deferred_code_test.cc)

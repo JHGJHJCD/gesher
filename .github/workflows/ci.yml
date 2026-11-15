@@ -112,6 +112,7 @@ jobs:
           python3 tools/test_file_allocation_contracts.py --sanitize
           python3 tools/test_positioned_io_contracts.py --sanitize
           python3 tools/test_memfd_contracts.py --sanitize
+          python3 tools/test_memfd_tail_contracts.py
           python3 tools/test_retriever_frame_contracts.py --sanitize
           python3 tools/test_utc_time_contracts.py --sanitize
 
