@@ -18,8 +18,9 @@ public final class AudioEffectAvailabilityTest {
         catch (UnsupportedOperationException expected) { checks++; return; }
         throw new AssertionError(label);
     }
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         System.loadLibrary("android_runtime");
+        MediaTestBootstrap.initialize("audio-effect-availability-contract");
         AudioEffect.Descriptor[] effects = AudioEffect.queryEffects();
         check(effects != null && effects.getClass() == AudioEffect.Descriptor[].class && effects.length == 0,
                 "unavailable effects enumerate an empty typed array");
@@ -36,5 +37,7 @@ public final class AudioEffectAvailabilityTest {
         }
         System.gc(); System.runFinalization();
         System.out.println("AudioEffectAvailabilityTest all passed: " + checks + " checks");
+        // In-process services own workers; this isolated fixture has no event loop.
+        System.exit(0);
     }
 }

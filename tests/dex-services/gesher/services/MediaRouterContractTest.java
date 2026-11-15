@@ -3,10 +3,12 @@ package gesher.services;
 
 import android.app.ActivityThread;
 import android.app.Application;
+import android.app.LoadedApk;
 import android.content.Context;
 import android.content.pm.IPackageManager;
 import android.content.pm.SystemFeaturesCache;
 import android.content.res.AssetManager;
+import android.content.res.CompatibilityInfo;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.WifiDisplayStatus;
 import android.media.AudioManager;
@@ -62,7 +64,24 @@ public final class MediaRouterContractTest {
         ActivityThread thread = constructor.newInstance();
         field(ActivityThread.class, "sCurrentActivityThread").set(null, thread);
         Context context = thread.getSystemContext();
-        if (packageName != null) context = context.createPackageContext(packageName, 0);
+        if (packageName != null) {
+            LoadedApk packageInfo = thread.getPackageInfo(packageName,
+                    CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO, 0);
+            check(packageInfo != null, "fixture package resolves through PackageManager");
+            // createPackageContext retains its parent's Binder/AppOps identity.
+            // Use the same app-context factory as ActivityThread application binding,
+            // so an ordinary client never registers receivers as package "android".
+            Method createAppContext = Class.forName("android.app.ContextImpl").getDeclaredMethod(
+                    "createAppContext", ActivityThread.class, LoadedApk.class);
+            createAppContext.setAccessible(true);
+            context = (Context) createAppContext.invoke(null, thread, packageInfo);
+            check(packageName.equals(context.getPackageName())
+                            && packageName.equals(context.getBasePackageName())
+                            && packageName.equals(context.getOpPackageName()),
+                    "application context uses its own package for Binder and AppOps");
+            check(context.getApplicationInfo().uid == Process.myUid(),
+                    "application context belongs to the ordinary client UID");
+        }
         Application application = new Application();
         Method attach = Application.class.getDeclaredMethod("attach", Context.class);
         attach.setAccessible(true); attach.invoke(application, context);
