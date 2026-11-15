@@ -129,7 +129,12 @@ static inline const wchar_t* GesherUiText(enum GesherUiLanguage lang, const char
   if (strcmp(key, "cp_drag_drop_hint") == 0) return lang == GESHER_UI_HE ? L"\u05d2\u05e8\u05d5\u05e8 \u05d5\u05e9\u05d7\u05e8\u05e8 \u05e7\u05d5\u05d1\u05e6\u05d9 APK \u05dc\u05db\u05d0\u05df \u05dc\u05d4\u05ea\u05e7\u05e0\u05d4 \u05de\u05d4\u05d9\u05e8\u05d4" : L"Drag and drop APK files here to install";
   if (strcmp(key, "cp_btn_launch") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05e4\u05e2\u05dc" : L"Launch";
   if (strcmp(key, "cp_btn_uninstall") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05e1\u05e8" : L"Uninstall";
+  if (strcmp(key, "cp_uninstall_title") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05e1\u05e8\u05ea \u05d9\u05d9\u05e9\u05d5\u05dd" : L"Uninstall Application";
   if (strcmp(key, "cp_uninstall_confirm") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05d0\u05dd \u05dc\u05d4\u05e1\u05d9\u05e8 \u05d0\u05ea \u05d4\u05d9\u05d9\u05e9\u05d5\u05dd {0}?" : L"Are you sure you want to uninstall {0}?";
+  if (strcmp(key, "cp_uninstall_detail") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05d9\u05d9\u05e9\u05d5\u05dd \u05d5\u05db\u05dc \u05d4\u05e0\u05ea\u05d5\u05e0\u05d9\u05dd \u05d4\u05de\u05e7\u05d5\u05de\u05d9\u05d9\u05dd \u05e9\u05dc\u05d5 \u05d9\u05d5\u05e1\u05e8\u05d5 \u05de\u05d2\u05e9\u05e8." : L"This application and its local data will be removed from Gesher.";
+  if (strcmp(key, "cp_uninstall_failed") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05e1\u05e8\u05ea {0} \u05e0\u05db\u05e9\u05dc\u05d4." : L"Failed to uninstall {0}.";
+  if (strcmp(key, "cp_install_failed") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05ea\u05e7\u05e0\u05ea {0} \u05e0\u05db\u05e9\u05dc\u05d4." : L"Failed to install {0}.";
+  if (strcmp(key, "cp_dialog_ok") == 0) return lang == GESHER_UI_HE ? L"\u05d0\u05d9\u05e9\u05d5\u05e8" : L"OK";
   if (strcmp(key, "cp_status_ready") == 0) return lang == GESHER_UI_HE ? L"\u05de\u05d5\u05db\u05df" : L"Ready";
   if (strcmp(key, "cp_status_working") == 0) return lang == GESHER_UI_HE ? L"\u05de\u05e2\u05d1\u05d3, \u05e0\u05d0 \u05dc\u05d4\u05de\u05ea\u05d9\u05df\u2026" : L"Working, please wait\u2026";
   if (strcmp(key, "cp_staging") == 0) return lang == GESHER_UI_HE ? L"\u05de\u05d2\u05d3\u05d9\u05e8 \u05e9\u05d9\u05e8\u05d5\u05ea\u05d9\u05dd\u2026" : L"Configuring services\u2026";

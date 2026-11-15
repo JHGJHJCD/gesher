@@ -87,6 +87,7 @@ public final class ApkPackage {
     private boolean mSystemAddon;
     private boolean mSigningIdentityChecked;
     private Signature[] mVerifiedSignatures;
+    private int mVerifiedSignatureSchemeVersion;
     private com.android.apksig.SigningCertificateLineage mVerifiedLineage;
 
     private ApkPackage(String apkPath, ParsedPackage parsed) throws IOException {
@@ -214,7 +215,15 @@ public final class ApkPackage {
         if (signing != null) {
             pkg.setSigningDetails(signing);
         }
-        return new ApkPackage(apkPath, pkg);
+        ApkPackage appPkg = new ApkPackage(apkPath, pkg);
+        if (pkg.getSigningDetails() == null || pkg.getSigningDetails() == SigningDetails.UNKNOWN) {
+            Signature[] verified = appPkg.verifiedSignatures();
+            if (verified != null) {
+                pkg.setSigningDetails(new SigningDetails(verified,
+                        appPkg.mVerifiedSignatureSchemeVersion));
+            }
+        }
+        return appPkg;
     }
 
     /**
@@ -325,8 +334,12 @@ public final class ApkPackage {
             // above cannot supply its real package signature. Never substitute it.
             if (parsed.getSigningDetails() == null
                     || parsed.getSigningDetails() == SigningDetails.UNKNOWN) {
-                parsed.setSigningDetails(new SigningDetails(verified,
-                        SigningDetails.SignatureSchemeVersion.JAR, null, null));
+                try {
+                    parsed.setSigningDetails(new SigningDetails(verified,
+                            mVerifiedSignatureSchemeVersion));
+                } catch (java.security.cert.CertificateException failure) {
+                    throw new SecurityException("Invalid verified signer certificate", failure);
+                }
             }
         }
         mSystemAddon = enabled;
@@ -341,6 +354,7 @@ public final class ApkPackage {
             if (identity != null) {
                 mVerifiedSignatures = identity.signatures;
                 mVerifiedLineage = identity.lineage;
+                mVerifiedSignatureSchemeVersion = identity.signatureSchemeVersion;
             }
         }
         return mVerifiedSignatures == null ? null : mVerifiedSignatures.clone();
@@ -354,17 +368,18 @@ public final class ApkPackage {
     private static final class VerifiedIdentity {
         final Signature[] signatures;
         final com.android.apksig.SigningCertificateLineage lineage;
-        VerifiedIdentity(Signature[] signatures, com.android.apksig.SigningCertificateLineage lineage) {
+        final int signatureSchemeVersion;
+        VerifiedIdentity(Signature[] signatures, com.android.apksig.SigningCertificateLineage lineage,
+                int signatureSchemeVersion) {
             this.signatures = signatures;
             this.lineage = lineage;
+            this.signatureSchemeVersion = signatureSchemeVersion;
         }
     }
 
     private static VerifiedIdentity verifyIdentity(String path) {
         try {
-            com.android.apksig.ApkVerifier.Result result = new com.android.apksig.ApkVerifier
-                    .Builder(new File(path)).setMinCheckedPlatformVersion(36)
-                    .setMaxCheckedPlatformVersion(36).build().verify();
+            com.android.apksig.ApkVerifier.Result result = ApkSigningVerifier.verify(new File(path));
             if (result.isVerified() && !result.getSignerCertificates().isEmpty()) {
                 Signature[] signatures = new Signature[result.getSignerCertificates().size()];
                 for (int i = 0; i < signatures.length; i++) {
@@ -373,7 +388,12 @@ public final class ApkPackage {
                 Arrays.sort(signatures, java.util.Comparator.comparing(Signature::toCharsString));
                 // Only lineage returned by the successful full APK verifier is trusted.
                 // The compatibility parser's unsafe certificate/proof collection is not.
-                return new VerifiedIdentity(signatures, result.getSigningCertificateLineage());
+                int scheme = result.isVerifiedUsingV31Scheme() || result.isVerifiedUsingV3Scheme()
+                        ? SigningDetails.SignatureSchemeVersion.SIGNING_BLOCK_V3
+                        : result.isVerifiedUsingV2Scheme()
+                                ? SigningDetails.SignatureSchemeVersion.SIGNING_BLOCK_V2
+                                : SigningDetails.SignatureSchemeVersion.JAR;
+                return new VerifiedIdentity(signatures, result.getSigningCertificateLineage(), scheme);
             }
         } catch (Exception | LinkageError failure) {
             SystemServer.log("APK signing identity verification failed: "
