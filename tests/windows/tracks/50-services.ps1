@@ -98,6 +98,58 @@ function CheckTimed([string] $Name, [string] $Exe, [string[]] $Arguments, [strin
   }
 }
 
+# Starting a process does not make its Binder endpoint ready. Use the same
+# protocol handshake as the packaged launcher before servicemanager opens it,
+# then wait for that manager to own the context before any framework client.
+function Start-ReadyServiceManager([Diagnostics.Process] $Broker, [string] $Device,
+    [string] $ManagerLogBase, [string] $BrokerLog) {
+  $manager = $null
+  try {
+    if ($Broker.HasExited) { throw "binderd for $Device exited before readiness: $($Broker.ExitCode)" }
+    $readyVm = @("-Xbootclasspath:$bcpApp", "-Ximage:$(NoDrive "$root/system")/framework/boot.art",
+      '-Xint', '-Xusejit:false')
+    $readyOut = RunTimed "$Dir/dalvikvm.exe" ($readyVm + 'com.gesher.server.RuntimeCommands',
+      'wait-binder', $Device, [string]$Broker.Id, '15000') 15
+    $readyCode = $LASTEXITCODE
+    if ($readyCode -ne 0 -or -not $readyOut.Contains("binder endpoint accepted a protocol connection: $Device")) {
+      throw "binderd for $Device did not become ready (exit $readyCode): $readyOut"
+    }
+    if ($Broker.HasExited) { throw "binderd for $Device exited after readiness: $($Broker.ExitCode)" }
+    $manager = Start-Process "$Dir/servicemanager.exe" -PassThru -NoNewWindow -ErrorAction Stop `
+      -RedirectStandardOutput "$ManagerLogBase.out" -RedirectStandardError "$ManagerLogBase.log"
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    while ($timer.ElapsedMilliseconds -lt 15000) {
+      if ($Broker.HasExited) { throw "binderd for $Device exited while waiting for servicemanager: $($Broker.ExitCode)" }
+      if ($manager.HasExited) { throw "servicemanager for $Device exited before readiness: $($manager.ExitCode)" }
+      $managerLog = if (Test-Path -LiteralPath "$ManagerLogBase.log") {
+        (Get-Content -LiteralPath "$ManagerLogBase.log" -Raw -ErrorAction Stop) + ''
+      } else { '' }
+      if ($managerLog.Contains('servicemanager: ready on /dev/binder') -and
+          $timer.ElapsedMilliseconds -lt 15000 -and -not $Broker.HasExited -and -not $manager.HasExited) {
+        return $manager
+      }
+      Start-Sleep -Milliseconds 100
+    }
+    throw "servicemanager for $Device did not become ready within 15 s"
+  } catch {
+    $startupFailure = $_
+    foreach ($owned in $manager, $Broker) {
+      if ($null -eq $owned) { continue }
+      try {
+        if (-not $owned.HasExited) { $owned.Kill($true) }
+        if (-not $owned.WaitForExit(5000)) { Write-Host "Owned startup process $($owned.Id) did not stop within five seconds" }
+      } catch { Write-Host "Owned startup process cleanup failed: $_" }
+      finally { $owned.Dispose() }
+    }
+    foreach ($log in $BrokerLog, "$ManagerLogBase.log") {
+      Write-Host "--- $log"
+      Get-Content -LiteralPath $log -ErrorAction SilentlyContinue | Select-Object -Last 80 | Out-Host
+    }
+    if ($env:GESHER_BINDER -eq $Device) { Remove-Item Env:GESHER_BINDER -ErrorAction SilentlyContinue }
+    throw $startupFailure
+  }
+}
+
 # The driver's ABI across processes: binderd, a context manager and a client
 # with nested calls, objects passed both ways, and a death notification.
 CheckTimed 'binder: /dev/binder across processes (binderd, raw ioctls)' "$Dir/binder_probe.exe" @() @(
@@ -120,8 +172,7 @@ $env:GESHER_BINDER_TRACE = '1'
 $binderd = Start-Process "$Dir/binderd.exe" -ArgumentList $device -PassThru -NoNewWindow `
   -RedirectStandardOutput "$logs/binderd.out" -RedirectStandardError "$logs/binderd.log"
 Remove-Item Env:GESHER_BINDER_TRACE
-$servicemanager = Start-Process "$Dir/servicemanager.exe" -PassThru -NoNewWindow `
-  -RedirectStandardOutput "$logs/servicemanager.out" -RedirectStandardError "$logs/servicemanager.log"
+$servicemanager = Start-ReadyServiceManager $binderd $device "$logs/servicemanager" "$logs/binderd.log"
 $bcpServices = (('core-oj', 'core-libart', 'core-icu4j', 'framework') | ForEach-Object { NoDrive "$Dir/$_.jar" }) -join ':'
 $dvm = @("-Xbootclasspath:$bcpServices", "-Ximage:$(NoDrive "$root/system")/framework/boot.art",
   '-Xint', '-Xusejit:false', '-cp', (NoDrive "$Dir/services-tests.dex"))
@@ -161,7 +212,7 @@ CheckTimed 'services: gesher-app parses lifecycle.apk with PackageParser2 (singl
   "-Xbootclasspath:$bcpApp", "-Ximage:$(NoDrive "$root/system")/framework/boot.art",
   '-Xint', '-Xusejit:false', 'com.gesher.app.Main', (NoDrive "$Dir/lifecycle.apk")) @(
   'gesher-app: com.gesher.lifecycle parsed by PackageParser2: 1 activities',
-    'gesher-app: stand-in services in this process: account, activity, activity_task, alarm, appops, appwidget, audio, batteryproperties, batterystats, blob_store, clipboard, connectivity, content, crossprofileapps, device_identifiers, device_policy, deviceidle, display, domain_verification, dropbox, grammatical_inflection, input, input_method, iphonesubinfo, isub, jobscheduler, locale, location, media_session, mount, notification, package, permissionmgr, phone, power, restrictions, rollback, search, sensitive_content_protection_service, shortcut, telephony.registry, thermalservice, trust, uimode, uri_grants, usagestats, user, vibrator_manager, window',
+    'gesher-app: stand-in services in this process: account, activity, activity_task, alarm, appops, appwidget, audio, batteryproperties, batterystats, blob_store, clipboard, connectivity, content, crossprofileapps, device_identifiers, device_policy, deviceidle, display, domain_verification, dropbox, grammatical_inflection, input, input_method, iphonesubinfo, isub, jobscheduler, locale, location, media_router, media_session, mount, notification, package, permissionmgr, phone, power, restrictions, rollback, search, sensitive_content_protection_service, shortcut, telephony.registry, textservices, thermalservice, trust, uimode, uri_grants, usagestats, user, vibrator_manager, window',
   'gesher-app: com.gesher.lifecycle.LifecycleActivity onResume',
   'gesher-app: done') 300
 
@@ -198,8 +249,7 @@ $device = "apps-$PID"
 $env:GESHER_BINDER = $device
 $binderd = Start-Process "$Dir/binderd.exe" -ArgumentList $device -PassThru -NoNewWindow `
   -RedirectStandardOutput "$logs/apps-binderd.out" -RedirectStandardError "$logs/apps-binderd.log"
-$servicemanager = Start-Process "$Dir/servicemanager.exe" -PassThru -NoNewWindow `
-  -RedirectStandardOutput "$logs/apps-servicemanager.out" -RedirectStandardError "$logs/apps-servicemanager.log"
+$servicemanager = Start-ReadyServiceManager $binderd $device "$logs/apps-servicemanager" "$logs/apps-binderd.log"
 $dvmApp = @("-Xbootclasspath:$bcpApp", "-Ximage:$(NoDrive "$root/system")/framework/boot.art",
   '-Xint', '-Xusejit:false')
 $server = Start-Process "$Dir/dalvikvm.exe" -PassThru -NoNewWindow `
@@ -382,7 +432,7 @@ Start-Sleep -Milliseconds 500
 $serverOut = (Get-Content "$logs/system_server.out" -Raw -ErrorAction SilentlyContinue) + ''
 $missing = @(
   'system_server: com.gesher.lifecycle parsed by PackageParser2: 1 activities',
-  'system_server: registered uri_grants, package, activity, activity_task, window, display, user, restrictions, blob_store, rollback, input, audio, media_session, content, input_method, notification, uimode, mount',
+  'system_server: registered uri_grants, package, activity, activity_task, window, display, user, restrictions, blob_store, rollback, input, audio, media_session, media_router, content, input_method, textservices, notification, uimode, mount',
   'system_server: finishing com.gesher.lifecycle/com.gesher.lifecycle.LifecycleActivity (app-request)'
 ) | Where-Object { -not $serverOut.Contains($_) }
 if (-not $missing) {
