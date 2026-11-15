@@ -101,7 +101,60 @@ public final class Launcher {
     /** {@link #DETACH_ENV} as this process got it (it is not handed on to the device). */
     private static boolean sDetachRequested;
 
+    /**
+     * Set by gesher-launch and the Control Center for gesher-app.ps1. PowerShell passes
+     * the Unicode path as --launch-error-file, after the main class, so it crosses the
+     * VM's wide-argument adapter rather than the narrow CRT environment. The option is
+     * not among the VM arguments copied to a newly started device.
+     */
+    static final String ERROR_FILE_ENV = "GESHER_LAUNCH_ERROR_FILE";
+    /** The caller-owned file receives the failure reason as UTF-8. */
+    private static String sErrorFile;
+
     private Launcher() {
+    }
+
+    /**
+     * The failure as a user can act on it, for the installer's refusals
+     * (com.gesher.server.Installer's INSTALL_FAILED_* codes); null for others.
+     */
+    static String describeFailure(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String m = c.getMessage();
+            if (m == null) continue;
+            int at = m.indexOf("INSTALL_FAILED_");
+            if (at < 0) continue;
+            m = m.substring(at);
+            int colon = m.indexOf(':');
+            String code = colon < 0 ? m.trim() : m.substring(0, colon).trim();
+            String detail = colon < 0 ? "" : m.substring(colon + 1).trim();
+            switch (code) {
+                case "INSTALL_FAILED_UPDATE_INCOMPATIBLE":
+                    return text("install_update_incompatible", detail);
+                case "INSTALL_FAILED_BAD_SIGNATURE":
+                    return text("install_bad_signature", detail);
+                case "INSTALL_FAILED_BAD_SPLIT_SIGNATURE":
+                    return text("install_bad_split_signature", detail);
+                case "INSTALL_FAILED_NO_MATCHING_ABIS":
+                case "INSTALL_FAILED_BAD_DEX_METADATA":
+                    // Their text already says what is wrong.
+                    return detail.isEmpty() ? code : detail;
+                default:
+                    // Others name only the package or file: the code says what failed.
+                    return m.trim();
+            }
+        }
+        return null;
+    }
+
+    /** Writes the failure for gesher-launch or the Control Center to show; best effort. */
+    private static void reportFailure(String message) {
+        if (sErrorFile == null || sErrorFile.isEmpty() || message == null) return;
+        try {
+            Files.write(new File(sErrorFile).toPath(), message.getBytes(StandardCharsets.UTF_8));
+        } catch (Throwable ignored) {
+            // The message box is a convenience; the failure is on stderr already.
+        }
     }
 
     private static void log(String message) {
@@ -117,11 +170,15 @@ public final class Launcher {
             // starts must not inherit it.
             sDetachRequested = "1".equals(System.getenv(DETACH_ENV));
             if (sDetachRequested) android.system.Os.unsetenv(DETACH_ENV);
+            android.system.Os.unsetenv(ERROR_FILE_ENV);
             code = run(args);
         } catch (Throwable t) {
             System.out.flush();
-            System.err.println(TAG + ": " + text("failed", t));
+            String message = describeFailure(t);
+            System.err.println(TAG + ": " + (message != null ? message : text("failed", t)));
             t.printStackTrace();
+            reportFailure(message != null ? message
+                    : t.getMessage() != null ? t.getMessage() : String.valueOf(t));
             code = 1;
         }
         System.out.flush();
@@ -137,6 +194,7 @@ public final class Launcher {
             switch (args[i]) {
                 case "--build-prop": buildProp = args[++i]; break;
                 case "--framework-res": frameworkRes = args[++i]; break;
+                case "--launch-error-file": sErrorFile = args[++i]; break;
                 default: return usage();
             }
         }
@@ -501,6 +559,7 @@ public final class Launcher {
                 ServiceManager.getService("package"));
         if (pm.getPackageInfo(pkg, 0L, 0) == null) {
             log(text("not_installed_url", pkg, url));
+            reportFailure(text("not_installed_url", pkg, url));
             return 1;
         }
         Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -521,11 +580,14 @@ public final class Launcher {
                 + (task != null ? text("in_task", task.taskId) : "")));
         WaitResult result = atm.startActivityAndWait(null /* caller: the launcher */,
                 "com.gesher.launcher", null, intent, null, null, null, 0, 0, null, options, 0);
-        log(text("start_result", result.result,
+        String outcome = text("start_result", result.result,
                 result.who != null ? result.who.flattenToShortString() : text("no_new_activity"),
-                result.timeout ? text("timed_out") : ""));
+                result.timeout ? text("timed_out") : "");
+        log(outcome);
         // START_SUCCESS, or a delivery to a running activity (START_DELIVERED_TO_TOP).
-        return result.result >= ActivityManager.START_SUCCESS ? 0 : 1;
+        if (result.result >= ActivityManager.START_SUCCESS) return 0;
+        reportFailure(text("start_failed", intent) + "\n" + outcome);
+        return 1;
     }
 
     private static int launch(List<String> args) throws Exception {
@@ -582,6 +644,7 @@ public final class Launcher {
             PackageInfo pinfo = pm.getPackageInfo(pkg, 0L, 0);
             if (pinfo == null) {
                 log(text("not_installed_hint", pkg));
+                reportFailure(text("not_installed_hint", pkg));
                 return 1;
             }
             if (pinfo.applicationInfo != null && pinfo.applicationInfo.sourceDir != null) {

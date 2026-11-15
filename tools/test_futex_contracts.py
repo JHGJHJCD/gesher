@@ -54,6 +54,7 @@ static FARPROC GetProcAddress(HMODULE, const char* name) {
 struct LinuxTimespec { int64_t tv_sec, tv_nsec; };
 static constexpr int kENOSYS=ENOSYS, kEINVAL=EINVAL, kEAGAIN=EAGAIN, kETIMEDOUT=ETIMEDOUT;
 static bool DispatchTimerfdSyscall(int64_t,int64_t,int64_t,int64_t,int64_t,int64_t*) { return false; }
+static int64_t RawSyscallX64(int64_t,const int64_t*) { return -ENOSYS; }
 ''' + guest + '''
 #undef syscall
 #include "futex_contract_test.inc"

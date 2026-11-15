@@ -4,6 +4,8 @@
 //   location service for the system server's LocationManagerService.
 // - android.hardware.SystemSensorManager and its BaseEventQueue
 //   (sensors_jni.cc), replacing device_standins.cc's empty ones.
+// - com.gesher.server.WindowsBluetooth: the host's Bluetooth radio
+//   (bluetooth_jni.cc over bluetooth_win.cc, or bluetooth_test.cc's test radio).
 // - com.gesher.server.WindowsCamera: Media Foundation's cameras (camera_mf.cc);
 //   CameraMetadataNative (camera_metadata_jni.cc); ImageReader, SurfaceUtils
 //   and com.gesher.server.CameraFrames (camera_frames.cc).
@@ -172,11 +174,13 @@ const JNINativeMethod gWindowsCameraMethods[] = {
 int register_gesher_sensors(JNIEnv* env);  // sensors_jni.cc
 int register_gesher_camera_metadata(JNIEnv* env);  // camera_metadata_jni.cc
 int register_gesher_camera_frames(JNIEnv* env);  // camera_frames.cc
+int register_gesher_bluetooth(JNIEnv* env);  // bluetooth_jni.cc
 
 int register_gesher_devices(JNIEnv* env) {
   register_gesher_sensors(env);
   register_gesher_camera_metadata(env);
   register_gesher_camera_frames(env);
+  register_gesher_bluetooth(env);
   RegisterGesherNatives(env, "com/gesher/server/WindowsCamera", gWindowsCameraMethods,
                         NELEM(gWindowsCameraMethods));
   RegisterGesherNatives(env, "com/gesher/server/WindowsLocation", gWindowsLocationMethods,

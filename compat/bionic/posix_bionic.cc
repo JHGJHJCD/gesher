@@ -43,6 +43,9 @@
 #include <string>
 #include <utility>
 
+// AT_RANDOM's bytes (compat/posix/src/procfs.cc).
+extern "C" const unsigned char* gesher_auxv_random(void);
+
 namespace gesher::bionic {
 
 static_assert(sizeof(off_t) == 8, "gesher-base builds with 64-bit off_t");
@@ -451,9 +454,7 @@ int BIONIC_SYSV Linkat(int olddir, const char* a, int newdir, const char* b, int
   return link(x.c_str(), y.c_str());
 }
 int BIONIC_SYSV Ftruncate(int fd, int64_t length) {
-  if (length < 0) return errno = kEINVAL, -1;
-  int rc = _chsize_s(fd, length);
-  return rc == 0 ? 0 : (errno = rc == EBADF ? kEBADF : kEINVAL, -1);
+  return gesher_ftruncate(fd, length);
 }
 int BIONIC_SYSV Truncate(const char* path, int64_t length) {
   int fd = open(path, O_WRONLY);
@@ -614,8 +615,8 @@ int BIONIC_SYSV Setpriority(int which, uint32_t who, int prio) {
   return setpriority(which, who, prio);
 }
 
-// getauxval: what code asks the auxiliary vector for.
-alignas(16) uint8_t g_at_random[16];
+// getauxval: what code asks the auxiliary vector for. AT_RANDOM's bytes are
+// gesher-base's, which /proc/self/auxv reports too.
 uint64_t BIONIC_SYSV Getauxval(uint64_t type) {
   switch (type) {
     case 6: return 4096;                                     // AT_PAGESZ
@@ -624,7 +625,7 @@ uint64_t BIONIC_SYSV Getauxval(uint64_t type) {
     case 16: case 26: return 0;                              // AT_HWCAP, AT_HWCAP2
     case 17: return 100;                                     // AT_CLKTCK
     case 23: return 0;                                       // AT_SECURE
-    case 25: return reinterpret_cast<uint64_t>(g_at_random);  // AT_RANDOM
+    case 25: return reinterpret_cast<uint64_t>(gesher_auxv_random());  // AT_RANDOM
     default: return errno = kENOENT, 0;
   }
 }
@@ -753,7 +754,6 @@ const char* g_progname = "app_process";
 }  // namespace
 
 void RegisterPosix(SymbolTable& t) {
-  BCryptGenRandom(nullptr, g_at_random, sizeof(g_at_random), BCRYPT_USE_SYSTEM_PREFERRED_RNG);
 #define E(name, fn) t[name] = reinterpret_cast<void*>(&fn)
   E("opendir", Opendir);
   E("fdopendir", Fdopendir);

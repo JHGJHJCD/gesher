@@ -7,7 +7,7 @@
 // directories (dirent.cc); readlink reads the links. /proc/<pid> is this
 // process's own pid only; other processes have no /proc entries.
 //
-//   /proc/self/{cmdline,comm,environ,status,stat,statm,maps,mounts}
+//   /proc/self/{auxv,cmdline,comm,environ,status,stat,statm,maps,mounts}
 //   /proc/self/fd/<n>            links to the file open as fd n
 //   /proc/self/exe, cwd          links to the executable, the current directory
 //   /proc/self/task/<tid>/{comm,stat,status}
@@ -23,6 +23,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <windows.h>
+// bcrypt.h needs windows.h first.
+#include <bcrypt.h>
 #if defined(__x86_64__)
 #include <intrin.h>
 #endif
@@ -291,6 +293,50 @@ std::string Stat(DWORD tid) {
                 static_cast<unsigned long long>(ThreadIds().size()), StartTicks(created), m.vsize, m.rss / 4096, processor);
 }
 
+}  // namespace
+}  // namespace procfs
+}  // namespace gesher
+
+// AT_RANDOM's 16 bytes, filled once from the system RNG: /proc/self/auxv
+// and the bionic shim's getauxval(AT_RANDOM) both point here.
+extern "C" const unsigned char* gesher_auxv_random(void) {
+  alignas(16) static unsigned char bytes[16];
+  static const bool filled = [] {
+    return BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+  }();
+  (void)filled;
+  return bytes;
+}
+
+namespace gesher {
+namespace procfs {
+namespace {
+
+// /proc/self/auxv: the auxiliary vector as the kernel gave it, 64-bit
+// (type, value) pairs ending with AT_NULL; the values getauxval reports
+// (compat/bionic/posix_bionic.cc). Code that reads the file instead of
+// calling getauxval exists: UPX's unpacker takes AT_PAGESZ from it, and stops
+// on an int3 if it cannot be opened.
+std::string Auxv() {
+  const unsigned char* random_bytes = gesher_auxv_random();
+  static const char kPlatform[] = "x86_64";
+  const uint64_t pairs[][2] = {
+      {6, 4096},                                         // AT_PAGESZ
+      {17, 100},                                         // AT_CLKTCK
+      {16, 0},                                           // AT_HWCAP
+      {11, static_cast<uint64_t>(getuid())},             // AT_UID
+      {12, static_cast<uint64_t>(getuid())},             // AT_EUID
+      {13, static_cast<uint64_t>(getgid())},             // AT_GID
+      {14, static_cast<uint64_t>(getgid())},             // AT_EGID
+      {23, 0},                                           // AT_SECURE
+      {25, reinterpret_cast<uint64_t>(random_bytes)},    // AT_RANDOM
+      {26, 0},                                           // AT_HWCAP2
+      {15, reinterpret_cast<uint64_t>(kPlatform)},       // AT_PLATFORM
+      {0, 0},                                            // AT_NULL
+  };
+  return std::string(reinterpret_cast<const char*>(pairs), sizeof(pairs));
+}
+
 std::string Statm() {
   Memory m = ProcessMemory();
   return Format("%llu %llu 0 0 0 %llu 0\n", m.vsize / 4096, m.rss / 4096, m.private_bytes / 4096);
@@ -532,8 +578,8 @@ Node Lookup(const std::wstring& name, bool list) {
   } else if (!IsSelf(p[1])) {
     return n;
   }
-  static const char* const kProcessFiles[] = {"cmdline", "comm", "environ", "maps", "mounts",
-                                              "stat",    "statm", "status"};
+  static const char* const kProcessFiles[] = {"auxv", "cmdline", "comm",  "environ", "maps",
+                                              "mounts", "stat",   "statm", "status"};
   if (p.size() == 2) {
     n.type = kDir;
     if (list) {
@@ -609,6 +655,7 @@ std::string Content(const Node& n) {
   if (f == "status") return Status(n.tid);
   if (f == "stat") return Stat(n.tid);
   if (f == "statm") return Statm();
+  if (f == "auxv") return Auxv();
   if (f == "maps") return Maps();
   if (f == "meminfo") return Meminfo();
   if (f == "cpuinfo") return Cpuinfo();

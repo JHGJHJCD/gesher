@@ -32,6 +32,7 @@ public final class LauncherCommandLineTest {
         prefix(vm, vm + " \"" + MAIN + "\" \"launch\" \"com.gesher.test/.MainActivity\"");
         prefix(vm, vm + " \"" + MAIN + "\"");
         prefix(vm, vm + " " + MAIN + " launch");
+        prefix(vm, vm + " " + MAIN + " --launch-error-file \"C:\\temp path\\error\u05d0\u4e2d.txt\" launch com.example");
         prefix(vm, vm + " " + MAIN);
         prefix(vm, vm + "\t\t\"" + MAIN + "\"\tlaunch");
         prefix(vm, vm + " com.gesher.\"app\".Launcher launch");

@@ -212,7 +212,7 @@ CheckTimed 'services: gesher-app parses lifecycle.apk with PackageParser2 (singl
   "-Xbootclasspath:$bcpApp", "-Ximage:$(NoDrive "$root/system")/framework/boot.art",
   '-Xint', '-Xusejit:false', 'com.gesher.app.Main', (NoDrive "$Dir/lifecycle.apk")) @(
   'gesher-app: com.gesher.lifecycle parsed by PackageParser2: 1 activities',
-    'gesher-app: stand-in services in this process: account, activity, activity_task, alarm, appops, appwidget, audio, batteryproperties, batterystats, blob_store, clipboard, connectivity, content, crossprofileapps, device_identifiers, device_policy, deviceidle, display, domain_verification, dropbox, grammatical_inflection, input, input_method, iphonesubinfo, isub, jobscheduler, locale, location, media_router, media_session, mount, notification, package, permissionmgr, phone, power, restrictions, rollback, search, sensitive_content_protection_service, shortcut, telephony.registry, textservices, thermalservice, trust, uimode, uri_grants, usagestats, user, vibrator_manager, window',
+    'gesher-app: stand-in services in this process: account, activity, activity_task, alarm, appops, appwidget, audio, batteryproperties, batterystats, blob_store, clipboard, connectivity, content, crossprofileapps, device_identifiers, device_policy, deviceidle, display, domain_verification, dropbox, gesher.bluetooth, grammatical_inflection, input, input_method, iphonesubinfo, isub, jobscheduler, locale, location, media_router, media_session, mount, notification, package, permissionmgr, phone, power, restrictions, rollback, search, sensitive_content_protection_service, shortcut, telephony.registry, textservices, thermalservice, trust, uimode, uri_grants, usagestats, user, vibrator_manager, window',
   'gesher-app: com.gesher.lifecycle.LifecycleActivity onResume',
   'gesher-app: done') 300
 
@@ -584,6 +584,45 @@ if ($ok -and -not ((Test-Path (Join-Path $root 'data/app/com.gesher.peer-1/base.
   $ok = $false
 }
 if (-not $ok) { Write-Host ($out + $list) }
+
+# Real Launcher diagnostics cross wide argv into Android file I/O. The path has
+# spaces and characters outside common Windows code pages; the missing-package
+# reason also contains Unicode. Direct VM calls have captured output, so no modal
+# shell dialog can block this check. Reuse the device already running above.
+$launcherErrorDirectory = Join-Path ([IO.Path]::GetTempPath()) ('gesher-launch-error-' + [Guid]::NewGuid().ToString('N'))
+$launcherErrorUnicode = [string][char]0x05D0 + [char]0x4E2D
+$launcherErrorFile = Join-Path $launcherErrorDirectory ('reason ' + $launcherErrorUnicode + '.txt')
+$launcherWrongErrorFile = Join-Path $launcherErrorDirectory 'caller-owned.txt'
+$launcherSavedErrorCarrier = $env:GESHER_LAUNCH_ERROR_FILE
+try {
+  New-Item -ItemType Directory -Force $launcherErrorDirectory | Out-Null
+  [IO.File]::WriteAllText($launcherWrongErrorFile, 'parent-only')
+  $env:GESHER_LAUNCH_ERROR_FILE = $launcherWrongErrorFile
+  $launcherErrorUrl = 'gesher-launch-error://missing/' + $launcherErrorUnicode
+  foreach ($failureCase in @(
+      @{ Package = 'com.gesher.launcherror.absent'; Expected = @('is not installed', $launcherErrorUrl); Name = 'missing package' },
+      @{ Package = 'com.gesher.lifecycle'; Expected = @('android.intent.action.VIEW', 'startActivityAndWait: result -'); Name = 'unhandled view' })) {
+    [IO.File]::WriteAllText($launcherErrorFile, '')
+    $failureOut = RunTimed "$Dir/dalvikvm.exe" ($launcher + @('--launch-error-file', $launcherErrorFile,
+      'view', $failureCase.Package, $launcherErrorUrl)) 60
+    $failureCode = $LASTEXITCODE
+    $failureReason = [IO.File]::ReadAllText($launcherErrorFile, [Text.UTF8Encoding]::new($false, $true))
+    $failureMissing = @($failureCase.Expected | Where-Object { -not $failureReason.Contains($_) })
+    if ($failureCode -eq 1 -and -not $failureMissing -and
+        [IO.File]::ReadAllText($launcherWrongErrorFile) -eq 'parent-only') {
+      Write-Host "PASS  services: Launcher $($failureCase.Name) writes UTF-8 diagnostics through a Unicode Windows path"
+    } else {
+      Write-Host "FAIL  services: Launcher $($failureCase.Name) diagnostic (exit $failureCode; missing: $($failureMissing -join ', '))"
+      Write-Host $failureReason
+      Write-Host $failureOut
+      $failed++
+    }
+  }
+} finally {
+  if ($null -eq $launcherSavedErrorCarrier) { Remove-Item Env:GESHER_LAUNCH_ERROR_FILE -ErrorAction SilentlyContinue }
+  else { $env:GESHER_LAUNCH_ERROR_FILE = $launcherSavedErrorCarrier }
+  Remove-Item -LiteralPath $launcherErrorDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 # The same file again is "unchanged" from install-sources.list (its size and last
 # write time) without reading it; a new last write time (same bytes) is read and

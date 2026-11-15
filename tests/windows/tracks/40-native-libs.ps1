@@ -88,6 +88,40 @@ Check 'native libs: partial unwind covers hidden code and preserves executable d
     'partial_unwind: FS-like executable data is unchanged PASS',
     'partial_unwind: all passed', 'elf_load_test all passed')
 
+# Raw Linux system calls and code made at run time (ADR 0084). Packers'
+# stubs and anti-tamper code use `syscall` instructions, which would enter the
+# Windows kernel with Linux numbers; the loader turns each into a trap the
+# bionic shim emulates. Code a library writes into its own pages and makes
+# executable, and the code of a library that unpacks itself (UPX, as Ijiami's
+# libexec_x86.so is packed), is rewritten when it first runs.
+Check 'ELF loader: raw syscalls emulated; code made executable at run time rewritten when it runs (hand-assembled)' {
+  & "$Dir/elf_deferred_code_test.exe"
+} @('unpacking: a syscall stub reached only by `ret` is emulated',
+    'elf_deferred_code_test all passed')
+
+Check 'native libs: raw syscalls, syscall(2), ptrace and regex from a .so; code it patches into itself is rewritten' {
+  & "$Dir/elf_load_test.exe" (NoDrive "$Dir/raw_syscall_test.so")
+} @('raw_syscall: raw syscall in code written at run time PASS',
+    'raw_syscall: stack guard in code written at run time PASS',
+    'raw_syscall: all passed', 'elf_load_test all passed')
+
+Check 'native libs: a UPX-packed .so unpacks itself with raw syscalls and runs its checks' {
+  & "$Dir/elf_load_test.exe" (NoDrive "$Dir/raw_syscall_upx.so")
+} @('unpacks its code at run time (UPX)', 'code unpacked at run time: yes',
+    'raw_syscall: all passed', 'elf_load_test all passed')
+
+# A memfd whose size ends inside a page: what a shared mapping writes past EOF
+# in that last page is seen by the next mapping (as on Linux, where UPX 5
+# writes its return stub there), without growing the file; ftruncate to the
+# same size discards it.
+Check 'native libs: memfd final-page bytes survive remapping without extending the file' {
+  & "$Dir/elf_load_test.exe" (NoDrive "$Dir/memfd_tail_test.so")
+} @('memfd_tail: all passed', 'elf_load_test all passed')
+
+Check 'bionic shim: ftruncate rights, cursor and same-size final-page invalidation' {
+  & "$Dir/bionic_ftruncate_test.exe"
+} @('bionic_ftruncate_test all passed')
+
 # Step 4, the JNI path: dalvikvm runs gesher.JniTest (tests/native/java), whose
 # System.load of jni_test.so goes through ART's host libnativeloader path to
 # gesher-base's dlopen, the ELF loader and the JNI bridge

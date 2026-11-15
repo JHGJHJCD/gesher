@@ -1275,6 +1275,35 @@ $btnDisableMicrog.Add_Click({
     }
 })
 
+# Installs an APK through gesher-app.ps1; on failure throws the panel's message with the
+# reason com.gesher.app.Launcher wrote to GESHER_LAUNCH_ERROR_FILE (for example a
+# different signing key than the installed app's), not only "failed".
+function Install-PanelApk([string] $file, [string] $displayName) {
+    $errorFile = $null
+    try { $errorFile = [System.IO.Path]::GetTempFileName() } catch { }
+    $previous = $env:GESHER_LAUNCH_ERROR_FILE
+    if ($errorFile) { $env:GESHER_LAUNCH_ERROR_FILE = $errorFile }
+    else { Remove-Item Env:GESHER_LAUNCH_ERROR_FILE -ErrorAction SilentlyContinue }
+    $reason = ''
+    try {
+        & (Join-Path $here 'gesher-app.ps1') install "$file"
+        $code = $LASTEXITCODE
+    } finally {
+        if ($null -eq $previous) { Remove-Item Env:GESHER_LAUNCH_ERROR_FILE -ErrorAction SilentlyContinue }
+        else { $env:GESHER_LAUNCH_ERROR_FILE = $previous }
+        # Also when gesher-app.ps1 throws: the temporary file never stays behind.
+        if ($errorFile) {
+            try { $reason = [System.IO.File]::ReadAllText($errorFile, [System.Text.Encoding]::UTF8).Trim() } catch { }
+            Remove-Item -LiteralPath $errorFile -Force -ErrorAction SilentlyContinue
+        }
+    }
+    if ($code -ne 0) {
+        $message = Get-GesherText 'cp_install_failed' @($displayName)
+        if ($reason) { $message += "`n`n" + $reason }
+        throw $message
+    }
+}
+
 # Store Handlers
 $btnInstallStore.Add_Click({
     Set-Busy $true (Get-GesherText 'cp_downloading' @('Aurora Store'))
@@ -1285,10 +1314,7 @@ $btnInstallStore.Add_Click({
         if (-not (Test-Path $storeApk)) {
             Invoke-WebRequest -Uri 'https://auroraoss.com/downloads/AuroraStore/Release/AuroraStore-4.6.1.apk' -OutFile $storeApk -UseBasicParsing
         }
-        & (Join-Path $here 'gesher-app.ps1') install "$storeApk"
-        if ($LASTEXITCODE -ne 0) {
-            throw (Get-GesherText 'cp_install_failed' @('Aurora Store'))
-        }
+        Install-PanelApk $storeApk 'Aurora Store'
     } catch {
         Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
     } finally {
@@ -1310,10 +1336,7 @@ $btnInstallApk.Add_Click({
         Set-Busy $true (Get-GesherText 'cp_installing' @($fileName))
         $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
         try {
-            & (Join-Path $here 'gesher-app.ps1') install "$file"
-            if ($LASTEXITCODE -ne 0) {
-                throw (Get-GesherText 'cp_install_failed' @($fileName))
-            }
+            Install-PanelApk $file $fileName
         } catch {
             Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
         } finally {
@@ -1335,10 +1358,7 @@ $window.Add_Drop({
                     Set-Busy $true (Get-GesherText 'cp_installing' @($fileName))
                     $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
                     try {
-                        & (Join-Path $here 'gesher-app.ps1') install "$file"
-                        if ($LASTEXITCODE -ne 0) {
-                            throw (Get-GesherText 'cp_install_failed' @($fileName))
-                        }
+                        Install-PanelApk $file $fileName
                     } catch {
                         Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
                     }

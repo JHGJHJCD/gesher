@@ -164,6 +164,10 @@ int pipe(int fds[2]);
 int pipe2(int fds[2], int flags);
 int fsync(int fd);
 int fdatasync(int fd);
+// Guest ftruncate, including Linux's cached partial-page invalidation for a
+// same-size truncate through a readable/writable descriptor. Uses its existing
+// rights only; write-only descriptors retain the native resize behavior.
+int gesher_ftruncate(int fd, off_t length);
 ssize_t pread(int fd, void* buf, size_t count, off_t offset);
 ssize_t pwrite(int fd, const void* buf, size_t count, off_t offset);
 ssize_t pread64(int fd, void* buf, size_t count, off_t offset);

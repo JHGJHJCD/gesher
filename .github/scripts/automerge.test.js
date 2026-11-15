@@ -1,205 +1,537 @@
 'use strict';
-// node --test .github/scripts/automerge.test.js
+// Deterministic REST fixtures exercise the production controller without writes.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const run = require('./automerge.js');
-
-const SHA = 'a'.repeat(40);
-const OLD = 'b'.repeat(40);
-const T = (s) => `2026-11-16T10:00:${String(s).padStart(2, '0')}Z`;
+const HEAD = 'a'.repeat(40);
+const OTHER = 'b'.repeat(40);
+const BASE = 'c'.repeat(40);
+const MERGE = 'd'.repeat(40);
+const T = (second) => '2026-11-16T10:00:' + String(second).padStart(2, '0') + 'Z';
+const clone = structuredClone;
 
 function world(over = {}) {
   const w = {
-    pr: {number: 7, state: 'open', draft: false, head: {sha: SHA}, base: {ref: 'main'},
-      labels: [{name: 'automerge'}]},
-    events: [{event: 'labeled', label: {name: 'automerge'}, created_at: T(30)}],
-    runs: [
-      {id: 1, name: 'ci', event: 'pull_request', status: 'completed', conclusion: 'success', created_at: T(10)},
-      {id: 2, name: 'arm64-windows', event: 'pull_request', status: 'completed', conclusion: 'success', created_at: T(10)},
-    ],
-    checks: [{name: 'build', status: 'completed', conclusion: 'success'},
-      {name: 'e2e', status: 'completed', conclusion: 'skipped'}],
-    statuses: [],
-    mergeError: null,
-    calls: [],
+    pr: {number: 7, state: 'open', draft: false, updated_at: T(30),
+      head: {sha: HEAD, ref: 'topic', repo: {id: 10}},
+      base: {sha: BASE, ref: 'main', repo: {id: 10}}, labels: [{name: 'automerge'}]},
+    events: [{id: 50, event: 'labeled', label: {name: 'automerge'}, created_at: T(30),
+      actor: {id: 42, login: 'maintainer'}}],
+    runs: [], checks: [{name: 'build', status: 'completed', conclusion: 'success'},
+      {name: 'optional', status: 'completed', conclusion: 'skipped'}],
+    statuses: [], comments: [], permission: 'write',
+    mergeError: null, mergeResult: {merged: true}, calls: [], hooks: {}, warnings: [],
+    mergeProof: {sha: MERGE, parents: [{sha: BASE}, {sha: HEAD}]},
     ...over,
   };
-  const rec = (name, ret) => async (args) => { w.calls.push([name, args]); return ret(args); };
-  const github = {
-    paginate: async (fn, args) => fn.list(args),
-    rest: {
-      pulls: {
-        get: rec('pulls.get', () => ({data: w.pr})),
-        list: {list: () => [w.pr]},
-        merge: rec('merge', () => { if (w.mergeError) throw w.mergeError; return {data: {merged: true}}; }),
-      },
-      issues: {
-        listEvents: {list: () => w.events},
-        removeLabel: rec('removeLabel', () => ({})),
-        createComment: rec('comment', () => ({})),
-      },
-      actions: {
-        listWorkflowRunsForRepo: {list: (a) => (a.head_sha === w.pr.head.sha ? w.runs : [])},
-        createWorkflowDispatch: rec('dispatch', () => ({})),
-      },
-      checks: {listForRef: {list: () => w.checks}},
-      repos: {listCommitStatusesForRef: {list: () => w.statuses}},
-    },
+  if (!over.runs) w.runs = ['ci', 'arm64-windows'].map((name, i) => ({
+    id: 100 + i, workflow_id: 1 + i, name, path: '.github/workflows/' + name + '.yml',
+    event: 'pull_request', status: 'completed', conclusion: 'success', created_at: T(10),
+    head_sha: HEAD, head_branch: 'topic', head_repository: {id: 10}, repository: {id: 10},
+    pull_requests: [{number: 7, head: clone(w.pr.head), base: clone(w.pr.base)}],
+    referenced_workflows: [{path: 'o/r/.github/workflows/source-identity.yml@' + MERGE,
+      ref: 'refs/pull/7/merge', sha: MERGE}],
+  }));
+  w.seedApproval = (patch = {}) => {
+    const event = w.events.filter((e) => e.event === 'labeled').at(-1);
+    const value = {repository: w.pr.base.repo.id, number: w.pr.number, head: w.pr.head.sha,
+      base: w.pr.base.ref, label: event.id, actor: event.actor.id, ...patch};
+    w.comments.push({id: 200 + w.comments.length, user: {login: 'github-actions[bot]', type: 'Bot'},
+      created_at: T(31), updated_at: T(31),
+      body: '<!-- gesher-automerge-v1 ' + JSON.stringify(value) + ' -->'});
   };
-  const core = {info: () => {}};
-  const fire = (eventName, payload) => run({
-    github, core,
-    context: {eventName, repo: {owner: 'o', repo: 'r'},
-      payload: {repository: {default_branch: 'main'}, ...payload}},
+  if (over.approved !== false) w.seedApproval();
+  const rec = (name, fn) => async (args) => {
+    w.calls.push([name, clone(args)]);
+    if (w.hooks[name]) await w.hooks[name](args);
+    return {data: clone(await fn(args))};
+  };
+  const page = (name, values, field) => rec(name, (a) => {
+    const all = values(a);
+    const items = all.slice((a.page - 1) * a.per_page, a.page * a.per_page);
+    return field ? {[field]: items, total_count: all.length} : items;
   });
-  w.labeled = () => fire('pull_request_target',
-    {action: 'labeled', label: {name: 'automerge'}, pull_request: w.pr});
-  w.pushed = () => fire('pull_request_target', {action: 'synchronize', pull_request: w.pr});
-  w.ciDone = (sha = SHA) => fire('workflow_run', {workflow_run: {head_sha: sha}});
+  const github = {rest: {
+    pulls: {
+      get: rec('getPR', () => w.pr),
+      list: page('listPRs', () => [w.pr]),
+      merge: rec('merge', (args) => {
+        if (w.mergeError) throw w.mergeError;
+        if (args.sha !== w.pr.head.sha) throw Object.assign(new Error('head changed'), {status: 409});
+        if (w.mergeResult.merged) w.pr.state = 'closed';
+        return w.mergeResult;
+      }),
+    },
+    issues: {
+      listEvents: page('events', () => w.events),
+      listComments: page('comments', () => w.comments),
+      removeLabel: rec('removeLabel', () => {w.pr.labels = []; return {};}),
+      createComment: rec('comment', (args) => {
+        const item = {id: 300 + w.comments.length, user: {login: 'github-actions[bot]', type: 'Bot'},
+          created_at: T(31), updated_at: T(31), body: args.body};
+        w.comments.push(item);
+        return item;
+      }),
+    },
+    actions: {
+      listWorkflowRunsForRepo: page('runs', (a) => w.runs.filter((r) => r.head_sha === a.head_sha), 'workflow_runs'),
+      getWorkflow: rec('workflow', (a) => ({id: {'ci.yml': 1, 'arm64-windows.yml': 2, 'automerge.yml': 3}[a.workflow_id],
+        state: 'active', path: '.github/workflows/' + a.workflow_id, ...w.workflowOverride})),
+      getWorkflowRun: rec('runDetails', (a) => ({...w.runs.find((r) => r.id === a.run_id),
+        ...w.runDetailsOverride})),
+      createWorkflowDispatch: rec('dispatch', () => ({})),
+    },
+    checks: {listForRef: page('checks', () => w.checks, 'check_runs')},
+    repos: {
+      getCollaboratorPermissionLevel: rec('permission', () => {
+        if (w.permissionError) throw w.permissionError;
+        return {permission: w.permission, user: {id: w.permissionUserId ?? 42}};
+      }),
+      listCommitStatusesForRef: page('statuses', () => w.statuses),
+    },
+    git: {getCommit: rec('gitCommit', () => w.mergeProof)},
+  }};
+  const core = {info: () => {}, warning: (s) => w.warnings.push(s)};
+  const fire = (eventName, payload) => run({github, core,
+    context: {eventName, repo: {owner: 'o', repo: 'r'},
+      payload: {repository: {default_branch: 'main'}, ...clone(payload)}}});
+  w.labeled = (snapshot = w.pr) => fire('pull_request_target', {action: 'labeled',
+    label: {name: 'automerge'}, sender: {id: 42}, pull_request: snapshot});
+  w.pushed = (snapshot = w.pr) => fire('pull_request_target', {action: 'synchronize', pull_request: snapshot});
+  w.ciDone = (sha = HEAD) => fire('workflow_run', {workflow_run: {head_sha: sha}});
+  w.sweep = () => fire('schedule', {});
   w.fire = fire;
   w.did = (name) => w.calls.filter((c) => c[0] === name);
   return w;
 }
 
-test('green CI + label merges, pinned to the head SHA, then dispatches main CI', async () => {
-  const w = world();
+test('authorized label records head approval, merges exact head, then dispatches main CI', async () => {
+  const w = world({approved: false});
   await w.labeled();
+  assert.equal(w.did('comment').length, 1);
+  assert.match(w.did('comment')[0][1].body, /"label":50,"actor":42/);
   assert.equal(w.did('merge').length, 1);
-  assert.equal(w.did('merge')[0][1].sha, SHA);
+  assert.equal(w.did('merge')[0][1].sha, HEAD);
   assert.equal(w.did('merge')[0][1].merge_method, 'merge');
   assert.deepEqual(w.did('dispatch')[0][1], {owner: 'o', repo: 'r', workflow_id: 'ci.yml', ref: 'main'});
 });
 
-test('CI completion on a labelled PR merges it', async () => {
+test('workflow completion uses the recorded approval and repeated delivery is harmless', async () => {
   const w = world();
+  await w.ciDone();
   await w.ciDone();
   assert.equal(w.did('merge').length, 1);
 });
 
-test('push after labelling removes the label and does not merge', async () => {
-  const w = world();
-  await w.pushed();
-  assert.equal(w.did('removeLabel').length, 1);
-  assert.equal(w.did('comment').length, 1);
-  assert.equal(w.did('merge').length, 0);
+for (const permission of ['read', 'none', 'triage', 'unknown']) {
+  test('a label actor without merge access cannot delegate writes: ' + permission, async () => {
+    const w = world({permission, approved: false});
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1')), false);
+  });
+}
+test('a missing collaborator or revoked permission blocks an existing approval', async () => {
+  for (const patch of [{permission: 'read'}, {permissionError: Object.assign(new Error('not found'), {status: 404})}]) {
+    const w = world(patch);
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
 });
-
-test('push on an unlabelled PR does nothing', async () => {
-  const w = world();
-  w.pr.labels = [];
-  await w.pushed();
-  assert.equal(w.calls.length, 0);
-});
-
-test('label older than the latest push is dropped, not honoured', async () => {
-  const w = world({events: [{event: 'labeled', label: {name: 'automerge'}, created_at: T(5)}]});
-  await w.ciDone();
-  assert.equal(w.did('merge').length, 0);
-  assert.equal(w.did('removeLabel').length, 1);
-});
-
-test('CI that never ran blocks the merge', async () => {
-  const w = world({runs: [], checks: []});
+test('an admin may opt in', async () => {
+  const w = world({permission: 'admin', approved: false});
   await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+});
+
+test('a label with no recorded head cannot be inferred by a sweep or CI completion', async () => {
+  const w = world({approved: false});
+  await w.ciDone(); await w.sweep();
   assert.equal(w.did('merge').length, 0);
+  assert.equal(w.did('comment').length, 0);
+});
+test('human, other-bot and edited comments cannot supply approval', async () => {
+  for (const edit of [
+    (c) => {c.user = {login: 'maintainer', type: 'User'};},
+    (c) => {c.user.login = 'other[bot]';},
+    (c) => {c.updated_at = T(32);},
+  ]) {
+    const w = world(); edit(w.comments[0]);
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+test('conflicting or malformed receipts fail closed; identical duplicate receipts are safe', async () => {
+  const duplicate = world(); duplicate.seedApproval(); await duplicate.ciDone();
+  assert.equal(duplicate.did('merge').length, 1);
+  const conflict = world(); conflict.seedApproval({head: OTHER}); await conflict.ciDone();
+  assert.equal(conflict.did('merge').length, 0);
+  const malformed = world(); malformed.comments[0].body = '<!-- gesher-automerge-v1 broken -->';
+  await malformed.ciDone();
+  assert.equal(malformed.did('merge').length, 0);
+  assert.equal(malformed.warnings.length, 1);
+});
+test('a push invalidates the old receipt even when its synchronize delivery is missing', async () => {
+  const w = world(); w.pr.head.sha = OTHER;
+  await w.ciDone(OTHER);
+  assert.equal(w.did('merge').length, 0);
+  assert.equal(w.did('removeLabel').length, 1);
+});
+test('a push removes the old approval; an unlabelled push does not write', async () => {
+  const w = world(); w.pr.head.sha = OTHER; w.pr.updated_at = T(40);
+  await w.pushed();
+  assert.equal(w.did('removeLabel').length, 1);
+  assert.equal(w.did('merge').length, 0);
+  const absent = world(); absent.pr.labels = []; await absent.pushed();
+  assert.equal(absent.did('removeLabel').length, 0);
+  assert.equal(absent.did('comment').length, 0);
+});
+test('a delayed synchronize does not remove a fresh head approval', async () => {
+  const w = world(); const old = clone(w.pr);
+  w.pr.head.sha = OTHER; w.pr.updated_at = T(40);
+  w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});
+  w.seedApproval();
+  await w.pushed(old);
   assert.equal(w.did('removeLabel').length, 0);
 });
-
-test('only other workflows ran (no ci run) blocks the merge', async () => {
-  const w = world();
-  w.runs = w.runs.filter((r) => r.name !== 'ci');
+test('a delayed synchronize preserves a later relabel whose capture is still queued', async () => {
+  const w = world({approved: false}); const pushed = clone(w.pr);
+  pushed.updated_at = T(35);
+  w.pr.updated_at = T(40);
+  w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});
+  await w.pushed(pushed);
+  assert.equal(w.did('removeLabel').length, 0);
+});
+test('an old label delivery cannot approve a new head, or a later label after a head returns', async () => {
+  const moved = world({approved: false}); const old = clone(moved.pr);
+  moved.pr.head.sha = OTHER; await moved.labeled(old);
+  assert.equal(moved.did('comment').length, 0);
+  const returned = world({approved: false});
+  const oldLabel = clone(returned.pr);
+  returned.events.push({...clone(returned.events[0]), id: 60, created_at: T(40)});
+  returned.pr.updated_at = T(40);
+  await returned.labeled(oldLabel);
+  assert.equal(returned.did('comment').length, 0);
+});
+test('ambiguous same-second relabels and mismatched senders cannot record approval', async () => {
+  const w = world({approved: false});
+  w.events.push({...clone(w.events[0]), id: 60});
   await w.labeled();
-  assert.equal(w.did('merge').length, 0);
+  assert.equal(w.did('comment').length, 0);
+  const sender = world({approved: false});
+  sender.events[0].actor.id = 99;
+  await sender.labeled();
+  assert.equal(sender.did('comment').length, 0);
+});
+test('reopen or label removal invalidates the prior approval', async () => {
+  for (const event of ['reopened', 'unlabeled']) {
+    const w = world();
+    w.events.push({id: 60, event, label: {name: 'automerge'}, created_at: T(40)});
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
 });
 
-for (const [status, conclusion] of [['in_progress', null], ['queued', null], ['completed', 'failure'],
-  ['completed', 'cancelled'], ['completed', 'action_required'], ['completed', 'startup_failure'],
-  ['completed', 'skipped']]) {
-  test(`ci ${status}/${conclusion} blocks the merge`, async () => {
-    const w = world();
-    Object.assign(w.runs[0], {status, conclusion});
-    await w.labeled();
+for (const [status, conclusion] of [['queued', null], ['in_progress', null], ['waiting', null],
+  ['completed', 'failure'], ['completed', 'cancelled'], ['completed', 'skipped'],
+  ['completed', 'neutral'], ['completed', 'action_required'], ['completed', 'startup_failure']]) {
+  test('required CI must really complete successfully: ' + status + '/' + conclusion, async () => {
+    const w = world(); Object.assign(w.runs[0], {status, conclusion});
+    await w.ciDone();
     assert.equal(w.did('merge').length, 0);
   });
 }
-
-test('a rerun that turned green after a failure counts (latest run wins)', async () => {
-  const w = world();
-  Object.assign(w.runs[0], {conclusion: 'failure'});
-  w.runs.push({id: 9, name: 'ci', event: 'pull_request', status: 'completed', conclusion: 'success', created_at: T(11)});
-  w.events[0].created_at = T(40);
-  await w.ciDone();
-  assert.equal(w.did('merge').length, 1);
-});
-
-test('a failing other workflow blocks the merge', async () => {
-  const w = world();
-  w.runs[1].conclusion = 'failure';
-  await w.ciDone();
-  assert.equal(w.did('merge').length, 0);
-});
-
-test('a pending check run blocks the merge', async () => {
-  const w = world();
-  w.checks.push({name: 'test (windows-2025)', status: 'in_progress', conclusion: null});
-  await w.ciDone();
-  assert.equal(w.did('merge').length, 0);
-});
-
-test('a failed check run blocks the merge', async () => {
-  const w = world();
-  w.checks.push({name: 'lint', status: 'completed', conclusion: 'timed_out'});
-  await w.ciDone();
-  assert.equal(w.did('merge').length, 0);
-});
-
-test('no check runs at all blocks the merge', async () => {
-  const w = world({checks: []});
-  await w.labeled();
-  assert.equal(w.did('merge').length, 0);
-});
-
-test('pending or failing commit status blocks; a later success clears it', async () => {
-  for (const [states, merges] of [[['pending'], 0], [['failure'], 0], [['failure', 'success'], 1]]) {
-    const w = world({statuses: states.map((state, i) => ({id: i, context: 'ext', state, created_at: T(20 + i)}))});
-    await w.labeled();
-    assert.equal(w.did('merge').length, merges, states.join(','));
+test('missing CI, missing ARM64 CI, and zero checks all block', async () => {
+  for (const edit of [(w) => {w.runs = [];},
+    (w) => {w.runs = w.runs.filter((r) => r.workflow_id !== 1);},
+    (w) => {w.runs = w.runs.filter((r) => r.workflow_id !== 2);},
+    (w) => {w.checks = [];}]) {
+    const w = world(); edit(w); await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
   }
 });
-
-test('CI result for an old head does not merge the new head', async () => {
-  const w = world();
-  await w.ciDone(OLD);
-  assert.equal(w.did('merge').length, 0);
+test('a display-name collision cannot substitute for the registered required workflow', async () => {
+  const w = world(); w.runs[0].workflow_id = 999;
+  await w.ciDone(); assert.equal(w.did('merge').length, 0);
 });
-
-test('draft, closed or unlabelled PRs are not merged', async () => {
-  for (const patch of [{draft: true}, {state: 'closed'}, {labels: []}]) {
-    const w = world();
-    Object.assign(w.pr, patch);
-    await w.labeled();
+test('trusted workflow identity requires path, event, repository, head repository and branch', async () => {
+  for (const patch of [{path: '.github/workflows/unrelated.yml'}, {event: 'workflow_dispatch'},
+    {repository: {id: 99}}, {head_repository: {id: 99}}, {head_branch: 'other'},
+    {head_sha: OTHER}]) {
+    const w = world(); Object.assign(w.runs[0], patch); await w.ciDone();
     assert.equal(w.did('merge').length, 0, JSON.stringify(patch));
   }
 });
-
-test('some other label is ignored', async () => {
+test('inactive or renamed registered workflows do not qualify', async () => {
+  for (const workflowOverride of [{state: 'disabled_manually'}, {path: '.github/workflows/other.yml'}]) {
+    const w = world({workflowOverride}); await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+test('another PR or retargeted association cannot substitute for this PR', async () => {
+  for (const edit of [(p) => {p.number = 99;}, (p) => {p.base.ref = 'release';},
+    (p) => {p.head.sha = OTHER;}, (p) => {p.base.repo.id = 99;}]) {
+    const w = world(); edit(w.runs[0].pull_requests[0]); await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+test('fork runs with empty associations still require the tested head/base pair', async () => {
+  for (const base of [BASE, OTHER]) {
+    const w = world();
+    w.pr.head.repo.id = 20;
+    w.runs.forEach((r) => {r.head_repository.id = 20; r.pull_requests = [];});
+    w.mergeProof.parents[0].sha = base;
+    await w.ciDone();
+    assert.equal(w.did('merge').length, base === BASE ? 1 : 0);
+  }
+});
+test('live run associations cannot falsely prove a historical tested base', async () => {
+  const w = world();
+  w.mergeProof.parents[0].sha = OTHER;
+  w.runs.forEach((r) => {r.pull_requests[0].base.sha = BASE;});
+  await w.ciDone(); assert.equal(w.did('merge').length, 0);
+});
+test('a successful retry does not invalidate approval of the unchanged head', async () => {
+  const w = world(); w.runs[0].conclusion = 'failure';
+  await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  w.runs.push({...clone(w.runs[0]), id: 500, created_at: T(40), conclusion: 'success'});
+  await w.ciDone(); assert.equal(w.did('merge').length, 1);
+});
+test('a same-ID rerun uses its current pending or completed result', async () => {
+  const w = world(); Object.assign(w.runs[0], {run_attempt: 2, status: 'in_progress', conclusion: null});
+  await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  Object.assign(w.runs[0], {status: 'completed', conclusion: 'success'});
+  await w.ciDone(); assert.equal(w.did('merge').length, 1);
+});
+test('a pending or failing additional workflow blocks, even with a colliding display name', async () => {
+  for (const patch of [{status: 'in_progress', conclusion: null}, {conclusion: 'failure'}]) {
+    const w = world();
+    w.runs.push({...clone(w.runs[0]), id: 200, workflow_id: 3, ...patch});
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  }
+});
+test('a scheduled sweep observes a manual workflow or external check finishing last', async () => {
+  for (const external of ['workflow', 'check', 'status']) {
+    const w = world();
+    if (external === 'workflow') w.runs.push({...clone(w.runs[0]), id: 200,
+      workflow_id: 3, event: 'workflow_dispatch', status: 'in_progress', conclusion: null});
+    if (external === 'check') w.checks.push({name: 'external', status: 'in_progress', conclusion: null});
+    if (external === 'status') w.statuses.push({id: 100, context: 'external', state: 'pending', created_at: T(20)});
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+    if (external === 'workflow') Object.assign(w.runs.at(-1), {status: 'completed', conclusion: 'success'});
+    if (external === 'check') Object.assign(w.checks.at(-1), {status: 'completed', conclusion: 'success'});
+    if (external === 'status') w.statuses.push({id: 101, context: 'external', state: 'success', created_at: T(40)});
+    await w.sweep(); assert.equal(w.did('merge').length, 1);
+  }
+});
+test('pending, failed, cancelled and timed-out check runs block', async () => {
+  for (const [status, conclusion] of [['in_progress', null], ['completed', 'failure'],
+    ['completed', 'cancelled'], ['completed', 'timed_out']]) {
+    const w = world(); w.checks.push({name: 'external', status, conclusion});
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  }
+});
+test('all current status contexts must succeed; newer values replace older ones', async () => {
+  for (const state of ['pending', 'failure', 'error']) {
+    const w = world({statuses: [{id: 1, context: 'ext', state, created_at: T(20)}]});
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+    w.statuses.push({id: 2, context: 'ext', state: 'success', created_at: T(40)});
+    await w.ciDone(); assert.equal(w.did('merge').length, 1);
+  }
+});
+test('check pagination includes a failure on the second page', async () => {
+  const w = world(); w.checks = Array.from({length: 100}, (_, i) =>
+    ({name: 'job' + i, status: 'completed', conclusion: 'success'}));
+  w.checks.push({name: 'last', status: 'completed', conclusion: 'failure'});
+  await w.ciDone();
+  assert.equal(w.did('checks').length, 2);
+  assert.equal(w.did('merge').length, 0);
+});
+test('oversized or malformed histories fail closed with bounded requests', async () => {
+  const w = world();
+  w.events = Array.from({length: 1001}, (_, i) => ({id: i + 1, event: 'assigned', created_at: T(20)}));
+  await w.ciDone();
+  assert.equal(w.did('events').length, 10);
+  assert.equal(w.did('merge').length, 0);
+  assert.equal(w.warnings.length, 1);
+  const missing = world(); delete missing.runs[0].created_at;
+  await missing.ciDone();
+  assert.equal(missing.did('merge').length, 0);
+});
+test('head, base, target, state, draft and label are rechecked after CI queries', async () => {
+  for (const mutate of [(w) => {w.pr.head.sha = OTHER;},
+    (w) => {w.pr.base.sha = OTHER;}, (w) => {w.pr.base.ref = 'release';},
+    (w) => {w.pr.state = 'closed';}, (w) => {w.pr.draft = true;},
+    (w) => {w.pr.labels = [];}]) {
+    const w = world(); w.hooks.statuses = () => mutate(w);
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  }
+});
+test('relabel, permission revocation and receipt deletion during CI queries block', async () => {
+  for (const mutate of [(w) => {w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});},
+    (w) => {w.permission = 'read';}, (w) => {w.comments = [];}]) {
+    const w = world(); w.hooks.statuses = () => mutate(w);
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  }
+});
+test('a stale removal request cannot remove a newer label event', async () => {
+  const w = world({permission: 'read', approved: false});
+  let calls = 0;
+  w.hooks.events = () => {
+    if (++calls === 2) w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});
+  };
+  await w.labeled();
+  assert.equal(w.did('removeLabel').length, 0);
+});
+test('a push racing the merge is rejected by the SHA pin and does not dispatch', async () => {
+  const w = world(); w.hooks.merge = () => {w.pr.head.sha = OTHER;};
+  await w.ciDone();
+  assert.equal(w.did('merge')[0][1].sha, HEAD);
+  assert.equal(w.did('dispatch').length, 0);
+  assert.equal(w.did('removeLabel').length, 1);
+});
+test('merge rejection or a false success result never dispatches main CI', async () => {
+  for (const patch of [{mergeError: Object.assign(new Error('conflict'), {status: 405})},
+    {mergeError: Object.assign(new Error('head changed'), {status: 409})},
+    {mergeResult: {merged: false}}]) {
+    const w = world(patch); await w.ciDone();
+    assert.equal(w.did('dispatch').length, 0);
+    assert.equal(w.did('removeLabel').length, 1);
+  }
+});
+test('a competing merge cannot turn an already merged PR into a failure comment', async () => {
+  const w = world({mergeError: Object.assign(new Error('already merged'), {status: 405})});
+  w.hooks.merge = () => {w.pr.state = 'closed';};
+  await w.ciDone();
+  assert.equal(w.did('removeLabel').length, 0);
+  assert.equal(w.did('comment').length, 0);
+  assert.equal(w.did('dispatch').length, 0);
+});
+test('draft, closed, unlabelled and stale-head events never merge', async () => {
+  for (const patch of [{draft: true}, {state: 'closed'}, {labels: []}]) {
+    const w = world(); Object.assign(w.pr, patch);
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  }
+  const stale = world(); await stale.ciDone(OTHER);
+  assert.equal(stale.did('merge').length, 0);
+});
+test('a different label is ignored before any API call', async () => {
   const w = world();
   await w.fire('pull_request_target', {action: 'labeled', label: {name: 'bug'}, pull_request: w.pr});
   assert.equal(w.calls.length, 0);
 });
-
-test('merge rejected (conflict / head moved) drops the label with a reason', async () => {
-  const w = world({mergeError: Object.assign(new Error('Head branch was modified'), {status: 409})});
-  await w.labeled();
-  assert.equal(w.did('removeLabel').length, 1);
-  assert.match(w.did('comment')[0][1].body, /Head branch was modified/);
-  assert.equal(w.did('dispatch').length, 0);
-});
-
-test('PR into a non-default branch merges without dispatching main CI', async () => {
-  const w = world();
-  w.pr.base.ref = 'feature/arm64-windows';
+test('a non-default target preserves its approved target and does not dispatch main', async () => {
+  const w = world({approved: false});
+  w.pr.base.ref = 'release';
+  w.runs.forEach((r) => {r.pull_requests[0].base.ref = 'release';});
   await w.labeled();
   assert.equal(w.did('merge').length, 1);
   assert.equal(w.did('dispatch').length, 0);
 });
+
+test('permission lookup must identify the same account as the label event', async () => {
+  const w = world({permissionUserId: 99, approved: false});
+  await w.labeled();
+  assert.equal(w.did('merge').length, 0);
+  assert.equal(w.did('removeLabel').length, 1);
+});
+test('force pushes and target changes invalidate an approval even when the head returns', async () => {
+  for (const event of ['head_ref_force_pushed', 'base_ref_changed', 'automatic_base_change_succeeded']) {
+    const w = world();
+    w.events.push({id: 60, event, created_at: T(40)});
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('removeLabel').length, 1);
+  }
+});
+test('ambiguous label history cannot use a previously captured receipt', async () => {
+  const w = world({approved: false});
+  w.events.push({...clone(w.events[0]), id: 60});
+  w.seedApproval();
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+});
+test('mutations during final receipt reading are visible to the last state check', async () => {
+  for (const mutate of [(w) => {w.pr.labels = [];}, (w) => {w.pr.draft = true;},
+    (w) => {w.pr.base.sha = OTHER;}, (w) => {w.permission = 'read';},
+    (w) => {w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});}]) {
+    const w = world(); let count = 0;
+    w.hooks.comments = () => {if (++count === 2) mutate(w);};
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+test('a rerun starting between listing and fetching its details blocks', async () => {
+  const w = world({runDetailsOverride: {status: 'in_progress', conclusion: null}});
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+});
+test('every required workflow needs immutable local merge-source metadata', async () => {
+  for (const index of [0, 1]) {
+    for (const edit of [
+      (r) => {delete r.referenced_workflows;},
+      (r) => {r.referenced_workflows = [];},
+      (r) => {r.referenced_workflows[0].ref = 'refs/pull/99/merge';},
+      (r) => {r.referenced_workflows[0].ref = 'refs/heads/main';},
+      (r) => {r.referenced_workflows[0].path = 'other/repo/.github/workflows/id.yml@' + MERGE;},
+      (r) => {r.referenced_workflows[0].path = 'o/r/.github/workflows/id.yml@' + OTHER;},
+      (r) => {r.referenced_workflows.push({path: 'o/r/.github/workflows/other.yml@' + OTHER,
+        ref: 'refs/pull/7/merge', sha: OTHER});},
+    ]) {
+      const w = world(); edit(w.runs[index]); await w.ciDone();
+      assert.equal(w.did('merge').length, 0);
+    }
+  }
+});
+test('the immutable merge object must have the exact current base and approved head', async () => {
+  for (const mergeProof of [{sha: OTHER, parents: [{sha: BASE}, {sha: HEAD}]},
+    {sha: MERGE, parents: [{sha: OTHER}, {sha: HEAD}]},
+    {sha: MERGE, parents: [{sha: BASE}, {sha: OTHER}]},
+    {sha: MERGE, parents: [{sha: BASE}]},
+    {sha: MERGE, parents: [{sha: HEAD}, {sha: BASE}]}]) {
+    const w = world({mergeProof}); await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+test('only the registered trusted controller and its check suites are excluded', async () => {
+  const own = {...clone(world().runs[0]), id: 300, workflow_id: 3, name: 'automerge',
+    path: '.github/workflows/automerge.yml', event: 'workflow_run',
+    status: 'in_progress', conclusion: null, check_suite_id: 500};
+  const w = world();
+  w.runs.push(own);
+  w.checks.push({name: 'automerge', status: 'in_progress', conclusion: null, check_suite: {id: 500}});
+  await w.ciDone(); assert.equal(w.did('merge').length, 1);
+  for (const patch of [{workflow_id: 999}, {event: 'pull_request'},
+    {path: '.github/workflows/unrelated.yml'}]) {
+    const blocked = world(); blocked.runs.push({...clone(own), ...patch});
+    await blocked.ciDone(); assert.equal(blocked.did('merge').length, 0);
+  }
+  const named = world(); named.runs.push(own);
+  named.checks.push({name: 'automerge', status: 'completed', conclusion: 'failure', check_suite: {id: 999}});
+  await named.ciDone(); assert.equal(named.did('merge').length, 0);
+});
+test('the controller check alone cannot satisfy the no-checks guard', async () => {
+  const w = world();
+  w.runs.push({...clone(w.runs[0]), id: 300, workflow_id: 3,
+    path: '.github/workflows/automerge.yml', event: 'schedule', check_suite_id: 500,
+    status: 'in_progress', conclusion: null});
+  w.checks = [{name: 'automerge', status: 'in_progress', conclusion: null, check_suite: {id: 500}}];
+  await w.ciDone(); assert.equal(w.did('merge').length, 0);
+});
+
+for (const status of ['queued', 'in_progress']) {
+  test('an older workflow rerun still blocks when a newer run is green: ' + status, async () => {
+    const w = world();
+    const newer = {...clone(w.runs[0]), id: 500, created_at: T(40)};
+    Object.assign(w.runs[0], {run_attempt: 2, status, conclusion: null});
+    w.runs.push(newer);
+    // Latest check-name results can still be green; active runs are a separate gate.
+    assert.equal(w.checks.every((c) => c.status === 'completed'), true);
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    Object.assign(w.runs[0], {status: 'completed', conclusion: 'failure'});
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 1, 'completed older failures remain superseded');
+  });
+}

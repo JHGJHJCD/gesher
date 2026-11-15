@@ -10,6 +10,10 @@ on:
   workflow_run:
     workflows: [ci, arm64-windows]
     types: [completed]
+  # External checks and manually dispatched workflows may finish after both
+  # watched workflows. Re-evaluate their recorded approvals without new labels.
+  schedule:
+    - cron: '*/5 * * * *'
 
 permissions:
   contents: write       # merge
@@ -26,6 +30,7 @@ concurrency:
 jobs:
   automerge:
     if: >-
+      github.event_name == 'schedule' ||
       github.event_name == 'workflow_run' ||
       github.event.action != 'labeled' ||
       github.event.label.name == 'automerge'

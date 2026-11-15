@@ -185,6 +185,9 @@ public final class Services {
         // Devices (docs/devices.md): location over Windows' location service.
         services.put(Context.LOCATION_SERVICE, StandIn.of(android.location.ILocationManager.class,
                 new LocationManagerService(pm, am)).asBinder());
+        // Bluetooth (docs/bluetooth.md): Windows' radio, its broadcasts and discovery. The
+        // android.bluetooth classes run scans, GATT and sockets in the app's process.
+        services.put(BluetoothManagerService.NAME, new BluetoothManagerService(am, pm));
         services.put(Context.LOCALE_SERVICE, StandIn.of(android.app.ILocaleManager.class, new LocaleManagerService(am, atm, pm)).asBinder());  // locale track, ADR 0049
         // Apps on API 34+ expect this manager to exist even when no grammatical
         // gender is configured. Windows supplies no system-wide preference;
