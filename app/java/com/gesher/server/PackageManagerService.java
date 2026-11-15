@@ -526,7 +526,11 @@ public final class PackageManagerService extends IPackageManager.Default {
             f.name = name;
             FEATURES.put(name, f);
         }
-        addBluetoothFeatures(FEATURES, WindowsBluetooth.adapter(0));
+        try {
+            addBluetoothFeatures(FEATURES, WindowsBluetooth.adapter(0));
+        } catch (LinkageError e) {
+            // No runtime natives (a host JVM loading the class): no radio to report.
+        }
     }
 
     /** The Bluetooth features of {@code adapter} (none without a radio). */

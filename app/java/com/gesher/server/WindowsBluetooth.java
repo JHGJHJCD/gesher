@@ -117,7 +117,8 @@ public final class WindowsBluetooth {
     /** The adapter, asked again after {@code maxAgeMs}. */
     public static Adapter adapter(long maxAgeMs) {
         Adapter a = sAdapter;
-        long now = android.os.SystemClock.elapsedRealtime();
+        // System.nanoTime, not SystemClock: host-JVM tests load the system server's classes.
+        long now = System.nanoTime() / 1_000_000;
         if (a != null && now - sAdapterAt <= maxAgeMs) return a;
         a = readAdapter();
         sAdapter = a;
