@@ -21,8 +21,8 @@ import java.util.UUID;
  * BluetoothDevice with the Bluetooth module's public API over the host radio
  * (docs/bluetooth.md): what Windows knows of the device (name, class, type, bond and SDP
  * service classes of paired devices; names of LE advertisers), GATT connections
- * ({@link BluetoothGatt}) and RFCOMM sockets ({@link BluetoothSocket}). Pairing is Windows'
- * (Settings, Bluetooth &amp; devices): {@link #createBond()} answers false.
+ * ({@link BluetoothGatt}) and RFCOMM sockets ({@link BluetoothSocket}). Pairing goes
+ * through Windows' own pairing UI ({@link #createBond()}, docs/bluetooth.md).
  *
  * <p>The parcel format (address, address type) is the module's, as ScanResult and the
  * system's broadcasts carry devices.
@@ -271,21 +271,29 @@ public final class BluetoothDevice implements Parcelable, Attributable {
         return true;
     }
 
-    /** Pairing is Windows' own (Settings): Android apps cannot start it here. */
+    /**
+     * Pairs through Windows' own pairing UI (the user confirms there): true when it
+     * started; ACTION_BOND_STATE_CHANGED reports BONDING, then BONDED or NONE. False while
+     * the radio is off, for a bonded device or with a pairing running.
+     */
     public boolean createBond() {
-        BluetoothHost.enforceAdmin(mContext);
-        return false;
+        return createBond(getType() == DEVICE_TYPE_LE ? TRANSPORT_LE : TRANSPORT_AUTO);
     }
 
     /** @hide */
     public boolean createBond(int transport) {
-        return createBond();
+        BluetoothHost.enforceAdmin(mContext);
+        if (!BluetoothHost.on() || !BluetoothManagerService.Client.available()) return false;
+        boolean le = transport == TRANSPORT_LE
+                || (transport == TRANSPORT_AUTO && mAddressType == ADDRESS_TYPE_RANDOM);
+        return BluetoothManagerService.Client.createBond(mAddress, le);
     }
 
-    /** @hide */
+    /** @hide Removes Windows' pairing (the user confirms). */
     public boolean removeBond() {
         BluetoothHost.enforceAdmin(mContext);
-        return false;
+        if (!BluetoothHost.on() || !BluetoothManagerService.Client.available()) return false;
+        return BluetoothManagerService.Client.removeBond(mAddress);
     }
 
     /** @hide */

@@ -113,6 +113,22 @@ void CheckTestRadio(bt::Backend& backend) {
   });
   Check(SUCCEEDED(hr) && found.size() == 2 && found[1] == "Gesher Test Speaker",
         "inquiry finds the headset and the speaker");
+  {
+    backend.WaitForChange(0);  // forget earlier changes
+    int result = -1;
+    Check(SUCCEEDED(backend.Pair(0x00025B00B0B0ULL, false, &result)) && result == 0,
+          "pairing the speaker (Windows' UI, accepted)");
+    Check(backend.WaitForChange(1000), "the pairing is announced as a change");
+    std::vector<bt::Device> now;
+    Check(SUCCEEDED(backend.Bonded(&now)) && now.size() == 2, "two bonded devices after pairing");
+    Check(SUCCEEDED(backend.Pair(0x00025B00A5A5ULL, false, &result)) && result == 1,
+          "the headset was paired already");
+    Check(SUCCEEDED(backend.Unpair(0x00025B00B0B0ULL, &result)) && result == 0 &&
+              SUCCEEDED(backend.Bonded(&now)) && now.size() == 1,
+          "unpairing the speaker");
+    backend.WaitForChange(0);
+    Check(!backend.WaitForChange(100), "no change without an event");
+  }
   std::vector<GUID> uuids;
   Check(SUCCEEDED(backend.RemoteUuids(0x00025B00A5A5ULL, true, &uuids)) && uuids.size() == 4 &&
             uuids[0] == bt::ShortUuid(0x1101),

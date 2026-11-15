@@ -175,6 +175,15 @@ class Backend {
   // returns when it ends or *cancel becomes true.
   virtual HRESULT Inquiry(int seconds, const std::atomic<bool>* cancel,
                           const std::function<void(const Device&)>& found) = 0;
+  // Pairs with `address` through Windows' own pairing UI (blocks until the user ends it):
+  // *result 0 paired, 1 already paired, 2 not paired (declined, failed, impossible).
+  virtual HRESULT Pair(uint64_t address, bool le, int* result) = 0;
+  // Removes Windows' pairing: *result 0 unpaired, 1 was not paired, 2 failed.
+  virtual HRESULT Unpair(uint64_t address, int* result) = 0;
+  // Waits up to timeoutMs for a change Windows announces (the radio's state, a paired
+  // device's connection, a pairing): true when one came. Bonded() keeps the paired
+  // devices it lists watched.
+  virtual bool WaitForChange(int timeoutMs) = 0;
   // A device's SDP service classes; `refresh` asks the device again.
   virtual HRESULT RemoteUuids(uint64_t address, bool refresh, std::vector<GUID>* out) = 0;
   virtual std::shared_ptr<Scan> StartScan(bool active, HRESULT* hr) = 0;

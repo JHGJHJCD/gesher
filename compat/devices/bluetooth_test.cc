@@ -54,6 +54,20 @@ const GUID kIncludedValue = {0x6e400011, 0xb5a3, 0xf393,
                              {0xe0, 0xa9, 0xe5, 0x0e, 0x24, 0xdc, 0xca, 0x9e}};
 
 std::atomic<bool> gOn{true};
+std::atomic<bool> gSpeakerPaired{false};  // the speaker can be paired (Pair) and unpaired
+
+// The watch's change signal: radio switches and pairings.
+std::mutex gChangeMu;
+std::condition_variable gChangeCv;
+bool gChanged = false;
+
+void SignalChange() {
+  {
+    std::lock_guard<std::mutex> lock(gChangeMu);
+    gChanged = true;
+  }
+  gChangeCv.notify_all();
+}
 
 Device Headset() {
   Device d;
@@ -73,6 +87,8 @@ Device Speaker() {
   d.name = "Gesher Test Speaker";
   d.classOfDevice = 0x240414;  // audio/video, loudspeaker
   d.kind = kClassic;
+  d.bonded = gSpeakerPaired.load();
+  d.uuids = {ShortUuid(0x110B)};
   return d;
 }
 
@@ -514,13 +530,53 @@ class Test final : public Backend {
 
   HRESULT SetEnabled(bool on) override {
     gOn.store(on);
+    SignalChange();
     return S_OK;
   }
 
   HRESULT Bonded(std::vector<Device>* out) override {
     out->clear();
-    if (gOn.load()) out->push_back(Headset());
+    if (gOn.load()) {
+      out->push_back(Headset());
+      if (gSpeakerPaired.load()) out->push_back(Speaker());
+    }
     return S_OK;
+  }
+
+  // The headset is paired already; the speaker pairs (as if the user confirmed);
+  // anything else cannot be paired.
+  HRESULT Pair(uint64_t address, bool, int* result) override {
+    if (!gOn.load()) return HRESULT_FROM_WIN32(ERROR_DEVICE_NOT_CONNECTED);
+    if (address == kHeadsetAddress || (address == kSpeakerAddress && gSpeakerPaired.load())) {
+      *result = 1;
+    } else if (address == kSpeakerAddress) {
+      Sleep(200);
+      gSpeakerPaired.store(true);
+      *result = 0;
+      SignalChange();
+    } else {
+      *result = 2;
+    }
+    return S_OK;
+  }
+
+  HRESULT Unpair(uint64_t address, int* result) override {
+    if (address == kSpeakerAddress && gSpeakerPaired.exchange(false)) {
+      *result = 0;
+      SignalChange();
+    } else {
+      *result = address == kHeadsetAddress ? 2 : 1;  // the headset stays (as if refused)
+    }
+    return S_OK;
+  }
+
+  bool WaitForChange(int timeoutMs) override {
+    std::unique_lock<std::mutex> lock(gChangeMu);
+    gChangeCv.wait_for(lock, std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs),
+                       [] { return gChanged; });
+    bool was = gChanged;
+    gChanged = false;
+    return was;
   }
 
   HRESULT Inquiry(int seconds, const std::atomic<bool>* cancel,

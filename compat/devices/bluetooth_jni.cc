@@ -200,6 +200,28 @@ jobjectArray WindowsBluetooth_remoteUuids(JNIEnv* env, jclass, jlong address, jb
   return Strings(env, lines);
 }
 
+// Pairing through Windows' UI (blocks); result: 0 paired, 1 already, 2 not paired.
+jint WindowsBluetooth_pair(JNIEnv* env, jclass, jlong address, jboolean le, jintArray resultOut) {
+  int result = 2;
+  HRESULT hr = bt::Get().Pair(static_cast<uint64_t>(address), le == JNI_TRUE, &result);
+  ALOGI("bluetooth: pairing %012llX: HRESULT 0x%08lX, result %d",
+        static_cast<unsigned long long>(address), static_cast<unsigned long>(hr), result);
+  SetInt(env, resultOut, 0, result);
+  return static_cast<jint>(hr);
+}
+
+// result: 0 unpaired, 1 was not paired, 2 failed.
+jint WindowsBluetooth_unpair(JNIEnv* env, jclass, jlong address, jintArray resultOut) {
+  int result = 2;
+  HRESULT hr = bt::Get().Unpair(static_cast<uint64_t>(address), &result);
+  SetInt(env, resultOut, 0, result);
+  return static_cast<jint>(hr);
+}
+
+jboolean WindowsBluetooth_waitForChange(JNIEnv*, jclass, jint timeoutMs) {
+  return bt::Get().WaitForChange(timeoutMs) ? JNI_TRUE : JNI_FALSE;
+}
+
 // --- LE scan ---------------------------------------------------------------------------------
 
 jlong WindowsBluetooth_scanStart(JNIEnv* env, jclass, jboolean active, jintArray hrOut) {
@@ -473,6 +495,9 @@ const JNINativeMethod gMethods[] = {
     {"nativeInquiry", "(I[I)[Ljava/lang/String;", GESHER_JNI(WindowsBluetooth_inquiry)},
     {"nativeInquiryCancel", "()V", GESHER_JNI(WindowsBluetooth_inquiryCancel)},
     {"nativeRemoteUuids", "(JZ[I)[Ljava/lang/String;", GESHER_JNI(WindowsBluetooth_remoteUuids)},
+    {"nativePair", "(JZ[I)I", GESHER_JNI(WindowsBluetooth_pair)},
+    {"nativeUnpair", "(J[I)I", GESHER_JNI(WindowsBluetooth_unpair)},
+    {"nativeWaitForChange", "(I)Z", GESHER_JNI(WindowsBluetooth_waitForChange)},
     {"nativeScanStart", "(Z[I)J", GESHER_JNI(WindowsBluetooth_scanStart)},
     {"nativeScanNext", "(JI[J)[B", GESHER_JNI(WindowsBluetooth_scanNext)},
     {"nativeScanStop", "(J)V", GESHER_JNI(WindowsBluetooth_scanStop)},

@@ -78,8 +78,9 @@ struct IBufferByteAccess : IUnknown {
 // Windows.Devices.Radios.
 struct IRadio : IInspectable {
   virtual HRESULT STDMETHODCALLTYPE SetStateAsync(int state, IAsyncOperation<int>** op) = 0;
-  GESHER_UNUSED(1);  // add_StateChanged
-  GESHER_UNUSED(2);  // remove_StateChanged
+  virtual HRESULT STDMETHODCALLTYPE add_StateChanged(IUnknown* handler,
+                                                     EventRegistrationToken* token) = 0;
+  virtual HRESULT STDMETHODCALLTYPE remove_StateChanged(EventRegistrationToken token) = 0;
   virtual HRESULT STDMETHODCALLTYPE get_State(int* value) = 0;
   virtual HRESULT STDMETHODCALLTYPE get_Name(HSTRING* value) = 0;
   virtual HRESULT STDMETHODCALLTYPE get_Kind(int* value) = 0;
@@ -95,6 +96,27 @@ struct IRadioStatics : IInspectable {
 struct IDeviceInformation : IInspectable {
   virtual HRESULT STDMETHODCALLTYPE get_Id(HSTRING* value) = 0;
   virtual HRESULT STDMETHODCALLTYPE get_Name(HSTRING* value) = 0;
+};
+struct IDevicePairingResult : IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_Status(int* value) = 0;
+};
+struct IDeviceUnpairingResult : IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_Status(int* value) = 0;
+};
+struct IDeviceInformationPairing : IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_IsPaired(uint8_t* value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_CanPair(uint8_t* value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE PairAsync(IAsyncOperation<IDevicePairingResult*>** op) = 0;
+};
+struct IDeviceInformationPairing2 : IInspectable {
+  GESHER_UNUSED(1);  // get_ProtectionLevel
+  GESHER_UNUSED(2);  // get_Custom
+  GESHER_UNUSED(3);  // PairAsync(minProtectionLevel, devicePairingSettings)
+  virtual HRESULT STDMETHODCALLTYPE UnpairAsync(IAsyncOperation<IDeviceUnpairingResult*>** op) = 0;
+};
+struct IDeviceInformation2 : IInspectable {
+  GESHER_UNUSED(1);  // get_Kind
+  virtual HRESULT STDMETHODCALLTYPE get_Pairing(IDeviceInformationPairing** value) = 0;
 };
 struct IDeviceInformationStatics : IInspectable {
   GESHER_UNUSED(1);  // CreateFromIdAsync
@@ -155,6 +177,17 @@ struct IBluetoothDevice : IInspectable {
   GESHER_UNUSED(2);  // RfcommServices
   virtual HRESULT STDMETHODCALLTYPE get_ConnectionStatus(int* value) = 0;
   virtual HRESULT STDMETHODCALLTYPE get_BluetoothAddress(UINT64* value) = 0;
+  GESHER_UNUSED(3);  // add_NameChanged
+  GESHER_UNUSED(4);  // remove_NameChanged
+  GESHER_UNUSED(5);  // add_SdpRecordsChanged
+  GESHER_UNUSED(6);  // remove_SdpRecordsChanged
+  virtual HRESULT STDMETHODCALLTYPE add_ConnectionStatusChanged(
+      IUnknown* handler, EventRegistrationToken* token) = 0;
+  virtual HRESULT STDMETHODCALLTYPE remove_ConnectionStatusChanged(
+      EventRegistrationToken token) = 0;
+};
+struct IBluetoothDevice2 : IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_DeviceInformation(IInspectable** value) = 0;
 };
 struct IBluetoothDevice3 : IInspectable {
   GESHER_UNUSED(1);  // DeviceAccessInformation
@@ -323,7 +356,7 @@ struct IBluetoothLEDevice : IInspectable {
       EventRegistrationToken token) = 0;
 };
 struct IBluetoothLEDevice2 : IInspectable {
-  GESHER_UNUSED(1);  // get_DeviceInformation
+  virtual HRESULT STDMETHODCALLTYPE get_DeviceInformation(IInspectable** value) = 0;
   GESHER_UNUSED(2);  // get_Appearance
   virtual HRESULT STDMETHODCALLTYPE get_BluetoothAddressType(int* value) = 0;
 };
@@ -446,6 +479,18 @@ const IID IID_IBluetoothAdapter3 = {0x8f8624e0, 0xcba9, 0x5211,
                                     {0x9f, 0x89, 0x3a, 0xac, 0x62, 0xb4, 0xc6, 0xb8}};
 const IID IID_IBluetoothAdapter4 = {0xf875f3e1, 0x6d9a, 0x5d5e,
                                     {0xae, 0xe5, 0xa1, 0x72, 0x48, 0xe5, 0xf6, 0xdd}};
+const IID IID_IBluetoothDevice2 = {0x0133f954, 0xb156, 0x4dd0,
+                                   {0xb1, 0xf5, 0xc1, 0x1b, 0xc3, 0x1a, 0x51, 0x63}};
+const IID IID_IDeviceInformation2 = {0xf156a638, 0x7997, 0x48d9,
+                                     {0xa1, 0x0c, 0x26, 0x9d, 0x46, 0x53, 0x3f, 0x48}};
+const IID IID_IDeviceInformationPairing2 = {0xf68612fd, 0x0aee, 0x4328,
+                                            {0x85, 0xcc, 0x1c, 0x74, 0x2b, 0xb1, 0x79, 0x0d}};
+// TypedEventHandler<Radio, IInspectable>
+const IID IID_RadioInspectableHandler = {0xfc6aa329, 0xb586, 0x5ebb,
+                                         {0x9e, 0x85, 0x3f, 0x6b, 0x84, 0xeb, 0xdf, 0x18}};
+// TypedEventHandler<BluetoothDevice, IInspectable>
+const IID IID_DeviceInspectableHandler = {0xdb56ce1c, 0x5e9f, 0x5138,
+                                          {0x92, 0x27, 0xb1, 0xa6, 0x6d, 0x60, 0xbc, 0x1b}};
 const IID IID_IBluetoothDevice3 = {0x57fff78b, 0x651a, 0x4454,
                                    {0xb9, 0x0f, 0xeb, 0x21, 0xef, 0x0b, 0x0d, 0x71}};
 const IID IID_IBluetoothDeviceStatics = {0x0991df51, 0x57db, 0x4725,
@@ -755,12 +800,126 @@ void ServiceClasses(const std::vector<uint8_t>& record, std::vector<GUID>* out) 
   }
 }
 
+// --- changes Windows announces -------------------------------------------------------------
+
+// Set by Windows' event handlers (the radio's state, paired devices' connections),
+// waited for by the system server's watch.
+struct ChangeSignal {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool changed = false;
+
+  void Signal() {
+    {
+      std::lock_guard<std::mutex> lock(mu);
+      changed = true;
+    }
+    cv.notify_all();
+  }
+  bool Wait(int timeoutMs) {
+    std::unique_lock<std::mutex> lock(mu);
+    cv.wait_for(lock, std::chrono::milliseconds(timeoutMs < 0 ? 0 : timeoutMs),
+                [this] { return changed; });
+    bool was = changed;
+    changed = false;
+    return was;
+  }
+};
+
+ChangeSignal& Changes() {
+  static ChangeSignal* signal = new ChangeSignal();
+  return *signal;
+}
+
+// The paired devices whose ConnectionStatusChanged the watch listens to: what Bonded()
+// listed last. Each entry keeps its device object (classic or LE) and token.
+class DeviceWatch {
+ public:
+  void Keep(uint64_t address, bool le, IInspectable* device) {
+    std::lock_guard<std::mutex> lock(mu_);
+    seen_.push_back(Key(address, le));
+    if (entries_.count(Key(address, le)) != 0) return;
+    Entry e;
+    e.le = le;
+    IUnknown* handler = NewHandler(le ? IID_LEDeviceInspectableHandler : IID_DeviceInspectableHandler,
+                                   [](IInspectable*, IInspectable*) { Changes().Signal(); });
+    HRESULT hr = E_NOINTERFACE;
+    if (le) {
+      IBluetoothLEDevice* d = nullptr;
+      if (SUCCEEDED(Query(device, IID_IBluetoothLEDevice, &d))) {
+        hr = d->add_ConnectionStatusChanged(handler, &e.token);
+        e.object = d;
+      }
+    } else {
+      IBluetoothDevice* d = nullptr;
+      if (SUCCEEDED(Query(device, IID_IBluetoothDevice, &d))) {
+        hr = d->add_ConnectionStatusChanged(handler, &e.token);
+        e.object = d;
+      }
+    }
+    handler->Release();
+    if (FAILED(hr)) {
+      Release(e.object);
+      return;
+    }
+    entries_[Key(address, le)] = e;
+  }
+
+  void BeginListing() {
+    std::lock_guard<std::mutex> lock(mu_);
+    seen_.clear();
+  }
+
+  // Drops the devices the last listing did not keep (unpaired).
+  void EndListing() {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto it = entries_.begin(); it != entries_.end();) {
+      bool kept = false;
+      for (const auto& k : seen_) kept = kept || k == it->first;
+      if (kept) {
+        ++it;
+        continue;
+      }
+      Drop(it->second);
+      it = entries_.erase(it);
+    }
+  }
+
+ private:
+  struct Entry {
+    bool le = false;
+    IInspectable* object = nullptr;
+    EventRegistrationToken token{};
+  };
+  static std::pair<uint64_t, bool> Key(uint64_t address, bool le) { return {address, le}; }
+  static void Drop(Entry& e) {
+    if (e.object == nullptr) return;
+    if (e.le) {
+      static_cast<IBluetoothLEDevice*>(e.object)->remove_ConnectionStatusChanged(e.token);
+    } else {
+      static_cast<IBluetoothDevice*>(e.object)->remove_ConnectionStatusChanged(e.token);
+    }
+    CloseObject(e.object);
+    Release(e.object);
+  }
+
+  std::mutex mu_;
+  std::map<std::pair<uint64_t, bool>, Entry> entries_;
+  std::vector<std::pair<uint64_t, bool>> seen_;
+};
+
+DeviceWatch& Watched() {
+  static DeviceWatch* watch = new DeviceWatch();
+  return *watch;
+}
+
 // --- the adapter ------------------------------------------------------------------------------
 
 struct AdapterCache {
   std::mutex mu;
   IBluetoothAdapter* adapter = nullptr;
   IRadio* radio = nullptr;
+  EventRegistrationToken radioToken{};
   ULONGLONG fetchedAt = 0;
   HRESULT hr = S_OK;
 };
@@ -776,6 +935,7 @@ void RefreshAdapterLocked(AdapterCache& cache) {
   ULONGLONG now = GetTickCount64();
   if (cache.adapter != nullptr && now - cache.fetchedAt < 5000) return;
   if (cache.adapter == nullptr && cache.fetchedAt != 0 && now - cache.fetchedAt < 2000) return;
+  if (cache.radio != nullptr) cache.radio->remove_StateChanged(cache.radioToken);
   Release(cache.radio);
   Release(cache.adapter);
   cache.fetchedAt = now;
@@ -796,7 +956,13 @@ void RefreshAdapterLocked(AdapterCache& cache) {
   IAsyncOperation<IRadio*>* radioOp = nullptr;
   if (SUCCEEDED(adapter->GetRadioAsync(&radioOp))) {
     IRadio* radio = nullptr;
-    if (SUCCEEDED(Await(radioOp, &radio, 10000))) cache.radio = radio;
+    if (SUCCEEDED(Await(radioOp, &radio, 10000)) && radio != nullptr) {
+      cache.radio = radio;
+      IUnknown* handler = NewHandler(IID_RadioInspectableHandler,
+                                     [](IInspectable*, IInspectable*) { Changes().Signal(); });
+      radio->add_StateChanged(handler, &cache.radioToken);
+      handler->Release();
+    }
   }
   cache.hr = S_OK;
 }
@@ -1875,6 +2041,7 @@ class Windows final : public Backend {
 
   HRESULT Bonded(std::vector<Device>* out) override {
     out->clear();
+    Watched().BeginListing();
     IDeviceInformationStatics* information = nullptr;
     HRESULT hr = Factory(kDeviceInformationClass, IID_IDeviceInformationStatics, &information);
     if (FAILED(hr)) return hr;
@@ -1896,6 +2063,7 @@ class Windows final : public Backend {
           d.kind = kClassic;
           d.bonded = true;
           FillClassic(device, &d, false);
+          Watched().Keep(d.address, false, device);
           device->Release();
           Merge(out, d);
         });
@@ -1933,7 +2101,7 @@ class Windows final : public Backend {
             if (SUCCEEDED(device2->get_BluetoothAddressType(&type))) d.addressType = type == 1;
             device2->Release();
           }
-          CloseObject(device);
+          Watched().Keep(d.address, true, device);
           device->Release();
           Merge(out, d);
         });
@@ -1943,8 +2111,61 @@ class Windows final : public Backend {
     Release(le2);
     Release(le);
     information->Release();
+    Watched().EndListing();
     return S_OK;
   }
+
+  HRESULT Pair(uint64_t address, bool le, int* result) override {
+    *result = 2;
+    IDeviceInformationPairing* pairing = nullptr;
+    HRESULT hr = PairingOf(address, le, &pairing);
+    if (FAILED(hr)) return hr;
+    uint8_t paired = 0;
+    if (SUCCEEDED(pairing->get_IsPaired(&paired)) && paired) {
+      pairing->Release();
+      *result = 1;
+      return S_OK;
+    }
+    // Basic pairing: Windows shows its own pairing UI and confirmation.
+    IAsyncOperation<IDevicePairingResult*>* op = nullptr;
+    IDevicePairingResult* pairingResult = nullptr;
+    hr = pairing->PairAsync(&op);
+    pairing->Release();
+    if (SUCCEEDED(hr)) hr = Await(op, &pairingResult, 5 * 60 * 1000);
+    if (FAILED(hr) || pairingResult == nullptr) return FAILED(hr) ? hr : E_POINTER;
+    int status = 19;  // DevicePairingResultStatus.Failed
+    pairingResult->get_Status(&status);
+    pairingResult->Release();
+    *result = status == 0 ? 0 : status == 3 ? 1 : 2;  // Paired, AlreadyPaired
+    Changes().Signal();
+    return S_OK;
+  }
+
+  HRESULT Unpair(uint64_t address, int* result) override {
+    *result = 2;
+    IDeviceInformationPairing* pairing = nullptr;
+    HRESULT hr = PairingOf(address, false, &pairing);
+    if (FAILED(hr)) hr = PairingOf(address, true, &pairing);
+    if (FAILED(hr)) return hr;
+    IDeviceInformationPairing2* pairing2 = nullptr;
+    hr = Query(pairing, IID_IDeviceInformationPairing2, &pairing2);
+    pairing->Release();
+    if (FAILED(hr)) return hr;
+    IAsyncOperation<IDeviceUnpairingResult*>* op = nullptr;
+    IDeviceUnpairingResult* unpairing = nullptr;
+    hr = pairing2->UnpairAsync(&op);
+    pairing2->Release();
+    if (SUCCEEDED(hr)) hr = Await(op, &unpairing, 60000);
+    if (FAILED(hr) || unpairing == nullptr) return FAILED(hr) ? hr : E_POINTER;
+    int status = 4;  // DeviceUnpairingResultStatus.Failed
+    unpairing->get_Status(&status);
+    unpairing->Release();
+    *result = status == 0 ? 0 : status == 1 ? 1 : 2;  // Unpaired, AlreadyUnpaired
+    Changes().Signal();
+    return S_OK;
+  }
+
+  bool WaitForChange(int timeoutMs) override { return Changes().Wait(timeoutMs); }
 
   HRESULT Inquiry(int seconds, const std::atomic<bool>* cancel,
                   const std::function<void(const Device&)>& found) override {
@@ -2166,6 +2387,50 @@ class Windows final : public Backend {
       info->Release();
     }
     list->Release();
+  }
+
+  // The DeviceInformation.Pairing of the classic (or LE) device at `address`.
+  static HRESULT PairingOf(uint64_t address, bool le, IDeviceInformationPairing** out) {
+    *out = nullptr;
+    IInspectable* information = nullptr;
+    HRESULT hr;
+    if (le) {
+      IBluetoothLEDeviceStatics* statics = nullptr;
+      IAsyncOperation<IBluetoothLEDevice*>* op = nullptr;
+      IBluetoothLEDevice* device = nullptr;
+      hr = Factory(kLEDeviceClass, IID_IBluetoothLEDeviceStatics, &statics);
+      if (SUCCEEDED(hr)) hr = statics->FromBluetoothAddressAsync(address, &op);
+      Release(statics);
+      if (SUCCEEDED(hr)) hr = Await(op, &device, 15000);
+      if (SUCCEEDED(hr) && device == nullptr) hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+      IBluetoothLEDevice2* device2 = nullptr;
+      if (SUCCEEDED(hr)) hr = Query(device, IID_IBluetoothLEDevice2, &device2);
+      if (SUCCEEDED(hr)) hr = device2->get_DeviceInformation(&information);
+      Release(device2);
+      Release(device);
+    } else {
+      IBluetoothDeviceStatics* statics = nullptr;
+      IAsyncOperation<IBluetoothDevice*>* op = nullptr;
+      IBluetoothDevice* device = nullptr;
+      hr = Factory(kDeviceClass, IID_IBluetoothDeviceStatics, &statics);
+      if (SUCCEEDED(hr)) hr = statics->FromBluetoothAddressAsync(address, &op);
+      Release(statics);
+      if (SUCCEEDED(hr)) hr = Await(op, &device, 15000);
+      if (SUCCEEDED(hr) && device == nullptr) hr = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+      IBluetoothDevice2* device2 = nullptr;
+      if (SUCCEEDED(hr)) hr = Query(device, IID_IBluetoothDevice2, &device2);
+      if (SUCCEEDED(hr)) hr = device2->get_DeviceInformation(&information);
+      Release(device2);
+      Release(device);
+    }
+    if (SUCCEEDED(hr) && information == nullptr) hr = E_POINTER;
+    IDeviceInformation2* information2 = nullptr;
+    if (SUCCEEDED(hr)) hr = Query(information, IID_IDeviceInformation2, &information2);
+    if (SUCCEEDED(hr)) hr = information2->get_Pairing(out);
+    if (SUCCEEDED(hr) && *out == nullptr) hr = E_POINTER;
+    Release(information2);
+    Release(information);
+    return hr;
   }
 
   // Name, address, class, connection and SDP service classes of a classic device.

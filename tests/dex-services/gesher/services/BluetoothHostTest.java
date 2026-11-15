@@ -223,6 +223,14 @@ public final class BluetoothHostTest {
                 new Caller(30, "android.permission.BLUETOOTH"));
         rejected(legacy, setEnabled, false, "android.permission.BLUETOOTH_ADMIN", "radio off (API 30)");
         rejected(legacy, startDiscovery, null, "android.permission.BLUETOOTH_ADMIN", "discovery (API 30)");
+        final int createBond = android.os.IBinder.FIRST_CALL_TRANSACTION + 6;
+        final int removeBond = android.os.IBinder.FIRST_CALL_TRANSACTION + 7;
+        rejected(legacy, createBond, HEADSET, "android.permission.BLUETOOTH_ADMIN", "pairing (API 30)");
+        Caller declines = new Caller(31, "android.permission.BLUETOOTH_CONNECT");
+        declines.consent = false;
+        check(!transact(new BluetoothManagerService(sent::add, declines), removeBond, HEADSET)
+                && declines.asked.size() == 1 && declines.asked.get(0).startsWith("Unpair"),
+                "unpairing asks the user; declined, nothing happens");
         // API 31+: BLUETOOTH_CONNECT and BLUETOOTH_SCAN.
         BluetoothManagerService modern = new BluetoothManagerService(sent::add,
                 new Caller(32, "android.permission.BLUETOOTH_ADMIN", "android.permission.BLUETOOTH"));
@@ -593,6 +601,11 @@ public final class BluetoothHostTest {
             if (intent.hasExtra(BluetoothAdapter.EXTRA_STATE)) text += " " + intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
             if (intent.hasExtra(BluetoothProfile.EXTRA_STATE)) text += " " + intent.getIntExtra(BluetoothProfile.EXTRA_STATE, -1);
             if (intent.hasExtra(BluetoothDevice.EXTRA_NAME)) text += " " + intent.getStringExtra(BluetoothDevice.EXTRA_NAME);
+            if (intent.hasExtra(BluetoothDevice.EXTRA_BOND_STATE)) {
+                BluetoothDevice d = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                text += " " + d + " " + intent.getIntExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, -1)
+                        + ">" + intent.getIntExtra(BluetoothDevice.EXTRA_BOND_STATE, -1);
+            }
             out.add(text);
         }
         return out;
@@ -638,6 +651,28 @@ public final class BluetoothHostTest {
         check(uuid != null && BluetoothDevice.ACTION_UUID.equals(uuid.getAction()), "ACTION_UUID");
         Parcelable[] list = uuid.getParcelableArrayExtra(BluetoothDevice.EXTRA_UUID);
         check(list != null && list.length == 4, "four service classes in ACTION_UUID");
-        step("broadcasts: state, ACL and A2DP changes, discovery (FOUND x2), ACTION_UUID");
+        // Pairing through Windows (the test radio accepts the speaker as if the user did).
+        broadcasts.clear();
+        BluetoothDevice speaker = adapter.getRemoteDevice("00:02:5B:00:B0:B0");
+        check(!adapter.getRemoteDevice(HEADSET).createBond(), "a bonded device does not pair again");
+        check(speaker.createBond(), "createBond starts pairing");
+        String bonding = BluetoothDevice.ACTION_BOND_STATE_CHANGED + " 00:02:5B:00:B0:B0 ";
+        List<String> paired = actions(broadcasts, 2);
+        step("pairing: " + paired);
+        check(paired.equals(List.of(bonding + BluetoothDevice.BOND_NONE + ">" + BluetoothDevice.BOND_BONDING,
+                bonding + BluetoothDevice.BOND_BONDING + ">" + BluetoothDevice.BOND_BONDED)),
+                "BOND_STATE_CHANGED: NONE>BONDING, BONDING>BONDED");
+        Thread.sleep(2100);  // the process's paired-device cache
+        check(adapter.getBondedDevices().contains(speaker) && speaker.getBondState() == BluetoothDevice.BOND_BONDED,
+                "the speaker is bonded");
+        check((Boolean) BluetoothDevice.class.getMethod("removeBond").invoke(speaker), "removeBond (reflection)");
+        List<String> unpaired = actions(broadcasts, 1);
+        check(unpaired.equals(List.of(bonding + BluetoothDevice.BOND_BONDED + ">" + BluetoothDevice.BOND_NONE)),
+                "BOND_STATE_CHANGED: BONDED>NONE " + unpaired);
+        check(adapter.getRemoteDevice("11:22:33:44:55:66").createBond(), "pairing an absent device starts");
+        String other = BluetoothDevice.ACTION_BOND_STATE_CHANGED + " 11:22:33:44:55:66 ";
+        check(actions(broadcasts, 2).equals(List.of(other + BluetoothDevice.BOND_NONE + ">" + BluetoothDevice.BOND_BONDING,
+                other + BluetoothDevice.BOND_BONDING + ">" + BluetoothDevice.BOND_NONE)), "and fails: BONDING>NONE");
+        step("broadcasts: state, ACL and A2DP changes, discovery (FOUND x2), ACTION_UUID, pairing and unpairing");
     }
 }

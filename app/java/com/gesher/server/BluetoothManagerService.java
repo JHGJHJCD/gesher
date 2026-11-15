@@ -50,6 +50,8 @@ public final class BluetoothManagerService extends Binder {
     static final int CANCEL_DISCOVERY = IBinder.FIRST_CALL_TRANSACTION + 3;
     static final int IS_DISCOVERING = IBinder.FIRST_CALL_TRANSACTION + 4;
     static final int FETCH_UUIDS = IBinder.FIRST_CALL_TRANSACTION + 5;
+    static final int CREATE_BOND = IBinder.FIRST_CALL_TRANSACTION + 6;
+    static final int REMOVE_BOND = IBinder.FIRST_CALL_TRANSACTION + 7;
 
     static final UUID AUDIO_SINK = UUID.fromString("0000110b-0000-1000-8000-00805f9b34fb");
     static final UUID ADVANCED_AUDIO = UUID.fromString("0000110d-0000-1000-8000-00805f9b34fb");
@@ -123,7 +125,9 @@ public final class BluetoothManagerService extends Binder {
     private volatile boolean mDiscovering;
     private int mState = -1;  // BluetoothAdapter.STATE_*, -1 before the first look
     private Map<Long, WindowsBluetooth.Device> mDevices = new HashMap<>();
-    private long mPollMs = 2000;
+    /** Longest wait between looks: Windows' events (radio, connections) wake the watch earlier. */
+    private long mPollMs = 10000;
+    private final java.util.Set<Long> mPairing = new java.util.HashSet<>();
 
     BluetoothManagerService(ActivityManagerService am, PackageManagerService pm) {
         this(intent -> am.sendBroadcastFor("android", intent, null),
@@ -145,7 +149,7 @@ public final class BluetoothManagerService extends Binder {
     @Override
     protected boolean onTransact(int code, Parcel data, Parcel reply, int flags)
             throws RemoteException {
-        if (code < STATE || code > FETCH_UUIDS) return super.onTransact(code, data, reply, flags);
+        if (code < STATE || code > REMOVE_BOND) return super.onTransact(code, data, reply, flags);
         data.enforceInterface(DESCRIPTOR);
         startWatch();
         try {
@@ -182,6 +186,22 @@ public final class BluetoothManagerService extends Binder {
                     reply.writeNoException();
                     reply.writeBoolean(mDiscovering);
                     return true;
+                case CREATE_BOND: {
+                    String address = data.readString();
+                    boolean le = data.readBoolean();
+                    enforceAdmin();
+                    boolean ok = createBond(address, le);
+                    reply.writeNoException();
+                    reply.writeBoolean(ok);
+                    return true;
+                }
+                case REMOVE_BOND: {
+                    String address = data.readString();
+                    boolean ok = mayUnpair(address) && removeBond(address);
+                    reply.writeNoException();
+                    reply.writeBoolean(ok);
+                    return true;
+                }
                 case FETCH_UUIDS: {
                     String address = data.readString();
                     enforceConnect();
@@ -249,6 +269,88 @@ public final class BluetoothManagerService extends Binder {
         return allowed;
     }
 
+    /** As the module's createBond: BLUETOOTH_CONNECT, or BLUETOOTH_ADMIN below 31. */
+    private void enforceAdmin() {
+        String pkg = caller();
+        if (pkg != null) require(pkg, CONNECT, ADMIN);
+    }
+
+    /**
+     * removeBond is a system API in the module (BLUETOOTH_PRIVILEGED); apps reach it through
+     * reflection. Here it removes Windows' pairing, so it needs BLUETOOTH_CONNECT (or
+     * BLUETOOTH_ADMIN) and the user's consent.
+     */
+    boolean mayUnpair(String address) {
+        String pkg = caller();
+        if (pkg == null) return true;
+        require(pkg, CONNECT, ADMIN);
+        return mPolicy.confirm(pkg, "Unpair Bluetooth device " + address + " from Windows");
+    }
+
+    // --- bonds ---------------------------------------------------------------------------
+
+    private WindowsBluetooth.Device bonded(long address) {
+        synchronized (mLock) {
+            return mDevices.get(address);
+        }
+    }
+
+    /**
+     * Starts pairing through Windows' own UI: ACTION_BOND_STATE_CHANGED BONDING now, then
+     * BONDED (from the watch, which sees the new pairing) or back to NONE. False while the
+     * radio is off, for a bonded device, or with a pairing of it already running.
+     */
+    public boolean createBond(String address, boolean le) {
+        long value = WindowsBluetooth.address(address);
+        if (value < 0) throw new IllegalArgumentException(address + " is not a Bluetooth address");
+        if (state() != BluetoothAdapter.STATE_ON) return false;
+        poll();
+        if (bonded(value) != null) return false;
+        synchronized (mLock) {
+            if (!mPairing.add(value)) return false;
+        }
+        BluetoothDevice device = BluetoothDevice.createFromHost(address, BluetoothDevice.ADDRESS_TYPE_PUBLIC);
+        bondIntent(device, BluetoothDevice.BOND_BONDING, BluetoothDevice.BOND_NONE);
+        Thread t = new Thread(() -> {
+            int result = 2;
+            try {
+                result = WindowsBluetooth.pair(value, le);
+                SystemServer.log("bluetooth: pairing " + address + ": "
+                        + (result == 0 ? "paired" : result == 1 ? "already paired" : "not paired"));
+                poll();  // BONDED, when Windows now lists it
+            } finally {
+                boolean announced = bonded(value) != null;
+                synchronized (mLock) {
+                    mPairing.remove(value);
+                }
+                if (!announced) {
+                    bondIntent(device, BluetoothDevice.BOND_NONE, BluetoothDevice.BOND_BONDING);
+                }
+            }
+        }, "gesher-bluetooth-pair");
+        t.setDaemon(true);
+        t.start();
+        return true;
+    }
+
+    /** Removes Windows' pairing; the watch broadcasts BOND_NONE. */
+    public boolean removeBond(String address) {
+        long value = WindowsBluetooth.address(address);
+        if (value < 0) throw new IllegalArgumentException(address + " is not a Bluetooth address");
+        if (state() != BluetoothAdapter.STATE_ON) return false;
+        int result = WindowsBluetooth.unpair(value);
+        poll();
+        return result == 0;
+    }
+
+    private void bondIntent(BluetoothDevice device, int state, int previous) {
+        Intent i = new Intent(BluetoothDevice.ACTION_BOND_STATE_CHANGED);
+        i.putExtra(BluetoothDevice.EXTRA_DEVICE, device);
+        i.putExtra(BluetoothDevice.EXTRA_BOND_STATE, state);
+        i.putExtra(BluetoothDevice.EXTRA_PREVIOUS_BOND_STATE, previous);
+        send(i);
+    }
+
     // --- state ---------------------------------------------------------------------------
 
     /** BluetoothAdapter.STATE_* of Windows' radio now (no adapter: STATE_OFF). */
@@ -293,7 +395,9 @@ public final class BluetoothManagerService extends Binder {
                 for (;;) {
                     try {
                         poll();
-                        Thread.sleep(mPollMs);
+                        // Windows' events end the wait early; a pairing made elsewhere
+                        // (Settings) is seen within mPollMs.
+                        WindowsBluetooth.waitForChange((int) mPollMs);
                     } catch (InterruptedException e) {
                         return;
                     } catch (RuntimeException e) {
@@ -354,7 +458,14 @@ public final class BluetoothManagerService extends Binder {
         for (WindowsBluetooth.Device d : now.values()) {
             WindowsBluetooth.Device was = old.get(d.address);
             if (was == null) {
-                if (bonds) bond(d, BluetoothDevice.BOND_BONDED, BluetoothDevice.BOND_NONE);
+                if (bonds) {
+                    boolean pairing;
+                    synchronized (mLock) {
+                        pairing = mPairing.contains(d.address);
+                    }
+                    bond(d, BluetoothDevice.BOND_BONDED,
+                            pairing ? BluetoothDevice.BOND_BONDING : BluetoothDevice.BOND_NONE);
+                }
                 if (d.connected) connection(d, true);
             } else if (was.connected != d.connected) {
                 connection(d, d.connected);
@@ -550,15 +661,17 @@ public final class BluetoothManagerService extends Binder {
             }
         }
 
-        private static boolean call(int code, Object argument) {
+        private static boolean call(int code, Object... arguments) {
             IBinder b = service();
             if (b == null) return false;
             Parcel data = Parcel.obtain();
             Parcel reply = Parcel.obtain();
             try {
                 data.writeInterfaceToken(DESCRIPTOR);
-                if (argument instanceof Boolean) data.writeBoolean((Boolean) argument);
-                if (argument instanceof String) data.writeString((String) argument);
+                for (Object argument : arguments) {
+                    if (argument instanceof Boolean) data.writeBoolean((Boolean) argument);
+                    if (argument instanceof String) data.writeString((String) argument);
+                }
                 b.transact(code, data, reply, 0);
                 reply.readException();
                 return reply.readBoolean();
@@ -579,15 +692,23 @@ public final class BluetoothManagerService extends Binder {
         }
 
         public static boolean startDiscovery() {
-            return call(START_DISCOVERY, null);
+            return call(START_DISCOVERY);
         }
 
         public static boolean cancelDiscovery() {
-            return call(CANCEL_DISCOVERY, null);
+            return call(CANCEL_DISCOVERY);
         }
 
         public static boolean isDiscovering() {
-            return call(IS_DISCOVERING, null);
+            return call(IS_DISCOVERING);
+        }
+
+        public static boolean createBond(String address, boolean le) {
+            return call(CREATE_BOND, address, le);
+        }
+
+        public static boolean removeBond(String address) {
+            return call(REMOVE_BOND, address);
         }
 
         public static boolean fetchUuids(String address) {

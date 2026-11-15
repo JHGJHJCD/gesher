@@ -215,6 +215,41 @@ public final class WindowsBluetooth {
         return out;
     }
 
+    /** Pairs through Windows' own UI (blocks): 0 paired, 1 already paired, 2 not paired. */
+    public static int pair(long address, boolean le) {
+        int[] result = new int[] {2};
+        try {
+            nativePair(address, le, result);
+        } catch (UnsatisfiedLinkError e) {
+            return 2;
+        }
+        return result[0];
+    }
+
+    /** Removes Windows' pairing: 0 unpaired, 1 was not paired, 2 failed. */
+    public static int unpair(long address) {
+        int[] result = new int[] {2};
+        try {
+            nativeUnpair(address, result);
+        } catch (UnsatisfiedLinkError e) {
+            return 2;
+        }
+        return result[0];
+    }
+
+    /**
+     * Waits up to {@code timeoutMs} for a change Windows announces (radio state, a paired
+     * device's connection, a pairing); true when one came. Without natives it just waits.
+     */
+    public static boolean waitForChange(int timeoutMs) throws InterruptedException {
+        try {
+            return nativeWaitForChange(timeoutMs);
+        } catch (UnsatisfiedLinkError e) {
+            Thread.sleep(timeoutMs);
+            return false;
+        }
+    }
+
     // --- addresses ------------------------------------------------------------------------
 
     /** "AA:BB:CC:DD:EE:FF" (upper case, as BluetoothAdapter.checkBluetoothAddress wants). */
@@ -254,6 +289,9 @@ public final class WindowsBluetooth {
     static native String[] nativeInquiry(int seconds, int[] hr);
     static native void nativeInquiryCancel();
     static native String[] nativeRemoteUuids(long address, boolean refresh, int[] hr);
+    static native int nativePair(long address, boolean le, int[] result);
+    static native int nativeUnpair(long address, int[] result);
+    static native boolean nativeWaitForChange(int timeoutMs);
 
     public static native long nativeScanStart(boolean active, int[] hr);
     public static native byte[] nativeScanNext(long scan, int timeoutMs, long[] meta);
