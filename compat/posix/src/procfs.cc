@@ -23,6 +23,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <windows.h>
+// bcrypt.h needs windows.h first.
+#include <bcrypt.h>
 #if defined(__x86_64__)
 #include <intrin.h>
 #endif
@@ -291,13 +293,32 @@ std::string Stat(DWORD tid) {
                 static_cast<unsigned long long>(ThreadIds().size()), StartTicks(created), m.vsize, m.rss / 4096, processor);
 }
 
+}  // namespace
+}  // namespace procfs
+}  // namespace gesher
+
+// AT_RANDOM's 16 bytes, filled once from the system RNG: /proc/self/auxv
+// and the bionic shim's getauxval(AT_RANDOM) both point here.
+extern "C" const unsigned char* gesher_auxv_random(void) {
+  alignas(16) static unsigned char bytes[16];
+  static const bool filled = [] {
+    return BCryptGenRandom(nullptr, bytes, sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0;
+  }();
+  (void)filled;
+  return bytes;
+}
+
+namespace gesher {
+namespace procfs {
+namespace {
+
 // /proc/self/auxv: the auxiliary vector as the kernel gave it, 64-bit
 // (type, value) pairs ending with AT_NULL; the values getauxval reports
 // (compat/bionic/posix_bionic.cc). Code that reads the file instead of
 // calling getauxval exists: UPX's unpacker takes AT_PAGESZ from it, and stops
 // on an int3 if it cannot be opened.
 std::string Auxv() {
-  alignas(16) static uint8_t random_bytes[16];
+  const unsigned char* random_bytes = gesher_auxv_random();
   static const char kPlatform[] = "x86_64";
   const uint64_t pairs[][2] = {
       {6, 4096},                                         // AT_PAGESZ
