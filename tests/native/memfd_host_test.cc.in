@@ -156,6 +156,8 @@ struct LinuxTimespec { int64_t tv_sec, tv_nsec; };
 static constexpr int kENOSYS = ENOSYS, kEAGAIN = EAGAIN, kETIMEDOUT = ETIMEDOUT, kEINVAL = EINVAL;
 static DWORD MillisUntil(const LinuxTimespec*, bool) { return 0; }
 static bool DispatchTimerfdSyscall(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t*) { return false; }
+// syscall_bionic.cc's x86-64 table: a boundary here, as an unknown number.
+static int64_t RawSyscallX64(int64_t, const int64_t*) { return -ENOSYS; }
 static BOOL WaitOnAddress(void*, void*, size_t, DWORD) { last_error = ERROR_TIMEOUT; return 0; }
 static void WakeByAddressSingle(void*) {}
 static void WakeByAddressAll(void*) {}
