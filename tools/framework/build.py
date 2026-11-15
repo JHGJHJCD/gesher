@@ -22,11 +22,13 @@ script).
 """
 import argparse
 import collections
+import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -444,17 +446,63 @@ class Builder:
             run([self.tool('sysprop_java'), '--scope', 'internal', '--java-output-dir', d,
                  self.path(f)])
 
-    XSDC_COMMONS_CLI = 'https://repo1.maven.org/maven2/commons-cli/commons-cli/1.2/commons-cli-1.2.jar'
+    # Both official Maven Central endpoints serve these exact Commons CLI 1.2
+    # bytes. Keep the dependency fixed when an endpoint temporarily fails.
+    XSDC_COMMONS_CLI_URLS = (
+        'https://repo.maven.apache.org/maven2/commons-cli/commons-cli/1.2/commons-cli-1.2.jar',
+        'https://repo1.maven.org/maven2/commons-cli/commons-cli/1.2/commons-cli-1.2.jar',
+    )
+    XSDC_COMMONS_CLI_SHA256 = 'e7cd8951956d349b568b7ccfd4f5b2529a8c113e67c32b028f52ffda371259d9'
+
+    def xsdc_cli(self, jar_dir):
+        """Validate the cached CLI jar or atomically publish a verified download."""
+        cli = os.path.join(jar_dir, 'commons-cli-1.2.jar')
+
+        def valid(path):
+            try:
+                with open(path, 'rb') as source:
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: source.read(65536), b''):
+                        digest.update(chunk)
+                return digest.hexdigest() == self.XSDC_COMMONS_CLI_SHA256
+            except FileNotFoundError:
+                return False
+
+        try:
+            os.makedirs(jar_dir, exist_ok=True)
+            if valid(cli):
+                return cli
+            errors = []
+            for url in self.XSDC_COMMONS_CLI_URLS:
+                # A private directory on the destination filesystem keeps failed
+                # transfers out of the cache and makes replacement atomic.
+                with tempfile.TemporaryDirectory(prefix='commons-cli-', dir=jar_dir) as temporary:
+                    download = os.path.join(temporary, 'commons-cli-1.2.jar')
+                    try:
+                        # Two attempts per official endpoint, at most 45 seconds
+                        # for the entire curl process, including its retry delay.
+                        run(['curl', '-fsSL', '--connect-timeout', '10', '--max-time', '20',
+                             '--retry', '1', '--retry-delay', '1', '--retry-max-time', '45',
+                             '--retry-all-errors', '-o', download, url], timeout=45)
+                    except (RuntimeError, subprocess.TimeoutExpired) as error:
+                        errors.append(f'{url}: {error}')
+                        continue
+                    if not valid(download):
+                        errors.append(f'{url}: Commons CLI 1.2 SHA-256 mismatch')
+                        continue
+                    os.replace(download, cli)
+                    return cli
+            raise RuntimeError('xsdc: cannot acquire verified Commons CLI 1.2:\n' + '\n'.join(errors))
+        except OSError as error:
+            raise RuntimeError(f'xsdc: Commons CLI cache publication failed: {error}') from error
 
     def xsdc(self):
         """system/tools/xsdc, a Java tool, compiled on first use."""
         jar_dir = os.path.join(self.out, 'xsdc')
         classes = os.path.join(jar_dir, 'classes')
-        cli = os.path.join(jar_dir, 'commons-cli-1.2.jar')
+        # Existing compiled classes still need a complete, matching runtime jar.
+        cli = self.xsdc_cli(jar_dir)
         if not os.path.isdir(classes):
-            os.makedirs(jar_dir, exist_ok=True)
-            if not os.path.isfile(cli):
-                run(['curl', '-fsSL', '-o', cli, self.XSDC_COMMONS_CLI])
             srcs = []
             for dp, _, fs in os.walk(self.path('system/tools/xsdc/src/main/java')):
                 srcs += [os.path.join(dp, f) for f in fs if f.endswith('.java')]
