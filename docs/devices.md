@@ -3,6 +3,7 @@
 Design: [0043](decisions/0043-devices-hardware-apis.md). Tests:
 `tests/windows/tracks/58-devices.ps1` with `tests/apps/devices` (`devices.apk`,
 built in framework.yml), in the single-process mode and on the Gesher device.
+Bluetooth, also in compat/devices, has its own page: [bluetooth.md](bluetooth.md).
 
 ## Pieces
 

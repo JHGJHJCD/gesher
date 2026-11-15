@@ -35,6 +35,32 @@
 // range can also be recovered at execution time without modifying code/data.
 // Other faults, unknown displacements and missing TLS retain their failure path.
 // See docs/decisions/0014-native-libs-fs-base.md.
+//
+// Raw Linux system calls (docs/decisions/0084-native-libs-self-unpacking-code.md).
+// A `syscall` instruction in loaded code would enter the Windows kernel with a
+// Linux system call number (packers' stubs, anti-tamper code): Windows runs
+// whatever NT service has that number and returns an NTSTATUS in %rax
+// (UPX's mmap came back as 0xffffffffc0000005 and was used as a pointer). Each
+// one the rewrite finds becomes `ud2` (same length: 0F 05 -> 0F 0B), and the
+// vectored handler emulates the call through the handler the bionic shim
+// registers (SetRawSyscallHandler): %rax = number, %rdi, %rsi, %rdx, %r10,
+// %r8, %r9 = arguments, the result (or -errno) in %rax, %rcx and %r11
+// clobbered as the kernel does.
+//
+// Code that is not on disk (self-unpacking objects, code written at run time).
+// An object whose unwind information describes code outside its executable
+// file bytes, whose .eh_frame_hdr is not in its file bytes, or that UPX
+// packed, unpacks its code in its initializer: its file bytes there are
+// compressed data, which the rewrite must not touch. Such an object is not
+// rewritten at load; its executable pages are kept non-executable instead
+// (DeferUnpackedCode). Likewise, pages of any loaded object that loaded code
+// makes executable again (mprotect/mmap with PROT_EXEC: unpacked or patched
+// code, ProtectLoadedMemory/MapLoadedMemory) stay non-executable. The first
+// execution in such a page faults; the handler decodes from the faulting
+// address (an actual entry point) along direct control flow, plus the FDE
+// starts in that page once its code has been regenerated, rewrites what it
+// finds, gives the page the protection that was asked for and resumes.
+#include <gesher/elf_loader.h>
 #pragma once
 
 #include <stddef.h>
@@ -49,9 +75,11 @@ struct FsRewriteStats {
   size_t thread_ptr = 0;    // %fs:0 -> %gs:slot
   size_t stubbed = 0;       // register-based, replayed in a stub
   size_t trapped = 0;       // cannot be rewritten: int3 + diagnostic
+  size_t syscalls = 0;      // raw `syscall` -> ud2, emulated by the handler
   size_t bytes_decoded = 0;
   size_t decode_errors = 0; // bytes skipped because they did not decode
   bool used_fdes = false;   // .eh_frame_hdr supplied code ranges
+  bool self_unpacking = false;  // not rewritten at load: deferred to execution
 };
 
 // Rewrites the %fs accesses in a loaded object's executable segments. `file`
@@ -63,8 +91,18 @@ struct FsRewriteStats {
 // executable_tls_size is nonzero only for an already-assigned compatible
 // main executable, whose linker-resolved negative offsets occupy the first
 // static TLS block. Libraries retain their existing rewrite rules.
+// `map_base`/`map_size` are the object's whole reservation, registered for
+// the deferred rewrite of code made executable after the load.
 bool RewriteFsAccesses(const char* name, const uint8_t* file, size_t file_size,
-                       uint8_t* load_bias, FsRewriteStats* stats, std::string* error,
+                       uint8_t* load_bias, uint8_t* map_base, size_t map_size,
+                       FsRewriteStats* stats, std::string* error,
                        size_t executable_tls_size = 0);
+
+// For an object RewriteFsAccesses found self-unpacking (stats->self_unpacking):
+// after the loader's final mprotect, makes its executable segments readable
+// but not executable, so that their first execution is rewritten then. False
+// (and *error) if the pages cannot be re-protected.
+bool DeferUnpackedCode(const char* name, const uint8_t* file, uint8_t* load_bias,
+                       std::string* error);
 
 }  // namespace gesher::elf

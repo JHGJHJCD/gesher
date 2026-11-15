@@ -1,0 +1,219 @@
+/* Copyright (C) 2026 The Gesher Authors. SPDX-License-Identifier: Apache-2.0 */
+import java.lang.reflect.*;
+import java.util.*;
+
+public final class BluetoothScanHost {
+    private static int failures;
+    private static final BluetoothLeScanner scanner = new BluetoothLeScanner(new Context());
+    private static final class Callback extends ScanCallback {
+        int reports, first, lost, batches, batched;
+        public void onScanResult(int type, ScanResult result) {
+            reports++;
+            if (type == ScanSettings.CALLBACK_TYPE_FIRST_MATCH) first++;
+            if (type == ScanSettings.CALLBACK_TYPE_MATCH_LOST) lost++;
+        }
+        public void onBatchScanResults(List<ScanResult> results) {
+            batches++;
+            batched += results.size();
+        }
+    }
+    private static void check(boolean condition, String description) {
+        System.out.println((condition ? "PASS " : "FAIL ") + description);
+        if (!condition) failures++;
+    }
+    private static Field field(Class<?> type, String name) throws Exception {
+        Field result = type.getDeclaredField(name);
+        result.setAccessible(true);
+        return result;
+    }
+    private static Object client(Callback callback) throws Exception {
+        return ((Map<?, ?>) field(BluetoothLeScanner.class, "sClients").get(null)).get(callback);
+    }
+    private static int retained(Callback callback, String name) throws Exception {
+        Object value = client(callback);
+        Object collection = field(value.getClass(), name).get(value);
+        return collection instanceof Map ? ((Map<?, ?>) collection).size()
+                : ((Collection<?>) collection).size();
+    }
+    private static Callback start(int type, long delay) {
+        Callback callback = new Callback();
+        scanner.startScan(null, new ScanSettings(type, delay), callback);
+        return callback;
+    }
+    private static void deliver(String address) throws Exception {
+        Method method = BluetoothLeScanner.class.getDeclaredMethod("deliver", ScanResult.class);
+        method.setAccessible(true);
+        ScanResult result = new ScanResult(new BluetoothDevice(address, 0), 0x11, 1, 0,
+                0, 0, -50, 0, new ScanRecord(), SystemClock.elapsedRealtimeNanos());
+        method.invoke(null, result);
+    }
+    private static void housekeeping() throws Exception {
+        Method method = BluetoothLeScanner.class.getDeclaredMethod("housekeeping", long.class);
+        method.setAccessible(true);
+        method.invoke(null, SystemClock.elapsedRealtime());
+        Handler.drain();
+    }
+    private static void reset() {
+        scanner.cleanup();
+        Handler.drain();
+        SystemClock.now = 100;
+    }
+    public static void main(String[] args) throws Exception {
+        // Test through the public start/stop API without starting a real radio.
+        field(BluetoothLeScanner.class, "sThread").set(null, Thread.currentThread());
+        Callback all = start(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, 0);
+        for (int i = 0; i < 4096; i++) deliver("device-" + i);
+        Handler.drain();
+        check(all.reports == 4096, "ordinary scanning delivers every report");
+        check(retained(all, "lastSeen") == 0 && retained(all, "found") == 0,
+                "ordinary scanning does not retain a history of random addresses");
+        reset();
+
+        Callback first = start(ScanSettings.CALLBACK_TYPE_FIRST_MATCH, 0);
+        deliver("returning-device");
+        deliver("returning-device");
+        Handler.drain();
+        check(first.first == 1, "first-match suppresses duplicates while the device is present");
+        SystemClock.now += 10_001;
+        housekeeping();
+        check(retained(first, "lastSeen") == 0 && retained(first, "found") == 0,
+                "first-match alone releases departed-device tracking");
+        deliver("returning-device");
+        Handler.drain();
+        check(first.first == 2 && first.lost == 0,
+                "first-match reports a returning device without unsolicited lost callbacks");
+        reset();
+
+        Callback tracked = start(ScanSettings.CALLBACK_TYPE_FIRST_MATCH
+                | ScanSettings.CALLBACK_TYPE_MATCH_LOST, 0);
+        deliver("tracked-device");
+        Handler.drain();
+        SystemClock.now += 10_001;
+        housekeeping();
+        housekeeping();
+        check(tracked.first == 1 && tracked.lost == 1,
+                "combined found/lost reports each transition once");
+        reset();
+
+        Callback delayed = start(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, Long.MAX_VALUE);
+        for (int i = 0; i < 1537; i++) deliver("batch-device-" + i);
+        Handler.drain();
+        check(delayed.batched == 1536 && delayed.batches == 3 && retained(delayed, "batch") == 1,
+                "full batches flush early without dropping reports or retaining an unlimited queue");
+        scanner.flushPendingScanResults(delayed);
+        Handler.drain();
+        check(delayed.batched == 1537 && retained(delayed, "batch") == 0,
+                "explicit flush delivers the remaining partial batch exactly once");
+        reset();
+
+        Callback stopped = start(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, 0);
+        deliver("queued-before-stop");
+        scanner.stopScan(stopped);
+        Handler.drain();
+        check(stopped.reports == 0, "stop suppresses already queued callbacks");
+        System.out.println("BluetoothScanHost: " + failures + " failures");
+        if (failures != 0) throw new AssertionError("scan contracts failed");
+    }
+}
+
+// Only Android value types, scheduling and native boundaries are substituted.
+class Context {}
+class Intent {
+    void putExtra(String key, int value) {}
+    void putParcelableArrayListExtra(String key, ArrayList<ScanResult> value) {}
+}
+class PendingIntent {
+    static class CanceledException extends Exception {}
+    void send(Context context, int code, Intent intent) throws CanceledException {}
+}
+class Looper { static Looper getMainLooper() { return new Looper(); } }
+class Handler {
+    private static final Queue<Runnable> queue = new ArrayDeque<>();
+    Handler(Looper looper) {}
+    void post(Runnable callback) { queue.add(callback); }
+    static void drain() { while (!queue.isEmpty()) queue.remove().run(); }
+}
+class HandlerThread extends Thread {
+    HandlerThread(String name) { super(name); }
+    Looper getLooper() { return new Looper(); }
+}
+class SystemClock {
+    static long now = 100;
+    static long elapsedRealtime() { return now; }
+    static long elapsedRealtimeNanos() { return now * 1_000_000L; }
+}
+class Log {
+    static void i(String tag, String text) {}
+    static void w(String tag, String text) {}
+}
+class BluetoothDevice {
+    static final int PHY_LE_1M = 1;
+    private final String address;
+    private final int type;
+    BluetoothDevice(String address, int type) { this.address = address; this.type = type; }
+    String getAddress() { return address; }
+    int getAddressType() { return type; }
+    static BluetoothDevice createFromHost(String address, int type) { return new BluetoothDevice(address, type); }
+}
+class BluetoothHost {
+    static void enforceScan(Context context) {}
+    static boolean mayReceiveScanResults(Context context) { return true; }
+    static boolean on() { return true; }
+    static Context context(Context context) { return context; }
+    static BluetoothDevice device(String address, int type, Context context) { return new BluetoothDevice(address, type); }
+    static void sawLe(String address, String name) {}
+}
+class WindowsBluetooth {
+    static String address(long address) { return Long.toHexString(address); }
+    static String hresult(int value) { return Integer.toHexString(value); }
+    static long nativeScanStart(boolean active, int[] result) { throw new AssertionError("unexpected native start"); }
+    static byte[] nativeScanNext(long scan, int timeout, long[] meta) { throw new AssertionError("unexpected native next"); }
+    static void nativeScanStop(long scan) { throw new AssertionError("unexpected native stop"); }
+}
+class ScanRecord {
+    static ScanRecord parseFromBytes(byte[] bytes) { return new ScanRecord(); }
+    String getDeviceName() { return null; }
+}
+class ScanFilter { boolean matches(ScanResult result) { return true; } }
+class ScanCallback {
+    static final int NO_ERROR = 0, SCAN_FAILED_ALREADY_STARTED = 1, SCAN_FAILED_INTERNAL_ERROR = 3;
+    public void onScanResult(int type, ScanResult result) {}
+    public void onBatchScanResults(List<ScanResult> results) {}
+    public void onScanFailed(int error) {}
+}
+class ScanSettings {
+    static final int CALLBACK_TYPE_ALL_MATCHES = 1, CALLBACK_TYPE_FIRST_MATCH = 2,
+            CALLBACK_TYPE_MATCH_LOST = 4, CALLBACK_TYPE_ALL_MATCHES_AUTO_BATCH = 8;
+    private final int type;
+    private final long delay;
+    ScanSettings(int type, long delay) { this.type = type; this.delay = delay; }
+    int getCallbackType() { return type; }
+    long getReportDelayMillis() { return delay; }
+    static class Builder { ScanSettings build() { return new ScanSettings(1, 0); } }
+}
+class ScanResult {
+    static final int PHY_UNUSED = 0, SID_NOT_PRESENT = 255, PERIODIC_INTERVAL_NOT_PRESENT = 0;
+    private final BluetoothDevice device;
+    private final int event, primary, secondary, sid, power, rssi, interval;
+    private final ScanRecord record;
+    private final long timestamp;
+    ScanResult(BluetoothDevice device, int event, int primary, int secondary, int sid,
+            int power, int rssi, int interval, ScanRecord record, long timestamp) {
+        this.device = device; this.event = event; this.primary = primary; this.secondary = secondary;
+        this.sid = sid; this.power = power; this.rssi = rssi; this.interval = interval;
+        this.record = record; this.timestamp = timestamp;
+    }
+    BluetoothDevice getDevice() { return device; }
+    boolean isConnectable() { return (event & 1) != 0; }
+    boolean isLegacy() { return (event & 16) != 0; }
+    int getPrimaryPhy() { return primary; }
+    int getSecondaryPhy() { return secondary; }
+    int getAdvertisingSid() { return sid; }
+    int getTxPower() { return power; }
+    int getRssi() { return rssi; }
+    int getPeriodicAdvertisingInterval() { return interval; }
+    ScanRecord getScanRecord() { return record; }
+    long getTimestampNanos() { return timestamp; }
+}
+
+// PRODUCTION_SCANNER

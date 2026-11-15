@@ -5,17 +5,27 @@
 #include <elf.h>
 
 #include <sys/mman.h>
+#include <unistd.h>
 #include <windows.h>
 
+#include <errno.h>
+#include <io.h>
+
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
+#include <memory>
 #include <set>
 #include <vector>
 
 #include "tls.h"
 #include "x86_decode.h"
+
+// Internal POSIX mapper outcome, consumed immediately after a failed mmap.
+extern "C" int gesher_mmap_replaced_private_pages(void);
 
 namespace gesher::elf {
 
@@ -56,6 +66,10 @@ std::vector<CodeRange>& Ranges() {
 }
 PVOID g_handler = nullptr;
 volatile LONG g_reported = 0;
+
+// Raw system calls and code rewritten on execution (ADR 0084); defined below.
+bool HandleSyscallTrap(EXCEPTION_POINTERS* info);
+bool HandleExecuteFault(uintptr_t addr);
 
 const TrapSite* FindTrapLocked(uintptr_t addr) {
   auto& v = Traps();
@@ -104,6 +118,16 @@ bool RecoverUncoveredMov(EXCEPTION_POINTERS* info, const X86Insn& in, const Code
 
 LONG CALLBACK FsVectoredHandler(EXCEPTION_POINTERS* info) {
   const DWORD code = info->ExceptionRecord->ExceptionCode;
+  if (code == EXCEPTION_ILLEGAL_INSTRUCTION) {
+    // A raw `syscall` the rewrite turned into ud2: emulated.
+    return HandleSyscallTrap(info) ? EXCEPTION_CONTINUE_EXECUTION : EXCEPTION_CONTINUE_SEARCH;
+  }
+  if (code == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2 &&
+      info->ExceptionRecord->ExceptionInformation[0] == 8 /* execute */ &&
+      HandleExecuteFault(info->ExceptionRecord->ExceptionInformation[1])) {
+    // The first execution in a page of code made at run time: rewritten now.
+    return EXCEPTION_CONTINUE_EXECUTION;
+  }
   if (code == EXCEPTION_BREAKPOINT) {
     auto addr = reinterpret_cast<uintptr_t>(info->ExceptionRecord->ExceptionAddress);
     AcquireSRWLockShared(&g_lock);
@@ -131,6 +155,11 @@ LONG CALLBACK FsVectoredHandler(EXCEPTION_POINTERS* info) {
     std::abort();
   }
   if (code == EXCEPTION_ACCESS_VIOLATION) {
+    // An execute fault's %rip is the address that cannot run: nothing to decode.
+    if (info->ExceptionRecord->NumberParameters >= 2 &&
+        info->ExceptionRecord->ExceptionInformation[0] == 8) {
+      return EXCEPTION_CONTINUE_SEARCH;
+    }
     // Recover bounded MOV reads missed by static code metadata. Other faults
     // retain their original diagnostic and exception handling.
 #if defined(__x86_64__)
@@ -478,8 +507,19 @@ int CieFdeEncoding(const uint8_t* cie) {
 }
 
 // Code regions from .eh_frame_hdr: each FDE's [pc_begin, pc_begin + range).
-bool RegionsFromEhFrameHdr(const uint8_t* hdr, uint8_t* load_bias, std::vector<Region>* out) {
-  if (hdr[0] != 1) return false;
+// `readable` (vaddrs) is where the object's file bytes are mapped: a packed
+// object's table can point outside them, into pages that are not mapped yet.
+bool RegionsFromEhFrameHdr(const uint8_t* hdr, uint8_t* load_bias,
+                           const std::vector<Region>& readable, std::vector<Region>* out) {
+  const auto bias_value = reinterpret_cast<uintptr_t>(load_bias);
+  auto in_file = [&](const uint8_t* p, size_t n) {
+    const uintptr_t v = reinterpret_cast<uintptr_t>(p) - bias_value;
+    for (const Region& r : readable) {
+      if (v >= r.start && v <= r.end && n <= r.end - v) return true;
+    }
+    return false;
+  };
+  if (!in_file(hdr, 12) || hdr[0] != 1) return false;
   uint8_t eh_ptr_enc = hdr[1], count_enc = hdr[2], table_enc = hdr[3];
   const uint8_t* p = hdr + 4;
   uint64_t v;
@@ -487,12 +527,14 @@ bool RegionsFromEhFrameHdr(const uint8_t* hdr, uint8_t* load_bias, std::vector<R
   if (count_enc == 0xFF || !ReadEncodedValue(&p, count_enc, &v)) return false;
   uint64_t count = v;
   if (table_enc != 0x3B || count == 0) return false;  // datarel | sdata4
+  if (count > (1u << 24) || !in_file(p, static_cast<size_t>(count) * 8)) return false;
   const auto bias = reinterpret_cast<uintptr_t>(load_bias);
   const auto hdr_addr = reinterpret_cast<uintptr_t>(hdr);
   for (uint64_t i = 0; i < count; ++i, p += 8) {
     uintptr_t pc = hdr_addr + static_cast<intptr_t>(ReadI32(p));
     const uint8_t* fde = reinterpret_cast<const uint8_t*>(hdr_addr +
                                                           static_cast<intptr_t>(ReadI32(p + 4)));
+    if (!in_file(fde, 32)) continue;
     const uint8_t* q = fde;
     uint32_t len32;
     std::memcpy(&len32, q, 4);
@@ -510,6 +552,7 @@ bool RegionsFromEhFrameHdr(const uint8_t* hdr, uint8_t* load_bias, std::vector<R
       cie_off = c;
       q += 4;
     }
+    if (!in_file(cie_field - cie_off, 32)) continue;
     int enc = CieFdeEncoding(cie_field - cie_off);
     if (enc < 0) continue;
     uint64_t begin_raw, range;
@@ -521,27 +564,676 @@ bool RegionsFromEhFrameHdr(const uint8_t* hdr, uint8_t* load_bias, std::vector<R
   return !out->empty();
 }
 
+
+// --- control flow, shared by the load-time and the deferred rewrite ----------
+
+// The target of a direct (relative) jump, call or conditional branch at
+// `address` (whose bytes are at `at`), if `in` is one.
+bool BranchTarget(const uint8_t* at, uint64_t address, const X86Insn& in, uint64_t* target) {
+  bool relative = !in.vex && ((in.map == 0 &&
+      (in.opcode == 0xE8 || in.opcode == 0xE9 || in.opcode == 0xEB ||
+       (in.opcode >= 0x70 && in.opcode <= 0x7F) || (in.opcode >= 0xE0 && in.opcode <= 0xE3))) ||
+      (in.map == 1 && in.opcode >= 0x80 && in.opcode <= 0x8F));
+  if (!relative || (in.imm_size != 1 && in.imm_size != 4)) return false;
+  const uint8_t* immediate = at + in.length - in.imm_size;
+  int32_t delta;
+  if (in.imm_size == 1) delta = static_cast<int8_t>(*immediate);
+  else std::memcpy(&delta, immediate, sizeof delta);
+  *target = address + in.length + delta;
+  return true;
+}
+
+// Do not decode inline data after returns, unconditional jumps, padding
+// traps or indirect jumps. Conditional edges retain their fallthrough.
+bool EndsBlock(const X86Insn& in) {
+  return !in.vex && ((in.map == 0 &&
+      (in.opcode == 0xC3 || in.opcode == 0xC2 || in.opcode == 0xCB || in.opcode == 0xCA ||
+       in.opcode == 0xE9 || in.opcode == 0xEB || in.opcode == 0xCC ||
+       (in.opcode == 0xFF && (in.reg() & 7) >= 4 && (in.reg() & 7) <= 5))) ||
+      (in.map == 1 && in.opcode == 0x0B));
+}
+
+bool IsSyscall(const uint8_t* site, const X86Insn& in) {
+  return !in.vex && in.map == 1 && in.opcode == 0x05 && in.length == in.opcode_off + 2 &&
+         site[in.opcode_off] == 0x0F && site[in.opcode_off + 1] == 0x05;
+}
+
+// --- objects whose code can change after the load (ADR 0084) -----------------
+
+constexpr uintptr_t kPage = 0x1000;
+uintptr_t PageOf(uintptr_t a) { return a & ~(kPage - 1); }
+
+std::atomic<RawSyscallHandler> g_raw_syscall{nullptr};
+
+struct LazyObject {
+  const char* name = nullptr;  // lives as long as the process
+  uintptr_t bias = 0;          // load bias
+  uintptr_t lo = 0, hi = 0;    // the reservation
+  std::vector<Region> fdes;    // code ranges from .eh_frame_hdr (vaddrs)
+  bool unpacking = false;      // self-unpacking: its file bytes are not its code
+  bool anonymous = false;      // code a raw system call mapped outside every object
+  uint64_t eh_frame_hdr = 0;   // vaddr of PT_GNU_EH_FRAME, if any
+  bool eh_frame_hdr_read = false;  // read from memory after unpacking
+  std::vector<StubArena> arenas;         // read-write-execute stubs of deferred rewrites
+  std::map<uintptr_t, uint8_t> patched;  // rewritten instruction -> its length
+  std::map<uintptr_t, int> done;         // page rewritten on execution -> its protection
+};
+
+struct PendingPage {
+  LazyObject* object;
+  int prot;          // what loaded code asked for (with PROT_EXEC)
+  bool regenerated;  // made executable after the load: its FDEs describe it
+};
+
+// g_lazy_lock guards the objects and pages; it is taken before g_lock, never
+// while holding it, and never by the handler for anything but an execute fault.
+SRWLOCK g_lazy_lock = SRWLOCK_INIT;
+std::vector<LazyObject*>& Objects() {
+  static std::vector<LazyObject*> v;
+  return v;
+}
+std::map<uintptr_t, PendingPage>& Pending() {
+  static std::map<uintptr_t, PendingPage> m;
+  return m;
+}
+// Every rewritten `syscall` (now ud2) -> its length. Under g_lock.
+std::map<uintptr_t, uint8_t>& SyscallSites() {
+  static std::map<uintptr_t, uint8_t> m;
+  return m;
+}
+
+// Code that copies itself carries our ud2 along: UPX's stub copies itself
+// into an anonymous mapping and runs the copy. Each rewritten site keeps the
+// bytes around it (as rewritten, within its page); a ud2 elsewhere with the
+// same bytes around it is a copy of that system call. Under g_lock.
+struct SyscallFingerprint {
+  uint8_t length;           // the instruction's
+  uint8_t before, after;    // bytes kept on each side of it
+  uint8_t bytes[15 + 32];
+};
+std::vector<SyscallFingerprint>& Fingerprints() {
+  static std::vector<SyscallFingerprint> v;
+  return v;
+}
+constexpr size_t kFingerprintSide = 16;
+constexpr size_t kFingerprintMin = 12;  // context bytes needed to call it a copy
+
+bool ReadSafely(uintptr_t addr, void* out, size_t n) {
+  SIZE_T got = 0;
+  return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(addr), out, n, &got) &&
+         got == n;
+}
+
+// The length of the system call a ud2 at `rip` is a copy of, or 0: the same
+// instruction bytes, and at least kFingerprintMin bytes around them that
+// match outwards from it (a copy may end soon after: UPX copies its stub up
+// to its last `ret`). With g_lock held.
+uint8_t CopiedSyscallLengthLocked(uintptr_t rip) {
+  for (const SyscallFingerprint& f : Fingerprints()) {
+    uint8_t insn[15];
+    if (!ReadSafely(rip, insn, f.length) || std::memcmp(insn, f.bytes + f.before, f.length) != 0) {
+      continue;
+    }
+    size_t back = 0, forward = 0;
+    uint8_t byte;
+    while (back < f.before && ReadSafely(rip - 1 - back, &byte, 1) &&
+           byte == f.bytes[f.before - 1 - back]) {
+      ++back;
+    }
+    while (forward < f.after && ReadSafely(rip + f.length + forward, &byte, 1) &&
+           byte == f.bytes[f.before + f.length + forward]) {
+      ++forward;
+    }
+    if (back + forward >= kFingerprintMin) return f.length;
+  }
+  return 0;
+}
+
+LazyObject* FindObjectLocked(uintptr_t addr) {
+  for (LazyObject* o : Objects()) {
+    if (addr >= o->lo && addr < o->hi) return o;
+  }
+  return nullptr;
+}
+
+// The protection a pending page has: what was asked for, without PROT_EXEC,
+// and readable so that the rewrite can decode it.
+int PendingProt(int prot) { return (prot & ~PROT_EXEC) | PROT_READ; }
+
+// --- the rewriting ------------------------------------------------------------
+
+// Rewrites single instructions of one object: at load time over its code, or
+// on execution over code that was made at run time (`deferred`).
+class Rewriter {
+ public:
+  Rewriter(LazyObject* object, bool deferred, FsRewriteStats* stats, std::string* error,
+           size_t executable_tls_size, uintptr_t span_lo, uintptr_t span_hi,
+           std::map<uintptr_t, int>* restore)
+      : o_(object), deferred_(deferred), stats_(stats), error_(error),
+        executable_tls_size_(executable_tls_size), span_lo_(span_lo), span_hi_(span_hi),
+        restore_(restore), first_new_arena_(object->arenas.size()) {}
+
+  // Rewrites the instruction `in` at `site` if it needs it. False only on a
+  // hard failure (*error set).
+  bool Rewrite(uint8_t* site, const X86Insn& in);
+  // Makes the stubs executable and registers traps, system calls and the
+  // given code ranges with the handler.
+  bool Finish(const std::vector<CodeRange>& code_ranges);
+
+ private:
+  bool NeedSlot();
+  uint8_t* AllocStub(size_t n);
+  void AddTrap(uint8_t* site, const X86Insn& in, uintptr_t stub, const char* reason);
+  bool MakeWritable(uint8_t* site, size_t n);
+  void Unsupported(uint8_t* site, const X86Insn& in, const char* reason);
+  void EnterStub(uint8_t* site, const X86Insn& in, uint8_t* stub);
+  void NotePatched(const uint8_t* site, const X86Insn& in) {
+    o_->patched[reinterpret_cast<uintptr_t>(site)] = static_cast<uint8_t>(in.length);
+  }
+
+  LazyObject* o_;
+  bool deferred_;
+  FsRewriteStats* stats_;
+  std::string* error_;
+  size_t executable_tls_size_;
+  uintptr_t span_lo_, span_hi_;
+  std::map<uintptr_t, int>* restore_;  // deferred: pages to re-protect afterwards
+  int32_t slot_ = 0;                   // TEB offset of the thread-pointer slot
+  std::vector<StubArena> arenas_;      // load time: made read-execute in Finish
+  size_t first_new_arena_;             // deferred: the object's arenas from here are new
+  std::vector<TrapSite> traps_;
+  std::vector<std::pair<uintptr_t, uint8_t>> syscalls_;
+  std::set<uintptr_t> writable_pages_;
+};
+
+bool Rewriter::NeedSlot() {
+  if (slot_ == 0) slot_ = static_cast<int32_t>(TlsThreadPointerSlot());
+  if (slot_ == 0) {
+    if (error_) *error_ = std::string(o_->name) + ": no inline TLS slot for the %fs rewrite";
+    return false;
+  }
+  return true;
+}
+
+uint8_t* Rewriter::AllocStub(size_t n) {
+  std::vector<StubArena>& arenas = deferred_ ? o_->arenas : arenas_;
+  if (arenas.empty() || arenas.back().used + n > kStubChunk) {
+    uint8_t* chunk = AllocNear(span_lo_, span_hi_);
+    if (chunk == nullptr) return nullptr;
+    if (deferred_) {
+      // Stubs of deferred rewrites are added while other threads run earlier
+      // ones: their memory stays writable and executable.
+      DWORD old;
+      if (!VirtualProtect(chunk, kStubChunk, PAGE_EXECUTE_READWRITE, &old)) return nullptr;
+    }
+    arenas.push_back({chunk, 0});
+  }
+  uint8_t* p = arenas.back().base + arenas.back().used;
+  arenas.back().used += n;
+  return p;
+}
+
+void Rewriter::AddTrap(uint8_t* site, const X86Insn& in, uintptr_t stub, const char* reason) {
+  TrapSite t{};
+  t.addr = reinterpret_cast<uintptr_t>(site);
+  t.stub = stub;
+  t.reason = reason;
+  t.lib = o_->name;
+  t.lib_bias = o_->bias;
+  t.length = static_cast<uint8_t>(in.length);
+  std::memcpy(t.bytes, site, in.length);
+  traps_.push_back(t);
+  NotePatched(site, in);
+  site[0] = 0xCC;  // int3
+}
+
+// At load time the segments are file-backed views mapped read-execute
+// (elf_loader.cc, MapSegments): only the pages that get patched become
+// writable (copy-on-write, so they alone turn private); the loader's final
+// mprotect makes them read-execute again. Deferred, a page is pending (not
+// executable) or was rewritten before (executable, maybe running on another
+// thread): it is made writable, keeping that, and its protection is restored
+// afterwards (restore_).
+bool Rewriter::MakeWritable(uint8_t* site, size_t n) {
+  const uintptr_t first = reinterpret_cast<uintptr_t>(site) & ~(kPage - 1);
+  const uintptr_t last = (reinterpret_cast<uintptr_t>(site) + n - 1) & ~(kPage - 1);
+  for (uintptr_t page = first; page <= last; page += kPage) {
+    if (writable_pages_.count(page) != 0) continue;
+    int prot = PROT_READ | PROT_WRITE | PROT_EXEC;
+    if (deferred_) {
+      int restore;
+      auto pending = Pending().find(page);
+      if (pending != Pending().end()) {
+        restore = PendingProt(pending->second.prot);
+        prot = PROT_READ | PROT_WRITE;
+      } else if (auto done = o_->done.find(page); done != o_->done.end()) {
+        restore = done->second;
+        prot = restore | PROT_READ | PROT_WRITE;
+      } else {
+        restore = PROT_READ | PROT_EXEC;  // not reached: the walk stays in such pages
+      }
+      (*restore_)[page] = restore;
+    }
+    if (mprotect(reinterpret_cast<void*>(page), kPage, prot) != 0) {
+      if (error_) *error_ = std::string(o_->name) + ": cannot make code writable for the %fs rewrite";
+      return false;
+    }
+    writable_pages_.insert(page);
+  }
+  return true;
+}
+
+void Rewriter::Unsupported(uint8_t* site, const X86Insn& in, const char* reason) {
+  std::fprintf(stderr,
+               "gesher elf: %s+0x%llx: %%fs access not rewritten (%s); it aborts if reached\n",
+               o_->name, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(site) - o_->bias),
+               reason);
+  AddTrap(site, in, 0, reason);
+  ++stats_->trapped;
+}
+
+// The site becomes a `jmp rel32` to the stub when the instruction is long
+// enough and the stub is within reach, else an int3 the handler redirects.
+void Rewriter::EnterStub(uint8_t* site, const X86Insn& in, uint8_t* stub) {
+  const uintptr_t stub_addr = reinterpret_cast<uintptr_t>(stub);
+  const uintptr_t next = reinterpret_cast<uintptr_t>(site) + 5;
+  if (in.length >= 5 && Rel32Reachable(next, stub_addr)) {
+    NotePatched(site, in);
+    site[0] = 0xE9;  // jmp rel32
+    WriteI32(site + 1, static_cast<int32_t>(static_cast<int64_t>(stub_addr) -
+                                            static_cast<int64_t>(next)));
+    for (size_t i = 5; i < in.length; ++i) site[i] = 0xCC;
+  } else {
+    AddTrap(site, in, stub_addr, nullptr);
+  }
+}
+
+bool Rewriter::Rewrite(uint8_t* site, const X86Insn& in) {
+  if (IsSyscall(site, in)) {
+    // A raw Linux system call: ud2 (same length), emulated by the handler.
+    if (!MakeWritable(site + in.opcode_off + 1, 1)) return false;
+    NotePatched(site, in);
+    site[in.opcode_off + 1] = 0x0B;
+    syscalls_.emplace_back(reinterpret_cast<uintptr_t>(site), static_cast<uint8_t>(in.length));
+    ++stats_->syscalls;
+    return true;
+  }
+  if (!in.fs || !in.has_mem()) return true;  // %fs on a non-memory form is inert
+  if (in.map == 0 && in.opcode == 0x8D) return true;  // lea ignores the segment
+  if (in.map == 1 && !in.vex && (in.opcode >= 0x18 && in.opcode <= 0x1F)) return true;  // hints/nop
+  if (in.map == 1 && !in.vex && in.opcode == 0x0D) return true;  // prefetchw
+  // Every path below changes the instruction's bytes.
+  if (!MakeWritable(site, in.length)) return false;
+  if (in.gs) {
+    Unsupported(site, in, "both %fs and %gs prefixes");
+    return true;
+  }
+  if (in.absolute()) {
+    int32_t disp = ReadI32(site + in.disp_off);
+    if (disp < 0 && static_cast<uint64_t>(-static_cast<int64_t>(disp)) <= executable_tls_size_) {
+      int scratch = -1;
+      if (const char* why = PlanAbsoluteStub(in, &scratch)) {
+        Unsupported(site, in, why);
+        return true;
+      }
+      if (!NeedSlot()) return false;
+      uint8_t* stub = AllocStub(kMaxStub);
+      if (!stub) {
+        if (error_) *error_ = std::string(o_->name) + ": out of memory for local-exec TLS stubs";
+        return false;
+      }
+      uint8_t* tail = EmitAbsoluteStub(stub, site, in, scratch, slot_);
+      const uint8_t jump[] = {0xFF, 0x25, 0, 0, 0, 0};
+      std::memcpy(tail, jump, sizeof(jump));
+      uint64_t back = reinterpret_cast<uint64_t>(site + in.length);
+      std::memcpy(tail + sizeof(jump), &back, 8);
+      ++stats_->stubbed;
+      EnterStub(site, in, stub);
+      return true;
+    }
+    int32_t to;
+    if (disp == kBionicStackGuard) {
+      to = kTebSelf;
+      ++stats_->stack_guard;
+    } else if (disp == 0) {
+      if (!NeedSlot()) return false;
+      to = slot_;
+      ++stats_->thread_ptr;
+    } else {
+      Unsupported(site, in, "a %fs displacement other than 0 (thread pointer) or 0x28 (guard)");
+      return true;
+    }
+    for (size_t i = 0; i < in.opcode_off; ++i) {
+      if (site[i] == 0x64) site[i] = 0x65;
+    }
+    WriteI32(site + in.disp_off, to);
+    return true;
+  }
+  if (in.rip_relative()) {
+    Unsupported(site, in, "a RIP-relative %fs operand");
+    return true;
+  }
+  int adj = -1;
+  bool restore = true;
+  if (const char* why = PlanStub(in, &adj, &restore)) {
+    Unsupported(site, in, why);
+    return true;
+  }
+  if (!NeedSlot()) return false;
+  uint8_t* stub = AllocStub(kMaxStub);
+  if (stub == nullptr) {
+    if (error_) *error_ = std::string(o_->name) + ": out of memory for %fs stubs";
+    return false;
+  }
+  uint8_t* s = EmitAdjust(stub, adj, true, slot_);
+  for (size_t i = 0; i < in.length; ++i) {  // the instruction without 0x64
+    if (i < in.opcode_off && site[i] == 0x64) continue;
+    *s++ = site[i];
+  }
+  if (restore) s = EmitAdjust(s, adj, false, slot_);
+  const uint8_t jmp_abs[] = {0xFF, 0x25, 0, 0, 0, 0};  // jmp *0(%rip)
+  std::memcpy(s, jmp_abs, sizeof(jmp_abs));
+  s += sizeof(jmp_abs);
+  uint64_t back = reinterpret_cast<uint64_t>(site + in.length);
+  std::memcpy(s, &back, 8);
+  ++stats_->stubbed;
+  EnterStub(site, in, stub);
+  return true;
+}
+
+bool Rewriter::Finish(const std::vector<CodeRange>& code_ranges) {
+  if (!deferred_) {
+    // Make the stubs executable.
+    for (const StubArena& a : arenas_) {
+      DWORD old;
+      if (!VirtualProtect(a.base, kStubChunk, PAGE_EXECUTE_READ, &old)) {
+        if (error_) *error_ = std::string(o_->name) + ": cannot make %fs stubs executable";
+        return false;
+      }
+      FlushInstructionCache(GetCurrentProcess(), a.base, kStubChunk);
+    }
+  } else {
+    for (size_t i = 0; i < o_->arenas.size(); ++i) {
+      FlushInstructionCache(GetCurrentProcess(), o_->arenas[i].base, kStubChunk);
+    }
+  }
+  AcquireSRWLockExclusive(&g_lock);
+  EnsureHandler();
+  auto& all = Traps();
+  // A page can be rewritten more than once. Replace a previous trap at the
+  // same instruction address so the handler cannot choose an obsolete stub.
+  // Other existing traps still describe unchanged int3 bytes in that page.
+  std::set<uintptr_t> replaced;
+  for (const TrapSite& trap : traps_) replaced.insert(trap.addr);
+  all.erase(std::remove_if(all.begin(), all.end(),
+      [&](const TrapSite& trap) { return replaced.count(trap.addr) != 0; }), all.end());
+  all.insert(all.end(), traps_.begin(), traps_.end());
+  std::sort(all.begin(), all.end(),
+            [](const TrapSite& a, const TrapSite& b) { return a.addr < b.addr; });
+  for (const auto& site : syscalls_) {
+    SyscallSites()[site.first] = site.second;
+    // Its bytes as they are now that every rewrite of this pass is done.
+    SyscallFingerprint f{};
+    f.length = site.second;
+    const uintptr_t page = PageOf(site.first);
+    const uintptr_t end = site.first + site.second;
+    f.before = static_cast<uint8_t>(std::min<uintptr_t>(kFingerprintSide, site.first - page));
+    f.after = static_cast<uint8_t>(end >= page + kPage ? 0
+                                   : std::min<uintptr_t>(kFingerprintSide, page + kPage - end));
+    const size_t kept = static_cast<size_t>(f.before) + f.after;
+    if (kept >= kFingerprintMin &&
+        ReadSafely(site.first - f.before, f.bytes, kept + f.length)) {
+      Fingerprints().push_back(f);
+    }
+  }
+  for (const CodeRange& r : code_ranges) Ranges().push_back(r);
+  const std::vector<StubArena>& arenas = deferred_ ? o_->arenas : arenas_;
+  for (size_t i = deferred_ ? first_new_arena_ : 0; i < arenas.size(); ++i) {
+    Ranges().push_back({reinterpret_cast<uintptr_t>(arenas[i].base),
+                        reinterpret_cast<uintptr_t>(arenas[i].base) + kStubChunk, o_->name,
+                        o_->bias, true});
+  }
+  ReleaseSRWLockExclusive(&g_lock);
+  return true;
+}
+
+// --- deferred rewrite, on execution -------------------------------------------
+
+// A `syscall` rewritten before (now ud2, which would end the walk), or 0.
+uint8_t KnownSyscallLength(uintptr_t address) {
+  AcquireSRWLockShared(&g_lock);
+  auto& sites = SyscallSites();
+  auto it = sites.find(address);
+  uint8_t length = it != sites.end() ? it->second : 0;
+  if (length == 0) length = CopiedSyscallLengthLocked(address);
+  ReleaseSRWLockShared(&g_lock);
+  const auto* bytes = reinterpret_cast<const uint8_t*>(address);
+  if (length < 2 || bytes[length - 2] != 0x0F || bytes[length - 1] != 0x0B) return 0;
+  return length;
+}
+
+// The readable memory of `o`'s reservation now, as vaddrs.
+std::vector<Region> ReadableRegions(const LazyObject* o) {
+  std::vector<Region> out;
+  for (uintptr_t at = o->lo; at < o->hi;) {
+    MEMORY_BASIC_INFORMATION info{};
+    if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) == 0) break;
+    const uintptr_t end =
+        std::min(o->hi, reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize);
+    if (end <= at) break;
+    const bool readable = info.State == MEM_COMMIT &&
+                          (info.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
+    if (readable) {
+      if (!out.empty() && out.back().end == at - o->bias) out.back().end = end - o->bias;
+      else out.push_back({at - o->bias, end - o->bias});
+    }
+    at = end;
+  }
+  return out;
+}
+
+// Rewrites the code reachable from `entry`, the address the first execution in
+// a pending page faulted at, along direct control flow, and from the starts of
+// the FDEs in that page once its code is regenerated. Decoding stays in the
+// object's pending and rewritten pages. With g_lazy_lock held exclusively.
+bool RewriteOnExecution(LazyObject* o, uintptr_t entry, bool regenerated,
+                        std::map<uintptr_t, int>* restore) {
+  auto& pending = Pending();
+  // A packed object's .eh_frame_hdr may exist only once it is unpacked.
+  if (regenerated && o->fdes.empty() && o->eh_frame_hdr != 0 && !o->eh_frame_hdr_read) {
+    o->eh_frame_hdr_read = true;
+    RegionsFromEhFrameHdr(reinterpret_cast<const uint8_t*>(o->bias + o->eh_frame_hdr),
+                          reinterpret_cast<uint8_t*>(o->bias), ReadableRegions(o), &o->fdes);
+  }
+  auto walkable_page = [&](uintptr_t page) {
+    if (page < o->lo || page >= o->hi) return false;
+    auto it = pending.find(page);
+    if (it != pending.end()) return it->second.object == o;
+    return o->done.count(page) != 0;
+  };
+  // FDEs describe a self-unpacking object's code only where it was unpacked.
+  auto fde_page = [&](uintptr_t page) {
+    if (!walkable_page(page)) return false;
+    if (!o->unpacking) return true;
+    auto it = pending.find(page);
+    return it != pending.end() ? it->second.regenerated : true;
+  };
+  auto limit = [&](uintptr_t address) {
+    uintptr_t page = PageOf(address);
+    while (walkable_page(page)) page += kPage;
+    return page;
+  };
+
+  std::vector<uintptr_t> roots{entry};
+  if (regenerated || !o->unpacking) {
+    const uintptr_t page = PageOf(entry);
+    for (const Region& r : o->fdes) {
+      const uintptr_t start = o->bias + r.start, end = o->bias + r.end;
+      if (start < page + kPage && end > page && fde_page(PageOf(start))) roots.push_back(start);
+    }
+  }
+
+  FsRewriteStats stats;  // deferred rewrites are not counted in the load's
+  std::string error;
+  Rewriter rewriter(o, true, &stats, &error, 0, o->lo, o->hi, restore);
+  std::set<uintptr_t> visited;
+  bool rewritten = true;
+  for (size_t next = 0; rewritten && next < roots.size(); ++next) {
+    uintptr_t address = roots[next];
+    const uintptr_t end = limit(address);
+    while (address < end && visited.insert(address).second) {
+      // An instruction rewritten before: its original continues after it.
+      auto patched = o->patched.find(address);
+      if (patched != o->patched.end()) {
+        address += patched->second;
+        continue;
+      }
+      if (const uint8_t length = KnownSyscallLength(address)) {
+        address += length;
+        continue;
+      }
+      X86Insn in;
+      const auto* at = reinterpret_cast<uint8_t*>(address);
+      if (!DecodeX86(at, static_cast<size_t>(end - address), &in)) break;
+      uint64_t target;
+      if (BranchTarget(at, address, in, &target) && walkable_page(PageOf(target))) {
+        roots.push_back(static_cast<uintptr_t>(target));
+      }
+      if (!rewriter.Rewrite(reinterpret_cast<uint8_t*>(address), in)) {
+        std::fprintf(stderr, "gesher elf: %s\n", error.c_str());
+        rewritten = false;
+        break;
+      }
+      if (EndsBlock(in)) break;
+      address += in.length;
+    }
+  }
+  // Register any instructions already patched even after a later failure,
+  // but do not let the caller execute a partially rewritten page.
+  return rewriter.Finish({}) && rewritten;
+}
+
+bool HandleExecuteFault(uintptr_t addr) {
+  const uintptr_t page = PageOf(addr);
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  bool handled = false;
+  auto& pending = Pending();
+  auto it = pending.find(page);
+  if (it == pending.end()) {
+    // Another thread rewrote it first: run it, if it is executable now.
+    LazyObject* o = FindObjectLocked(addr);
+    if (o != nullptr) {
+      auto done = o->done.find(page);
+      handled = done != o->done.end() && (done->second & PROT_EXEC) != 0;
+    }
+  } else {
+    const PendingPage p = it->second;
+    std::map<uintptr_t, int> restore;
+    bool rewritten = RewriteOnExecution(p.object, addr, p.regenerated, &restore);
+    for (const auto& r : restore) {
+      if (mprotect(reinterpret_cast<void*>(r.first), kPage, r.second) != 0) rewritten = false;
+    }
+    if (rewritten && mprotect(reinterpret_cast<void*>(page), kPage, p.prot) == 0) {
+      FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(page), kPage);
+      pending.erase(page);
+      p.object->done[page] = p.prot;
+      handled = true;
+    }
+  }
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  return handled;
+}
+
+bool HandleSyscallTrap(EXCEPTION_POINTERS* info) {
+#if defined(__x86_64__)
+  CONTEXT* c = info->ContextRecord;
+  const uintptr_t rip = c->Rip;
+  AcquireSRWLockShared(&g_lock);
+  auto& sites = SyscallSites();
+  auto it = sites.find(rip);
+  uint8_t length = it != sites.end() ? it->second : 0;
+  const bool copied = length == 0 && (length = CopiedSyscallLengthLocked(rip)) != 0;
+  ReleaseSRWLockShared(&g_lock);
+  if (length < 2) return false;
+  if (copied) {  // known from now on
+    AcquireSRWLockExclusive(&g_lock);
+    SyscallSites()[rip] = length;
+    ReleaseSRWLockExclusive(&g_lock);
+  }
+  // Only our own ud2: code written over the site since is something else.
+  const auto* bytes = reinterpret_cast<const uint8_t*>(rip);
+  if (bytes[length - 2] != 0x0F || bytes[length - 1] != 0x0B) return false;
+  const int64_t args[6] = {static_cast<int64_t>(c->Rdi), static_cast<int64_t>(c->Rsi),
+                           static_cast<int64_t>(c->Rdx), static_cast<int64_t>(c->R10),
+                           static_cast<int64_t>(c->R8),  static_cast<int64_t>(c->R9)};
+  RawSyscallHandler handler = g_raw_syscall.load(std::memory_order_acquire);
+  constexpr int64_t kENOSYS = 38;
+  const int64_t result =
+      handler != nullptr ? handler(static_cast<int64_t>(c->Rax), args) : -kENOSYS;
+  // As the kernel returns: the result in %rax, %rcx = next %rip, %r11 = rflags.
+  c->Rax = static_cast<DWORD64>(result);
+  c->Rcx = rip + length;
+  c->R11 = c->EFlags;
+  c->Rip = rip + length;
+  return true;
+#else
+  (void)info;
+  return false;
+#endif
+}
+
 }  // namespace
 
 bool RewriteFsAccesses(const char* name, const uint8_t* file, size_t file_size,
-                       uint8_t* load_bias, FsRewriteStats* stats, std::string* error,
+                       uint8_t* load_bias, uint8_t* map_base, size_t map_size,
+                       FsRewriteStats* stats, std::string* error,
                        size_t executable_tls_size) {
   *stats = FsRewriteStats{};
   const auto* ehdr = reinterpret_cast<const Elf64_Ehdr*>(file);
   const auto* phdr = reinterpret_cast<const Elf64_Phdr*>(file + ehdr->e_phoff);
   const auto bias = reinterpret_cast<uintptr_t>(load_bias);
 
-  // Executable file-backed ranges, and .eh_frame_hdr.
-  std::vector<Region> exec;
-  const uint8_t* eh_frame_hdr = nullptr;
+  // Executable file-backed ranges, the file bytes of every segment, and
+  // .eh_frame_hdr (only where the file's bytes are mapped: a packed object's
+  // can point into its unpacked image, which is not there yet).
+  std::vector<Region> exec, file_bytes;
   for (int i = 0; i < ehdr->e_phnum; ++i) {
-    if (phdr[i].p_type == PT_LOAD && (phdr[i].p_flags & PF_X) && phdr[i].p_filesz > 0) {
-      exec.push_back({phdr[i].p_vaddr, phdr[i].p_vaddr + phdr[i].p_filesz});
-    } else if (phdr[i].p_type == PT_GNU_EH_FRAME) {
-      eh_frame_hdr = load_bias + phdr[i].p_vaddr;
+    if (phdr[i].p_type == PT_LOAD && phdr[i].p_filesz > 0) {
+      file_bytes.push_back({phdr[i].p_vaddr, phdr[i].p_vaddr + phdr[i].p_filesz});
+      if (phdr[i].p_flags & PF_X) exec.push_back(file_bytes.back());
     }
   }
-  if (exec.empty()) return true;
+  const uint8_t* eh_frame_hdr = nullptr;
+  uint64_t eh_frame_hdr_vaddr = 0;
+  bool eh_frame_hdr_outside = false;
+  for (int i = 0; i < ehdr->e_phnum; ++i) {
+    if (phdr[i].p_type != PT_GNU_EH_FRAME) continue;
+    bool inside = false;
+    for (const Region& r : file_bytes) {
+      inside |= phdr[i].p_vaddr >= r.start && phdr[i].p_vaddr + 12 <= r.end;
+    }
+    if (inside) eh_frame_hdr = load_bias + phdr[i].p_vaddr;
+    else eh_frame_hdr_outside = true;
+    eh_frame_hdr_vaddr = phdr[i].p_vaddr;
+  }
+
+  // The object, for code made executable after the load. Registered when the
+  // load-time rewrite is done.
+  auto* object = new LazyObject();
+  object->name = _strdup(name);
+  object->bias = bias;
+  object->lo = reinterpret_cast<uintptr_t>(map_base);
+  object->hi = object->lo + map_size;
+  object->eh_frame_hdr = eh_frame_hdr_vaddr;
+  auto register_object = [&] {
+    AcquireSRWLockExclusive(&g_lazy_lock);
+    Objects().push_back(object);
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+  };
+  if (exec.empty()) {
+    register_object();
+    return true;
+  }
 
   // Unwind coverage can be partial, but executable sections also contain data
   // (OpenSSL's assembly tables, for example). Never sweep gaps between FDEs as
@@ -549,8 +1241,45 @@ bool RewriteFsAccesses(const char* name, const uint8_t* file, size_t file_size,
   // for decoding code without unwind metadata.
   std::vector<Region> regions, sections;
   std::vector<uint64_t> roots;
-  if (eh_frame_hdr != nullptr && RegionsFromEhFrameHdr(eh_frame_hdr, load_bias, &regions))
+  if (eh_frame_hdr != nullptr &&
+      RegionsFromEhFrameHdr(eh_frame_hdr, load_bias, file_bytes, &regions))
     stats->used_fdes = true;
+  object->fdes = regions;
+
+  // A self-unpacking object: its unwind information describes code that is
+  // not in its executable file bytes (or is itself not in the file), or UPX
+  // packed it. Its file bytes there are compressed data: nothing is rewritten
+  // now; DeferUnpackedCode makes the code wait for its first execution.
+  size_t outside = 0;
+  for (const Region& r : regions) {
+    bool in_exec = false;
+    for (const Region& e : exec) in_exec |= r.start >= e.start && r.end <= e.end;
+    if (!in_exec) ++outside;
+  }
+  static const char kUpxInfo[] = "$Info: This file is packed with the UPX";
+  bool upx = false;
+  for (int i = 0; i < ehdr->e_phnum && !upx; ++i) {
+    if (phdr[i].p_type != PT_LOAD || !(phdr[i].p_flags & PF_X) ||
+        phdr[i].p_offset > file_size || phdr[i].p_filesz > file_size - phdr[i].p_offset) continue;
+    const uint8_t* begin = file + phdr[i].p_offset;
+    const uint8_t* end = begin + phdr[i].p_filesz;
+    upx = std::search(begin, end, kUpxInfo, kUpxInfo + sizeof(kUpxInfo) - 1) != end;
+  }
+  if (eh_frame_hdr_outside || upx || (outside > 0 && outside * 4 >= regions.size())) {
+    stats->self_unpacking = true;
+    object->unpacking = true;
+    std::fprintf(stderr,
+                 "gesher elf: %s unpacks its code at run time (%s); it is rewritten as it runs\n",
+                 name, upx ? "UPX" : eh_frame_hdr_outside ? ".eh_frame_hdr outside its file bytes"
+                                                          : "unwind information outside its code");
+    // The whole reservation, for the handler's diagnostics and recovery.
+    Rewriter rewriter(object, false, stats, error, executable_tls_size, object->lo, object->hi,
+                      nullptr);
+    if (!rewriter.Finish({{object->lo, object->hi, object->name, bias, false}})) return false;
+    register_object();
+    return true;
+  }
+
   if (ehdr->e_entry != 0) roots.push_back(ehdr->e_entry);
   if (ehdr->e_shoff != 0 && ehdr->e_shentsize == sizeof(Elf64_Shdr) &&
       ehdr->e_shoff <= file_size &&
@@ -606,16 +1335,8 @@ bool RewriteFsAccesses(const char* name, const uint8_t* file, size_t file_size,
     return address;
   };
   auto branch = [&](uint64_t address, const X86Insn& in) {
-    bool relative = !in.vex && ((in.map == 0 &&
-        (in.opcode == 0xE8 || in.opcode == 0xE9 || in.opcode == 0xEB ||
-         (in.opcode >= 0x70 && in.opcode <= 0x7F) || (in.opcode >= 0xE0 && in.opcode <= 0xE3))) ||
-        (in.map == 1 && in.opcode >= 0x80 && in.opcode <= 0x8F));
-    if (!relative || (in.imm_size != 1 && in.imm_size != 4)) return;
-    const uint8_t* immediate = load_bias + address + in.length - in.imm_size;
-    int32_t delta;
-    if (in.imm_size == 1) delta = static_cast<int8_t>(*immediate);
-    else std::memcpy(&delta, immediate, sizeof delta);
-    uint64_t target = address + in.length + delta;
+    uint64_t target;
+    if (!BranchTarget(load_bias + address, address, in, &target)) return;
     if (!covered(target) && limit(target) > target) roots.push_back(target);
   };
   // Find references to uncovered code before any instruction bytes change.
@@ -636,27 +1357,10 @@ bool RewriteFsAccesses(const char* name, const uint8_t* file, size_t file_size,
       if (!DecodeX86(load_bias + address, static_cast<size_t>(end - address), &in)) break;
       merged.push_back({address, address + in.length});
       branch(address, in);
-      // Do not decode inline data after returns, unconditional jumps, padding
-      // traps or indirect jumps. Conditional edges retain their fallthrough.
-      bool stop = !in.vex && ((in.map == 0 &&
-          (in.opcode == 0xC3 || in.opcode == 0xC2 || in.opcode == 0xCB || in.opcode == 0xCA ||
-           in.opcode == 0xE9 || in.opcode == 0xEB || in.opcode == 0xCC ||
-           (in.opcode == 0xFF && (in.reg() & 7) >= 4 && (in.reg() & 7) <= 5))) ||
-          (in.map == 1 && in.opcode == 0x0B));
-      if (stop) break;
+      if (EndsBlock(in)) break;
       address += in.length;
     }
   }
-
-  int32_t slot = 0;  // the TEB offset of the thread-pointer slot, on demand
-  auto need_slot = [&]() -> bool {
-    if (slot == 0) slot = static_cast<int32_t>(TlsThreadPointerSlot());
-    if (slot == 0) {
-      if (error) *error = std::string(name) + ": no inline TLS slot for the %fs rewrite";
-      return false;
-    }
-    return true;
-  };
 
   // The object's whole executable span, for stub placement and diagnostics.
   uintptr_t span_lo = UINTPTR_MAX, span_hi = 0;
@@ -665,65 +1369,7 @@ bool RewriteFsAccesses(const char* name, const uint8_t* file, size_t file_size,
     span_hi = std::max<uintptr_t>(span_hi, bias + e.end);
   }
 
-  std::vector<StubArena> arenas;
-  std::vector<TrapSite> traps;
-  // Names must outlive the object; the loader never frees them, but keep our
-  // own copy so the handler never reads freed memory.
-  char* lib_name = _strdup(name);
-
-  auto alloc_stub = [&](size_t n) -> uint8_t* {
-    if (arenas.empty() || arenas.back().used + n > kStubChunk) {
-      uint8_t* chunk = AllocNear(span_lo, span_hi);
-      if (chunk == nullptr) return nullptr;
-      arenas.push_back({chunk, 0});
-    }
-    uint8_t* p = arenas.back().base + arenas.back().used;
-    arenas.back().used += n;
-    return p;
-  };
-
-  auto add_trap = [&](uint8_t* site, const X86Insn& in, uintptr_t stub, const char* reason) {
-    TrapSite t{};
-    t.addr = reinterpret_cast<uintptr_t>(site);
-    t.stub = stub;
-    t.reason = reason;
-    t.lib = lib_name;
-    t.lib_bias = bias;
-    t.length = static_cast<uint8_t>(in.length);
-    std::memcpy(t.bytes, site, in.length);
-    traps.push_back(t);
-    site[0] = 0xCC;  // int3
-  };
-
-  // The segments are file-backed views mapped read-execute (elf_loader.cc,
-  // MapSegments): only the pages that get patched become writable (copy-on-
-  // write, so they alone turn private); the loader's final mprotect makes
-  // them read-execute again.
-  std::set<uintptr_t> writable_pages;
-  auto make_writable = [&](uint8_t* site, size_t n) -> bool {
-    constexpr uintptr_t kPage = 0x1000;
-    const uintptr_t first = reinterpret_cast<uintptr_t>(site) & ~(kPage - 1);
-    const uintptr_t last = (reinterpret_cast<uintptr_t>(site) + n - 1) & ~(kPage - 1);
-    for (uintptr_t page = first; page <= last; page += kPage) {
-      if (writable_pages.count(page) != 0) continue;
-      if (mprotect(reinterpret_cast<void*>(page), kPage, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-        if (error) *error = std::string(name) + ": cannot make code writable for the %fs rewrite";
-        return false;
-      }
-      writable_pages.insert(page);
-    }
-    return true;
-  };
-
-  auto unsupported = [&](uint8_t* site, const X86Insn& in, const char* reason) {
-    std::fprintf(stderr,
-                 "gesher elf: %s+0x%llx: %%fs access not rewritten (%s); it aborts if reached\n",
-                 name, static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(site) - bias),
-                 reason);
-    add_trap(site, in, 0, reason);
-    ++stats->trapped;
-  };
-
+  Rewriter rewriter(object, false, stats, error, executable_tls_size, span_lo, span_hi, nullptr);
   for (const Region& r : merged) {
     uint8_t* p = load_bias + r.start;
     uint8_t* end = load_bias + r.end;
@@ -737,131 +1383,521 @@ bool RewriteFsAccesses(const char* name, const uint8_t* file, size_t file_size,
       stats->bytes_decoded += in.length;
       uint8_t* site = p;
       p += in.length;
-      if (!in.fs || !in.has_mem()) continue;  // %fs on a non-memory form is inert
-      if (in.map == 0 && in.opcode == 0x8D) continue;  // lea ignores the segment
-      if (in.map == 1 && !in.vex && (in.opcode >= 0x18 && in.opcode <= 0x1F)) continue;  // hints/nop
-      if (in.map == 1 && !in.vex && in.opcode == 0x0D) continue;  // prefetchw
-      // Every path below changes the instruction's bytes.
-      if (!make_writable(site, in.length)) return false;
-      if (in.gs) {
-        unsupported(site, in, "both %fs and %gs prefixes");
-        continue;
+      if (!rewriter.Rewrite(site, in)) return false;
+    }
+  }
+
+  // The whole reservation: code made executable after the load is the
+  // object's too (diagnostics, recovery of missed %fs reads).
+  if (!rewriter.Finish({{object->lo, object->hi, object->name, bias, false}})) return false;
+  register_object();
+  return true;
+}
+
+bool DeferUnpackedCode(const char* name, const uint8_t* file, uint8_t* load_bias,
+                       std::string* error) {
+  const auto* ehdr = reinterpret_cast<const Elf64_Ehdr*>(file);
+  const auto* phdr = reinterpret_cast<const Elf64_Phdr*>(file + ehdr->e_phoff);
+  const auto bias = reinterpret_cast<uintptr_t>(load_bias);
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  bool ok = true;
+  LazyObject* object = nullptr;
+  for (LazyObject* o : Objects()) {
+    if (o->bias == bias) object = o;
+  }
+  for (int i = 0; ok && object != nullptr && i < ehdr->e_phnum; ++i) {
+    if (phdr[i].p_type != PT_LOAD || !(phdr[i].p_flags & PF_X) || phdr[i].p_memsz == 0) continue;
+    const uintptr_t start = PageOf(bias + phdr[i].p_vaddr);
+    const uintptr_t end = PageOf(bias + phdr[i].p_vaddr + phdr[i].p_memsz + kPage - 1);
+    const int prot = PROT_READ | PROT_EXEC | ((phdr[i].p_flags & PF_W) ? PROT_WRITE : 0);
+    ok = mprotect(reinterpret_cast<void*>(start), end - start, PendingProt(prot)) == 0;
+    for (uintptr_t page = start; ok && page < end; page += kPage) {
+      Pending()[page] = {object, prot, false};
+    }
+  }
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  if (!ok && error) *error = std::string(name) + ": cannot defer the code of a self-unpacking object";
+  return ok && object != nullptr;
+}
+
+// --- public: raw system calls and memory of loaded code (elf_loader.h) -------
+
+void SetRawSyscallHandler(RawSyscallHandler handler) {
+  g_raw_syscall.store(handler, std::memory_order_release);
+}
+
+namespace {
+
+// For each run of pages in [start, end) inside a registered object (with
+// g_lazy_lock held): `inside(lo, hi, object)`; for the rest, `outside(lo, hi)`.
+template <typename Inside, typename Outside>
+bool ForEachObjectRun(uintptr_t start, uintptr_t end, Inside inside, Outside outside) {
+  bool ok = true;
+  for (uintptr_t at = start; at < end;) {
+    LazyObject* o = FindObjectLocked(at);
+    uintptr_t next = end;
+    if (o != nullptr) {
+      next = std::min(end, o->hi);
+      ok &= inside(at, next, o);
+    } else {
+      for (LazyObject* other : Objects()) {
+        if (other->lo > at && other->lo < next) next = other->lo;
       }
-      if (in.absolute()) {
-        int32_t disp = ReadI32(site + in.disp_off);
-        if (disp < 0 && static_cast<uint64_t>(-static_cast<int64_t>(disp)) <= executable_tls_size) {
-          int scratch = -1;
-          if (const char* why = PlanAbsoluteStub(in, &scratch)) {
-            unsupported(site, in, why);
-            continue;
-          }
-          if (!need_slot()) return false;
-          uint8_t* stub = alloc_stub(kMaxStub);
-          if (!stub) {
-            if (error) *error = std::string(name) + ": out of memory for local-exec TLS stubs";
-            return false;
-          }
-          uint8_t* tail = EmitAbsoluteStub(stub, site, in, scratch, slot);
-          const uint8_t jump[] = {0xFF, 0x25, 0, 0, 0, 0};
-          std::memcpy(tail, jump, sizeof(jump));
-          uint64_t back = reinterpret_cast<uint64_t>(site + in.length);
-          std::memcpy(tail + sizeof(jump), &back, 8);
-          ++stats->stubbed;
-          uintptr_t next = reinterpret_cast<uintptr_t>(site) + 5;
-          if (in.length >= 5 && Rel32Reachable(next, reinterpret_cast<uintptr_t>(stub))) {
-            site[0] = 0xE9;
-            WriteI32(site + 1, static_cast<int32_t>(reinterpret_cast<intptr_t>(stub) -
-                                                  static_cast<intptr_t>(next)));
-            for (size_t i = 5; i < in.length; ++i) site[i] = 0xCC;
-          } else {
-            add_trap(site, in, reinterpret_cast<uintptr_t>(stub), nullptr);
-          }
-          continue;
-        }
-        int32_t to;
-        if (disp == kBionicStackGuard) {
-          to = kTebSelf;
-          ++stats->stack_guard;
-        } else if (disp == 0) {
-          if (!need_slot()) return false;
-          to = slot;
-          ++stats->thread_ptr;
-        } else {
-          unsupported(site, in, "a %fs displacement other than 0 (thread pointer) or 0x28 (guard)");
-          continue;
-        }
-        for (size_t i = 0; i < in.opcode_off; ++i) {
-          if (site[i] == 0x64) site[i] = 0x65;
-        }
-        WriteI32(site + in.disp_off, to);
-        continue;
-      }
-      if (in.rip_relative()) {
-        unsupported(site, in, "a RIP-relative %fs operand");
-        continue;
-      }
-      int adj = -1;
-      bool restore = true;
-      if (const char* why = PlanStub(in, &adj, &restore)) {
-        unsupported(site, in, why);
-        continue;
-      }
-      if (!need_slot()) return false;
-      uint8_t* stub = alloc_stub(kMaxStub);
-      if (stub == nullptr) {
-        if (error) *error = std::string(name) + ": out of memory for %fs stubs";
+      ok &= outside(at, next);
+    }
+    at = next;
+  }
+  return ok;
+}
+
+bool OverlapsObjectLocked(uintptr_t start, uintptr_t end) {
+  for (LazyObject* o : Objects()) {
+    if (o->lo < end && start < o->hi) return true;
+  }
+  return false;
+}
+
+// The pages' contents may change: what was rewritten there is decoded anew.
+void ForgetPatchedLocked(LazyObject* o, uintptr_t lo, uintptr_t hi) {
+  o->patched.erase(o->patched.lower_bound(PageOf(lo)), o->patched.lower_bound(hi));
+}
+
+// Pages that were unmapped, replaced or made non-executable are neither
+// pending nor rewritten.
+void ForgetPagesLocked(LazyObject* o, uintptr_t lo, uintptr_t hi) {
+  for (uintptr_t page = PageOf(lo); page < hi; page += kPage) {
+    Pending().erase(page);
+    o->done.erase(page);
+  }
+  ForgetPatchedLocked(o, lo, hi);
+}
+
+// [lo, hi) of `o` now holds code to be run with `prot`: pending until its
+// first execution.
+void DeferPagesLocked(LazyObject* o, uintptr_t lo, uintptr_t hi, int prot) {
+  for (uintptr_t page = PageOf(lo); page < hi; page += kPage) {
+    o->done.erase(page);
+    Pending()[page] = {o, prot, true};
+  }
+  ForgetPatchedLocked(o, lo, hi);
+}
+
+uintptr_t PageEnd(uintptr_t addr, size_t len) {
+  const uintptr_t end = addr + len;
+  return end < addr ? UINTPTR_MAX & ~(kPage - 1) : PageOf(end + kPage - 1);
+}
+
+// A native shared view owns the file object and its final partial page. In
+// particular, bytes written after EOF in that page belong to the mapping's
+// cache, not to the file's logical contents. Writing them with pwrite would
+// extend the file; omitting them would lose them on a subsequent mmap.
+struct SharedMapping {
+  HANDLE section = nullptr;
+  uint8_t* view = nullptr;
+  uint8_t* data = nullptr;
+  bool writable = false;
+  // A non-writable page was synchronized before losing write access (or has
+  // never been writable). Its backing is current, including with PROT_NONE.
+  std::vector<bool> readonly_clean;
+  ~SharedMapping() {
+    if (view != nullptr) UnmapViewOfFile(view);
+    if (section != nullptr) CloseHandle(section);
+  }
+};
+
+// The live page ranges of copied shared mappings. Split ranges share one
+// native backing view; descriptor reuse cannot change its identity. These
+// copies publish changes at msync/unmap/replacement; they do not provide
+// live coherence with another anonymous copy. Under g_lazy_lock.
+struct SharedCopy {
+  uintptr_t start = 0;
+  size_t len = 0;  // whole mapped pages, including the partial EOF page
+  size_t backing_offset = 0;
+  std::shared_ptr<SharedMapping> backing;
+};
+std::vector<SharedCopy>& SharedCopies() {
+  static std::vector<SharedCopy> v;
+  return v;
+}
+
+bool OverlapsSharedCopyLocked(uintptr_t lo, uintptr_t hi) {
+  for (const SharedCopy& copy : SharedCopies()) {
+    if (copy.start < hi && lo < copy.start + copy.len) return true;
+  }
+  return false;
+}
+
+// Copy whole affected pages into the native view, including its EOF tail.
+// ReadProcessMemory reports inaccessible source pages instead of crashing
+// the host. No guest page protections are changed to perform writeback.
+bool WriteBackLocked(uintptr_t lo, uintptr_t hi) {
+  for (const SharedCopy& copy : SharedCopies()) {
+    const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, copy.start + copy.len);
+    if (a >= b || !copy.backing->writable) continue;
+    for (uintptr_t at = a; at < b;) {
+      const size_t offset = copy.backing_offset + (at - copy.start);
+      if (copy.backing->readonly_clean[offset / kPage]) { at += kPage; continue; }
+      uintptr_t end = at + kPage;
+      while (end < b && !copy.backing->readonly_clean[
+                                  (copy.backing_offset + end - copy.start) / kPage]) end += kPage;
+      uint8_t* target = copy.backing->data + offset;
+      SIZE_T copied = 0;
+      if (!ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(at),
+                             target, end - at, &copied) || copied != end - at) {
+        errno = EFAULT;
         return false;
       }
-      uint8_t* s = EmitAdjust(stub, adj, true, slot);
-      for (size_t i = 0; i < in.length; ++i) {  // the instruction without 0x64
-        if (i < in.opcode_off && site[i] == 0x64) continue;
-        *s++ = site[i];
+      if (!FlushViewOfFile(target, end - at)) {
+        errno = EIO;
+        return false;
       }
-      if (restore) s = EmitAdjust(s, adj, false, slot);
-      const uint8_t jmp_abs[] = {0xFF, 0x25, 0, 0, 0, 0};  // jmp *0(%rip)
-      std::memcpy(s, jmp_abs, sizeof(jmp_abs));
-      s += sizeof(jmp_abs);
-      uint64_t back = reinterpret_cast<uint64_t>(site + in.length);
-      std::memcpy(s, &back, 8);
-      ++stats->stubbed;
-      uintptr_t stub_addr = reinterpret_cast<uintptr_t>(stub);
-      uintptr_t next = reinterpret_cast<uintptr_t>(site) + 5;
-      if (in.length >= 5 && Rel32Reachable(next, stub_addr)) {
-        site[0] = 0xE9;  // jmp rel32
-        WriteI32(site + 1, static_cast<int32_t>(static_cast<int64_t>(stub_addr) -
-                                                static_cast<int64_t>(next)));
-        for (size_t i = 5; i < in.length; ++i) site[i] = 0xCC;
-      } else {
-        add_trap(site, in, stub_addr, nullptr);
-      }
+      at = end;
     }
   }
-
-  // Make the stubs executable.
-  for (const StubArena& a : arenas) {
-    DWORD old;
-    if (!VirtualProtect(a.base, kStubChunk, PAGE_EXECUTE_READ, &old)) {
-      if (error) *error = std::string(name) + ": cannot make %fs stubs executable";
-      return false;
-    }
-    FlushInstructionCache(GetCurrentProcess(), a.base, kStubChunk);
-  }
-
-  AcquireSRWLockExclusive(&g_lock);
-  EnsureHandler();
-  auto& all = Traps();
-  all.insert(all.end(), traps.begin(), traps.end());
-  std::sort(all.begin(), all.end(),
-            [](const TrapSite& a, const TrapSite& b) { return a.addr < b.addr; });
-  for (const Region& e : exec) {
-    Ranges().push_back({bias + e.start, bias + e.end, lib_name, bias, false});
-  }
-  for (const StubArena& a : arenas) {
-    Ranges().push_back({reinterpret_cast<uintptr_t>(a.base),
-                        reinterpret_cast<uintptr_t>(a.base) + kStubChunk, lib_name, bias, true});
-  }
-  ReleaseSRWLockExclusive(&g_lock);
   return true;
+}
+
+// Observe actual protection even after a partially applied mprotect failure.
+// Pages losing write access were synchronized first; writable pages can change
+// again after this call, so a successful msync alone never marks them clean.
+void SharedCopyAccessLocked(uintptr_t lo, uintptr_t hi) {
+  for (SharedCopy& copy : SharedCopies()) {
+    const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, copy.start + copy.len);
+    for (uintptr_t at = a; at < b; at += kPage) {
+      MEMORY_BASIC_INFORMATION info;
+      if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) == 0) continue;
+      const DWORD access = info.Protect & 0xff;
+      const bool writable = access == PAGE_READWRITE || access == PAGE_WRITECOPY ||
+                            access == PAGE_EXECUTE_READWRITE || access == PAGE_EXECUTE_WRITECOPY;
+      copy.backing->readonly_clean[(copy.backing_offset + at - copy.start) / kPage] = !writable;
+    }
+  }
+}
+
+// Retire only pages that were successfully unmapped/replaced. In particular,
+// removing a prefix must not leave a later writeback reading its freed pages.
+void ForgetSharedCopiesLocked(uintptr_t lo, uintptr_t hi) {
+  auto& copies = SharedCopies();
+  for (size_t i = 0; i < copies.size();) {
+    SharedCopy& copy = copies[i];
+    const uintptr_t end = copy.start + copy.len;
+    const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, end);
+    if (a >= b) { ++i; continue; }
+    if (a == copy.start && b == end) {
+      copies.erase(copies.begin() + i);
+      continue;
+    }
+    if (a == copy.start) {
+      copy.backing_offset += b - copy.start;
+      copy.start = b;
+      copy.len = end - b;
+    } else if (b == end) {
+      copy.len = a - copy.start;
+    } else {
+      SharedCopy suffix = copy;
+      suffix.backing_offset += b - copy.start;
+      suffix.start = b;
+      suffix.len = end - b;
+      copy.len = a - copy.start;
+      copies.push_back(std::move(suffix));
+    }
+    ++i;
+  }
+}
+
+// A base mapping can fail after removing destination pages. Preserve records
+// for untouched pages, but never read a now-free/reserved/replaced page later.
+// Plain in-place anonymous replacement needs the mapper's explicit outcome:
+// its new allocation may have the same VirtualQuery identity as the old one.
+void ReconcileFailedMappingLocked(uintptr_t lo, uintptr_t hi, bool private_replaced) {
+  const int saved_errno = errno;
+  if (private_replaced) {
+    ForgetSharedCopiesLocked(lo, hi);
+  } else {
+    std::vector<std::pair<uintptr_t, uintptr_t>> retired;
+    for (const SharedCopy& copy : SharedCopies()) {
+      const uintptr_t a = std::max(lo, copy.start), b = std::min(hi, copy.start + copy.len);
+      for (uintptr_t at = a; at < b;) {
+        MEMORY_BASIC_INFORMATION info;
+        if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) == 0) break;
+        const uintptr_t end = std::min(b,
+            reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize);
+        if (end <= at) break;
+        if (info.State != MEM_COMMIT || info.Type != MEM_PRIVATE) retired.emplace_back(at, end);
+        at = end;
+      }
+    }
+    for (const auto& range : retired) ForgetSharedCopiesLocked(range.first, range.second);
+  }
+  errno = saved_errno;
+}
+
+// A shared file view with a partial final page cannot replace a Windows
+// placeholder. Retain a native view elsewhere and copy its mapped pages at
+// the requested address, with writeback on synchronization or retirement.
+// Publish the returned record only after the old mapping's record is retired.
+void* CopyFileMapping(void* addr, size_t len, int prot, int flags, int fd, int64_t offset,
+                      SharedCopy* copy) {
+  const int keep = dup(fd);
+  if (keep < 0) return MAP_FAILED;
+  auto backing = std::make_shared<SharedMapping>();
+  HANDLE file = reinterpret_cast<HANDLE>(_get_osfhandle(keep));
+  LARGE_INTEGER file_length;
+  SYSTEM_INFO info;
+  GetSystemInfo(&info);
+  const size_t span = (len + kPage - 1) & ~(kPage - 1);
+  const uint64_t begin = static_cast<uint64_t>(offset);
+  const size_t padding = static_cast<size_t>(begin % info.dwAllocationGranularity);
+  auto fail = [&](void* mapped) {
+    const int saved_errno = errno;
+    if (mapped != nullptr) munmap(mapped, len);
+    close(keep);
+    errno = saved_errno;
+    return MAP_FAILED;
+  };
+  if (!GetFileSizeEx(file, &file_length)) {
+    errno = EBADF;
+    return fail(nullptr);
+  }
+  if (file_length.QuadPart <= 0) { errno = EINVAL; return fail(nullptr); }
+  const uint64_t file_size = static_cast<uint64_t>(file_length.QuadPart);
+  // Whole pages past EOF would need SIGBUS behavior, not anonymous zeros.
+  if (begin >= file_size || span > ((file_size - begin + kPage - 1) & ~(kPage - 1)) ||
+      span > SIZE_MAX - padding) {
+    errno = EINVAL;
+    return fail(nullptr);
+  }
+  backing->section = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+  backing->writable = backing->section != nullptr;
+  if (backing->section == nullptr && (prot & PROT_WRITE) == 0) {
+    backing->section = CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+  }
+  if (backing->section == nullptr) { errno = EACCES; return fail(nullptr); }
+  const uint64_t view_offset = begin - padding;
+  // A zero view length includes the physical partial page without extending
+  // the section or the file's EOF. Never request a larger section maximum.
+  const size_t view_len = span <= file_size - begin ? span + padding : 0;
+  backing->view = static_cast<uint8_t*>(MapViewOfFile(backing->section,
+      backing->writable ? FILE_MAP_WRITE : FILE_MAP_READ,
+      static_cast<DWORD>(view_offset >> 32), static_cast<DWORD>(view_offset), view_len));
+  if (backing->view == nullptr) { errno = ENOMEM; return fail(nullptr); }
+  backing->data = backing->view + padding;
+  backing->readonly_clean.assign(span / kPage, (prot & PROT_WRITE) == 0);
+  void* p = mmap(addr, len, PROT_READ | PROT_WRITE,
+                 (flags & MAP_FIXED) | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) {
+    ReconcileFailedMappingLocked(reinterpret_cast<uintptr_t>(addr),
+        PageEnd(reinterpret_cast<uintptr_t>(addr), len), gesher_mmap_replaced_private_pages() != 0);
+    return fail(nullptr);
+  }
+  // The previous pages are already gone, even if a later protection step
+  // fails. Do not retain their records for a future read from freed memory.
+  ForgetSharedCopiesLocked(reinterpret_cast<uintptr_t>(p), PageEnd(reinterpret_cast<uintptr_t>(p), len));
+  std::memcpy(p, backing->data, span);
+  if (prot != (PROT_READ | PROT_WRITE) && mprotect(p, len, prot) != 0) return fail(p);
+  *copy = {reinterpret_cast<uintptr_t>(p), span, 0, std::move(backing)};
+  close(keep);  // The retained native section/view now owns the file reference.
+  return p;
+}
+
+// Code a raw system call maps or makes executable outside every loaded
+// object (UPX 5 maps its decompressor from a memfd): an object of its own,
+// with no unwind information, rewritten as it runs. Forgotten when unmapped.
+LazyObject* NewCodeObjectLocked(uintptr_t lo, uintptr_t hi) {
+  auto* o = new LazyObject();
+  o->name = "[code mapped by a raw system call]";
+  o->lo = lo;
+  o->hi = hi;
+  o->anonymous = true;
+  Objects().push_back(o);
+  return o;
+}
+
+}  // namespace
+
+int ProtectLoadedMemory(void* addr, size_t len, int prot, bool raw_syscall) {
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  if (len == 0 || (start & (kPage - 1)) != 0) return mprotect(addr, len, prot);
+  if (len > UINTPTR_MAX - start || start + len > UINTPTR_MAX - (kPage - 1)) {
+    errno = EINVAL;
+    return -1;
+  }
+  const uintptr_t end = PageEnd(start, len);
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  if (!OverlapsObjectLocked(start, end)) {
+    if ((!raw_syscall || (prot & PROT_EXEC) == 0) && !OverlapsSharedCopyLocked(start, end)) {
+      ReleaseSRWLockExclusive(&g_lazy_lock);
+      return mprotect(addr, len, prot);
+    }
+    if (raw_syscall && (prot & PROT_EXEC) != 0) NewCodeObjectLocked(start, end);
+  }
+  if ((prot & PROT_WRITE) == 0 && !SharedCopies().empty() && !WriteBackLocked(start, end)) {
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    return -1;
+  }
+  int saved_errno = 0;
+  bool ok = ForEachObjectRun(start, end,
+      [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
+        const int host = (prot & PROT_EXEC) ? PendingProt(prot) : prot;
+        const int result = mprotect(reinterpret_cast<void*>(lo), hi - lo, host);
+        const int error = errno;
+        SharedCopyAccessLocked(lo, hi);
+        if (result != 0) {
+          saved_errno = error;
+          return false;
+        }
+        if (prot & PROT_EXEC) DeferPagesLocked(o, lo, hi, prot);
+        else ForgetPagesLocked(o, lo, hi);
+        return true;
+      },
+      [&](uintptr_t lo, uintptr_t hi) {
+        const int result = mprotect(reinterpret_cast<void*>(lo), hi - lo, prot);
+        const int error = errno;
+        SharedCopyAccessLocked(lo, hi);
+        if (result == 0) return true;
+        saved_errno = error;
+        return false;
+      });
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  if (!ok) errno = saved_errno;
+  return ok ? 0 : -1;
+}
+
+void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64_t offset,
+                      bool raw_syscall) {
+  const auto hint = reinterpret_cast<uintptr_t>(addr);
+  const bool fixed = (flags & MAP_FIXED) != 0;
+  const bool enforced = (flags & (MAP_FIXED | MAP_FIXED_NOREPLACE)) != 0;
+  const bool replace = fixed && (flags & MAP_FIXED_NOREPLACE) == 0;
+  const bool exec = (prot & PROT_EXEC) != 0;
+  const int type = flags & 0x0f;
+  // Delegate these basic invalid requests before synchronizing a copy. The
+  // base layer still decides access rights and allocation-time failures.
+  if (len == 0 || len > SIZE_MAX - (kPage - 1) ||
+      (enforced && ((hint & (kPage - 1)) != 0 ||
+                  ((len + kPage - 1) & ~(kPage - 1)) > UINTPTR_MAX - hint)) ||
+      offset < 0 || (static_cast<uint64_t>(offset) & (kPage - 1)) != 0 ||
+      (type != MAP_SHARED && type != MAP_PRIVATE && type != MAP_SHARED_VALIDATE) ||
+      (type == MAP_SHARED_VALIDATE && (flags & MAP_ANONYMOUS) != 0) ||
+      ((flags & MAP_ANONYMOUS) == 0 && (fd < 0 || _get_osfhandle(fd) == -1))) {
+    return mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
+  }
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  // A copy MAP_FIXED replaces: its writes reach the file first.
+  if (replace && !SharedCopies().empty() && !WriteBackLocked(hint, PageEnd(hint, len))) {
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    return MAP_FAILED;
+  }
+  const bool into_object = fixed && len != 0 && OverlapsObjectLocked(hint, PageEnd(hint, len));
+  if (!into_object && !(raw_syscall && exec && len != 0) &&
+      !(replace && OverlapsSharedCopyLocked(hint, PageEnd(hint, len)))) {
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    return mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
+  }
+  // Mapped as asked (a file view keeps its right to execute), then code
+  // waits non-executable until it runs.
+  SharedCopy copied;
+  void* p = mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
+  if (p == MAP_FAILED && replace) {
+    ReconcileFailedMappingLocked(hint, PageEnd(hint, len), gesher_mmap_replaced_private_pages() != 0);
+  }
+  if (p == MAP_FAILED && errno == EINVAL && replace && (flags & MAP_ANONYMOUS) == 0 &&
+      (flags & (MAP_SHARED | MAP_PRIVATE)) != MAP_PRIVATE) {
+    p = CopyFileMapping(addr, len, prot, flags, fd, offset, &copied);
+  }
+  if (p != MAP_FAILED) {
+    const auto start = reinterpret_cast<uintptr_t>(p);
+    const uintptr_t end = PageEnd(start, len);
+    if (replace) ForgetSharedCopiesLocked(start, end);
+    if (copied.backing) SharedCopies().push_back(std::move(copied));
+    if (!OverlapsObjectLocked(start, end)) NewCodeObjectLocked(start, end);
+    int protection_error = 0;
+    const bool protected_code = ForEachObjectRun(start, end,
+        [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
+          if (exec) {
+            if (mprotect(reinterpret_cast<void*>(lo), hi - lo, PendingProt(prot)) != 0) {
+              protection_error = errno;
+              return false;
+            }
+            DeferPagesLocked(o, lo, hi, prot);
+          } else {
+            ForgetPagesLocked(o, lo, hi);
+          }
+          return true;
+        },
+        [](uintptr_t, uintptr_t) { return true; });  // outside: as asked
+    if (!protected_code) {
+      // Mapping succeeded but making the code wait for rewriting failed.
+      // Never return success with executable, unrewritten pages. Retire the
+      // newly mapped range and any partial pending/copy records with it.
+      if (munmap(p, len) == 0) {
+        ForgetSharedCopiesLocked(start, end);
+        ForEachObjectRun(start, end,
+            [](uintptr_t lo, uintptr_t hi, LazyObject* o) {
+              ForgetPagesLocked(o, lo, hi);
+              return true;
+            }, [](uintptr_t, uintptr_t) { return true; });
+        auto& objects = Objects();
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [&](const LazyObject* o) { return o->anonymous && o->lo >= start && o->hi <= end; }),
+            objects.end());
+      }
+      errno = protection_error;
+      p = MAP_FAILED;
+    }
+  }
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  return p;
+}
+
+int SyncLoadedMemory(void* addr, size_t len, int flags) {
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  // Invalid flags, alignment or unmapped pages must not publish copy changes.
+  // The base call also validates the page-rounded range and its overflow.
+  if (msync(addr, len, flags) != 0) return -1;
+  const size_t span = (len + kPage - 1) & ~(kPage - 1);
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  const bool ok = span == 0 || SharedCopies().empty() || WriteBackLocked(start, start + span);
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  return ok ? 0 : -1;
+}
+
+int UnmapLoadedMemory(void* addr, size_t len) {
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  if (len == 0 || (start & (kPage - 1)) != 0) return munmap(addr, len);
+  if (len > UINTPTR_MAX - start || start + len > UINTPTR_MAX - (kPage - 1)) {
+    errno = EINVAL;
+    return -1;
+  }
+  const uintptr_t end = PageEnd(start, len);
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  if (!SharedCopies().empty() && !WriteBackLocked(start, end)) {
+    ReleaseSRWLockExclusive(&g_lazy_lock);
+    return -1;
+  }
+  const int r = munmap(addr, len);
+  const int saved_errno = errno;
+  if (r == 0) {
+    ForgetSharedCopiesLocked(start, end);
+    if (OverlapsObjectLocked(start, end)) {
+      ForEachObjectRun(start, end,
+          [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
+            ForgetPagesLocked(o, lo, hi);
+            return true;
+          },
+          [](uintptr_t, uintptr_t) { return true; });
+      // Code objects of raw system calls go with their whole mapping.
+      auto& objects = Objects();
+      objects.erase(std::remove_if(objects.begin(), objects.end(),
+                                   [&](const LazyObject* o) {
+                                     return o->anonymous && o->lo >= start && o->hi <= end;
+                                   }),
+                    objects.end());
+    }
+  }
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  errno = saved_errno;
+  return r;
 }
 
 }  // namespace gesher::elf

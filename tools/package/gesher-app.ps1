@@ -246,17 +246,24 @@ $dalvikvm = Join-Path $here 'dalvikvm.exe'
 # Keep the profile choice local to child processes, so disabling the marker in
 # this PowerShell session cannot inherit a previous launcher's automatic opt-in.
 $previousMicrogSpoof = $env:GESHER_MICROG_SPOOF
+# The Windows environment is Unicode, but the VM's narrow CRT environment is not.
+# Pass the caller-owned diagnostic path through wide argv instead, after the main
+# class so it is not inherited with the device's VM options.
+$previousLaunchError = $env:GESHER_LAUNCH_ERROR_FILE
+$launchErrorArguments = @()
+if ($previousLaunchError) { $launchErrorArguments = @('--launch-error-file', $previousLaunchError) }
 try {
+  Remove-Item Env:GESHER_LAUNCH_ERROR_FILE -ErrorAction SilentlyContinue
   if ($enableMicrogForProfile) { $env:GESHER_MICROG_SPOOF = '1' }
   # The device's commands, and launching through it (com.gesher.app.Launcher).
   if ($commands -contains $command) {
     $launcherArgs = @($command)
     if ($apkFull) { $launcherArgs += NoDrive $apkFull }
-    & $dalvikvm @dvm com.gesher.app.Launcher @launcherArgs @rest
+    & $dalvikvm @dvm com.gesher.app.Launcher @launchErrorArguments @launcherArgs @rest
     exit $LASTEXITCODE
   }
   if ($rest -notcontains '--single-process' -and $rest -notcontains '--system-server') {
-    & $dalvikvm @dvm com.gesher.app.Launcher launch (NoDrive $apkFull) @rest
+    & $dalvikvm @dvm com.gesher.app.Launcher @launchErrorArguments launch (NoDrive $apkFull) @rest
     exit $LASTEXITCODE
   }
 
@@ -304,4 +311,6 @@ try {
   exit $code
 } finally {
   $env:GESHER_MICROG_SPOOF = $previousMicrogSpoof
+  if ($null -eq $previousLaunchError) { Remove-Item Env:GESHER_LAUNCH_ERROR_FILE -ErrorAction SilentlyContinue }
+  else { $env:GESHER_LAUNCH_ERROR_FILE = $previousLaunchError }
 }

@@ -1283,6 +1283,7 @@ function Install-PanelApk([string] $file, [string] $displayName) {
     try { $errorFile = [System.IO.Path]::GetTempFileName() } catch { }
     $previous = $env:GESHER_LAUNCH_ERROR_FILE
     if ($errorFile) { $env:GESHER_LAUNCH_ERROR_FILE = $errorFile }
+    else { Remove-Item Env:GESHER_LAUNCH_ERROR_FILE -ErrorAction SilentlyContinue }
     $reason = ''
     try {
         & (Join-Path $here 'gesher-app.ps1') install "$file"

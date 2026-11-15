@@ -102,13 +102,13 @@ public final class Launcher {
     private static boolean sDetachRequested;
 
     /**
-     * Set by gesher-launch when nobody reads this launcher's output (a double-clicked
-     * .apk, a Start menu shortcut), and by the Control Center: a file whose text it shows
-     * to the user if the launch or install fails. This launcher writes the reason there
-     * (UTF-8), as a user can read it.
+     * Set by gesher-launch and the Control Center for gesher-app.ps1. PowerShell passes
+     * the Unicode path as --launch-error-file, after the main class, so it crosses the
+     * VM's wide-argument adapter rather than the narrow CRT environment. The option is
+     * not among the VM arguments copied to a newly started device.
      */
     static final String ERROR_FILE_ENV = "GESHER_LAUNCH_ERROR_FILE";
-    /** {@link #ERROR_FILE_ENV} as this process got it (it is not handed on either). */
+    /** The caller-owned file receives the failure reason as UTF-8. */
     private static String sErrorFile;
 
     private Launcher() {
@@ -170,8 +170,7 @@ public final class Launcher {
             // starts must not inherit it.
             sDetachRequested = "1".equals(System.getenv(DETACH_ENV));
             if (sDetachRequested) android.system.Os.unsetenv(DETACH_ENV);
-            sErrorFile = System.getenv(ERROR_FILE_ENV);
-            if (sErrorFile != null) android.system.Os.unsetenv(ERROR_FILE_ENV);
+            android.system.Os.unsetenv(ERROR_FILE_ENV);
             code = run(args);
         } catch (Throwable t) {
             System.out.flush();
@@ -195,6 +194,7 @@ public final class Launcher {
             switch (args[i]) {
                 case "--build-prop": buildProp = args[++i]; break;
                 case "--framework-res": frameworkRes = args[++i]; break;
+                case "--launch-error-file": sErrorFile = args[++i]; break;
                 default: return usage();
             }
         }
@@ -580,11 +580,14 @@ public final class Launcher {
                 + (task != null ? text("in_task", task.taskId) : "")));
         WaitResult result = atm.startActivityAndWait(null /* caller: the launcher */,
                 "com.gesher.launcher", null, intent, null, null, null, 0, 0, null, options, 0);
-        log(text("start_result", result.result,
+        String outcome = text("start_result", result.result,
                 result.who != null ? result.who.flattenToShortString() : text("no_new_activity"),
-                result.timeout ? text("timed_out") : ""));
+                result.timeout ? text("timed_out") : "");
+        log(outcome);
         // START_SUCCESS, or a delivery to a running activity (START_DELIVERED_TO_TOP).
-        return result.result >= ActivityManager.START_SUCCESS ? 0 : 1;
+        if (result.result >= ActivityManager.START_SUCCESS) return 0;
+        reportFailure(text("start_failed", intent) + "\n" + outcome);
+        return 1;
     }
 
     private static int launch(List<String> args) throws Exception {

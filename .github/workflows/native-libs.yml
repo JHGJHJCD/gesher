@@ -98,6 +98,9 @@ jobs:
           "$cc29" -shared -fPIC -O2 -fstack-protector-strong             -Wl,-soname,fs_late.so -o dist-native/fs_late.so tests/native/fs_late.c
           "$cc29" -shared -fPIC -O2 -fstack-protector-strong -fasynchronous-unwind-tables -Wall -Wextra -Werror -Wl,-soname,fs_partial_unwind.so -o dist-native/fs_partial_unwind.so tests/native/fs_partial_unwind.c
           "$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-all dist-native/fs_partial_unwind.so
+          # Raw Linux system calls (`syscall` instructions) and code written
+          # into the library's own pages at run time (ADR 0084).
+          "$cc29" -shared -fPIC -O2 -fstack-protector-strong -Wall -Wextra -Werror -Wl,-soname,libraw_syscall_test.so -o dist-native/raw_syscall_test.so tests/native/raw_syscall_test.c
           echo "--- fs_test29.so ---"
           "$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf"             -d -r -l dist-native/fs_test29.so
           "$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-objdump"             -d dist-native/fs_test29.so | grep '%fs:' | head -40 || true
@@ -114,6 +117,40 @@ jobs:
             echo "$so: $n instruction(s) using %fs"
           done
 
+      # A self-unpacking object (ADR 0084): raw_syscall_test.c packed by UPX,
+      # as packers (Ijiami's libexec_x86.so) ship theirs. Its code exists only
+      # after its DT_INIT has unpacked it with raw mmap/mprotect/munmap
+      # system calls. The UPX variant has the DT_INIT UPX needs, one
+      # read-execute segment from the headers on (--no-rosegment, the layout
+      # those libraries have) and compressible data to make it worth packing.
+      - name: Pack a test library with UPX
+        env:
+          UPX_VERSION: "5.3.0"
+          # upx-5.3.0-amd64_linux.tar.xz; 5.3.0 has the x86-64 Android
+          # section-header fix (upx/upx#18936).
+          UPX_SHA256: 79cea8a50b6fa102d10c7b79a419cd77dead3cc2d78661de2dc5e5815dc505c1
+        run: |
+          set -euo pipefail
+          cc29="$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android29-clang"
+          bin="$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          "$cc29" -shared -fPIC -O2 -fstack-protector-strong -Wall -Wextra -Werror -DGESHER_UPX_VARIANT             -Wl,--no-rosegment -Wl,-init=gesher_upx_init -Wl,-soname,libraw_syscall_upx.so -o "$RUNNER_TEMP/raw_syscall_upx.so"             tests/native/raw_syscall_test.c
+          curl -fsSL -o "$RUNNER_TEMP/upx.tar.xz"             "https://github.com/upx/upx/releases/download/v$UPX_VERSION/upx-$UPX_VERSION-amd64_linux.tar.xz"
+          echo "$UPX_SHA256  $RUNNER_TEMP/upx.tar.xz" | sha256sum --check --strict
+          tar -xJf "$RUNNER_TEMP/upx.tar.xz" -C "$RUNNER_TEMP"
+          upx="$RUNNER_TEMP/upx-$UPX_VERSION-amd64_linux/upx"
+          "$upx" --version | head -1
+          "$bin/llvm-readelf" -lhd "$RUNNER_TEMP/raw_syscall_upx.so" | sed -n '1,60p'
+          "$bin/llvm-readelf" -d "$RUNNER_TEMP/raw_syscall_upx.so" | grep -F '(INIT)'
+          if ! "$upx" --android-shlib -o dist-native/raw_syscall_upx.so "$RUNNER_TEMP/raw_syscall_upx.so"; then
+            echo "--android-shlib refused; packing as a plain shared library"
+            "$upx" -o dist-native/raw_syscall_upx.so "$RUNNER_TEMP/raw_syscall_upx.so"
+          fi
+          # A well-formed ELF, as Android's linker requires (UPX before 5.3.0
+          # left the section header table past the end of the file).
+          "$bin/llvm-readelf" -lh dist-native/raw_syscall_upx.so | sed -n '1,60p'
+          grep -c 'This file is packed with the UPX' dist-native/raw_syscall_upx.so
+          ls -l "$RUNNER_TEMP/raw_syscall_upx.so" dist-native/raw_syscall_upx.so
+
       - name: Android directory traversal and futex guest contracts
         run: |
           cc="$PWD/$NDK_DIR/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android${ANDROID_API}-clang"
@@ -123,6 +160,9 @@ jobs:
           "$cc" -shared -fPIC -O2 -fno-stack-protector -Wall -Wextra -Werror \
             -Wl,-soname,libfutex_contract.so \
             -o dist-native/futex_contract.so tests/native/futex_contract.c
+          # memfd final-page contracts (bytes past EOF in the last mapped page
+          # survive a later mapping; st_size and pread do not see them).
+          "$cc" -shared -fPIC -O2 -fno-stack-protector -Wall -Wextra -Werror             -Wl,-soname,libmemfd_tail_test.so             -o dist-native/memfd_tail_test.so tests/native/memfd_tail_test.c
 
       - name: Cache d8
         id: r8
