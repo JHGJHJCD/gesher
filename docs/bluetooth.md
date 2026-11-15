@@ -114,8 +114,9 @@ Anker's earbuds talk to the app over RFCOMM (SPP or a vendor UUID
 `0cf12d31-fac3-4553-bd80-d6832e7xxxxx`, OpenSCQ30's notes), on the classic link Windows
 already holds for A2DP; some devices use BLE GATT. With this track the app finds the
 paired earbuds (getBondedDevices, the A2DP proxy, getUuids), and can open the RFCOMM
-channel and exchange packets. Still needed for the app itself: it currently dies before
-its UI in its packer's native code (`libexec_x86.so`, another track's work).
+channel and exchange packets. Still needed for the app itself: it now gets past its
+packer's native code (ADR 0084) but stops before its UI, when ART verifies its
+application class.
 
 ## Status
 
@@ -123,7 +124,11 @@ its UI in its packer's native code (`libexec_x86.so`, another track's work).
   radio; Windows' real calls answer "no adapter", HRESULT 0x8007048F, on runners without
   a radio); see the bluetooth track's runs.
 - Built and run by ci.yml's tests: BluetoothHostTest (61-bluetooth.ps1).
-- Not verified: a real radio and devices (connection timing, Windows' GATT cache, access
-  to protected services, RFCOMM to real earbuds). `bluetooth_probe.exe` (bluetooth.yml's
-  artifact) prints what a PC with a radio answers: adapter, paired devices, a 4 s scan,
-  and with `--inquiry` an inquiry; it never connects to a device.
+- Verified once on a PC with a real radio and paired Soundcore Liberty 4 Pro earbuds:
+  `bluetooth_probe.exe --hw "<name>"` finds the adapter and the paired device and its
+  services (read-only), and `--query-state` opens RFCOMM to the vendor service, sends
+  one request-state query and decodes the state update (battery and firmware levels).
+- Not verified: GATT on real devices, Windows' GATT cache and protected services, and
+  an app driving the real radio end to end. Without options the probe prints what a PC
+  with a radio answers (adapter, paired devices, a 4 s scan; `--inquiry`: an inquiry)
+  and never connects to a device.

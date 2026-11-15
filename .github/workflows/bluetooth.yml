@@ -13,13 +13,6 @@ name: bluetooth
 on:
   workflow_dispatch:
   workflow_call:
-  push:
-    branches: ['feat/bluetooth', 'wip/bluetooth**']
-    paths:
-      - 'compat/devices/bluetooth*'
-      - 'compat/devices/winrt.*'
-      - 'tests/bluetooth/**'
-      - '.github/workflows/bluetooth.yml'
 
 permissions:
   contents: read

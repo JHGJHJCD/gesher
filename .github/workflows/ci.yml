@@ -552,6 +552,12 @@ jobs:
     needs: [artifact-preflight]
     uses: ./.github/workflows/native-libs.yml
 
+  # The Bluetooth backend's probe (docs/bluetooth.md): built on the Linux
+  # runner, run against Windows' real APIs (no radio) and the test radio.
+  bluetooth:
+    needs: [artifact-preflight]
+    uses: ./.github/workflows/bluetooth.yml
+
   # Android ELF executables run as processes (docs/exec.md): the NDK test
   # executable and gesher.ExecTest's dex: .github/workflows/exec.yml.
   exec:

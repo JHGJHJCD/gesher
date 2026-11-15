@@ -109,6 +109,19 @@ around the instruction, outwards from it: a copy can end right after it
 fails (`cmp $-0x1000,%rax; jb; int3`): gesher-base now serves the auxiliary
 vector getauxval reports.
 
+**A memfd's final partial page keeps what a shared mapping wrote past
+EOF.** UPX 5 ftruncates its memfd to the unpacked size (not a page
+multiple), writes its return stub after the code, inside that last page,
+unmaps, and maps the memfd again. Linux keeps those bytes in the page
+cache; they never extend `st_size` and `pread` at EOF still returns 0. The
+loader's copy of such a shared mapping now keeps a native view of the
+file through its final page and writes whole pages back to it (msync,
+munmap, mprotect, a replacing MAP_FIXED); `CopyFromFile` maps through that
+page; `ftruncate` to the same size clears it, as Linux does. Before this,
+the stub came back as zeros and the packed test library faulted at it.
+UPX 5.3.0 builds the test library (earlier versions leave the x86-64
+Android section header table past EOF, which Android's linker rejects).
+
 ## Consequences
 - The UPX stub of `libexec_x86.so` unpacks itself; its `munmap` stub, reached
   only by `ret` but the first code to run in its page, is rewritten then.
@@ -127,3 +140,12 @@ vector getauxval reports.
   are not emulated (-ENOSYS).
 - `ptrace` (a process nobody traces) and `regcomp`/`regexec` (over
   `std::regex`'s POSIX grammars) are now in the shim; Ijiami imports them.
+- Copies of shared mappings publish their changes at msync, munmap,
+  mprotect and replacement, not continuously to another copy of the file.
+- Soundcore 3.9.7 now gets past its native libraries: both unpack, its
+  application dex is loaded from memory, and ART then rejects a class whose
+  method bodies the shell has not filled in (`VerifyError`: a constructor
+  returning without calling its superclass's). The shell's dlopen/dlsym
+  calls all succeed except probes for libraries a phone lacks too
+  (`GESHER_TRACE_DL=1`, docs/compiled-code.md); what it expects of ART at
+  that point is outside this decision.
