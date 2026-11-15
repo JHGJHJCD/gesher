@@ -48,9 +48,12 @@ same earbuds from Windows over RFCOMM while Windows keeps the A2DP link.
    parameterized delegate ids computed by WinRT's algorithm (cross-checked with
    llvm-mingw's widl headers). llvm-mingw's own WinRT headers were not used: they lack
    newer interfaces (IBluetoothLEDevice3/4, IGattSession's peers) the backend needs.
-   Winsock (ws2_32) is linked, as elsewhere.
-5. **Windows owns pairing and the CCCD.** Apps cannot pair (createBond answers false;
-   the user pairs in Settings); writing a characteristic's Client Characteristic
+   Winsock's functions named like POSIX ones (socket, connect, recv...) are looked up
+   in ws2_32.dll too, as ADR 0009 requires: their import members collide with
+   gesher-base's.
+5. **Windows owns pairing and the CCCD.** createBond pairs through Windows' basic pairing,
+   whose own UI the user confirms (no PIN handling by the app); removeBond unpairs after
+   the user agrees in Gesher's consent dialog. Writing a characteristic's Client Characteristic
    Configuration descriptor subscribes through Windows' API, and a notifying
    characteristic always has a CCCD object, as Android apps expect.
 6. **CI verifies with a test radio below the JNI layer** (`GESHER_BLUETOOTH_TEST=1`,
@@ -65,7 +68,7 @@ same earbuds from Windows over RFCOMM while Windows keeps the A2DP link.
 - An app gets an adapter only when the PC has a radio; then paired devices, LE scanning,
   GATT client, RFCOMM client and server and the A2DP/headset proxies work through Windows.
 - Not covered: LE advertising (fails with FEATURE_UNSUPPORTED), GATT server
-  (openGattServer is null), L2CAP channels, pairing from the app, ACTION_REQUEST_ENABLE
+  (openGattServer is null), L2CAP channels, custom pairing by the app, ACTION_REQUEST_ENABLE
   (no activity resolves it), LE Audio, hearing aids, HID, PAN, PBAP/MAP.
 - Real hardware is not exercised in CI: the Windows paths' answers with a radio and a
   device (connection timing, Windows' GATT cache, access denied for protected services

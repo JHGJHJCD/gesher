@@ -44,6 +44,14 @@ Design: [0085](decisions/0085-bluetooth-host-radio.md). Tests:
   service classes of their records (`BluetoothDevice.SdpRecords`, parsed for
   ServiceClassIDList). Empty while the radio is off. `fetchUuidsWithSdp()` asks the device
   again (an uncached RFCOMM service query) and broadcasts ACTION_UUID.
+- **Pairing**: `createBond()` asks the system server, which pairs through Windows' basic
+  pairing (`DeviceInformation.Pairing.PairAsync`): Windows shows its own pairing UI and the
+  user confirms there. ACTION_BOND_STATE_CHANGED goes NONE>BONDING, then BONDING>BONDED
+  when Windows lists the device, or back to NONE. False while the radio is off, for a
+  bonded device or with its pairing running. ACTION_PAIRING_REQUEST is not sent: Windows'
+  UI takes its place. The hidden `removeBond()` removes Windows' pairing
+  (`UnpairAsync`) after the user confirms (Gesher's consent dialog); the watch broadcasts
+  BONDED>NONE.
 - **Discovery**: `startDiscovery()` runs a classic inquiry (BluetoothFindFirstDevice,
   about 10 s) in the system server: ACTION_DISCOVERY_STARTED, ACTION_FOUND (device, name,
   class) and ACTION_DISCOVERY_FINISHED. LE devices are found by LE scans.
@@ -80,7 +88,10 @@ Design: [0085](decisions/0085-bluetooth-host-radio.md). Tests:
   binds a channel and registers an SDP record (WSASetService).
 - **Profiles**: `getProfileProxy` gives BluetoothA2dp and BluetoothHeadset proxies listing
   the paired devices Windows has connected that offer an A2DP sink / hands-free service.
-- **Broadcasts** (BluetoothManagerService, from the first app call on, polling every 2 s):
+- **Broadcasts** (BluetoothManagerService, from the first app call on): the watch looks at
+  Windows when Windows announces a change (Radio.StateChanged, the paired devices'
+  ConnectionStatusChanged, a pairing made here) and at least every 10 s (pairings made in
+  Settings):
   ACTION_STATE_CHANGED (TURNING_ON/ON, TURNING_OFF/OFF), ACL_CONNECTED/DISCONNECTED,
   BOND_STATE_CHANGED (pairings made or removed while the radio is on), the A2DP and
   headset profiles' CONNECTION_STATE_CHANGED and the adapter's.
@@ -90,8 +101,9 @@ Design: [0085](decisions/0085-bluetooth-host-radio.md). Tests:
 - LE advertising (BluetoothLeAdvertiser starts fail with FEATURE_UNSUPPORTED; Windows'
   BluetoothLEAdvertisementPublisher could back it), GATT server (`openGattServer` is null;
   GattServiceProvider could back it), L2CAP channels, LE Audio, HID, PAN, PBAP/MAP.
-- Pairing from the app: `createBond()` answers false; users pair in Windows' Settings.
-  ACTION_REQUEST_ENABLE / REQUEST_DISCOVERABLE have no activity.
+- Custom pairing (PIN entry by the app, ACTION_PAIRING_REQUEST, setPin,
+  setPairingConfirmation): Windows' own UI does it. ACTION_REQUEST_ENABLE /
+  REQUEST_DISCOVERABLE have no activity.
 - Reliable writes, PHY selection (declined), connection priority (accepted only).
 - In device mode each app process has its own scan watcher and GATT sessions; Windows
   shares the radio between them.
