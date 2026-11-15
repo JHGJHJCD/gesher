@@ -17,6 +17,7 @@
 
 #include <map>
 #include <set>
+#include <thread>
 
 namespace bt = gesher::devices::bluetooth;
 
@@ -143,9 +144,15 @@ void CheckTestRadio(bt::Backend& backend) {
   if (gatt) {
     std::vector<bt::Attribute> attributes;
     int status = gatt->Discover(&attributes);
-    Check(status == bt::kGattSuccess && attributes.size() == 9 &&
+    Check(status == bt::kGattSuccess && attributes.size() == 12 &&
               attributes[3].uuid == bt::ShortUuid(0x2A19) && attributes[3].properties == 0x12,
-          "GATT discovery: 3 services, 4 characteristics, 2 descriptors");
+          "GATT discovery: 3 primary services, 4 characteristics, 2 descriptors, an included one");
+    Check(attributes[9].kind == bt::kIncluded && attributes[9].handle == 30 &&
+              attributes[9].properties == 20 && attributes[10].kind == bt::kService &&
+              attributes[10].properties == 1 && attributes[11].handle == 32,
+          "the UART service includes a secondary service, listed after the primaries");
+    int tx = 0, rx = 0;
+    Check(gatt->Phy(&tx, &rx) == bt::kGattSuccess && tx == 2 && rx == 2, "PHY: LE 2M both ways");
     std::vector<uint8_t> value;
     status = gatt->Read(bt::kCharacteristic, 12, &value);
     Check(status == bt::kGattSuccess && value.size() == 1 && value[0] == 87,
@@ -186,6 +193,18 @@ void CheckTestRadio(bt::Backend& backend) {
           "RFCOMM echo of a 10-byte packet");
     socket->Close();
     Check(socket->Read(back, sizeof(back)) == 0, "RFCOMM read after close: end of stream");
+  }
+  {
+    // Channel 3 of the headset never answers: Close() from another thread ends Connect().
+    std::shared_ptr<bt::Socket> slow = backend.OpenRfcomm(0x00025B00A5A5ULL, GUID{}, 3, false, &hr);
+    std::thread closer([slow] {
+      Sleep(300);
+      slow->Close();
+    });
+    ULONGLONG start = GetTickCount64();
+    HRESULT result = slow ? slow->Connect() : E_FAIL;
+    closer.join();
+    Check(result == E_ABORT && GetTickCount64() - start < 5000, "Close() cancels a blocked connect");
   }
   GUID chat;
   bt::ParseGuid("fa87c0d0-afac-11de-8a39-0800200c9a66", &chat);

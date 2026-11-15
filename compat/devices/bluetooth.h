@@ -71,7 +71,10 @@ struct Attribute {
   int kind = kService;
   GUID uuid{};
   uint16_t handle = 0;
-  uint32_t properties = 0;  // characteristics: Android's PROPERTY_* bits (Windows' are the same)
+  // Characteristics: Android's PROPERTY_* bits (Windows' are the same). Services: 0
+  // primary, 1 secondary (only reached as an included service). kIncluded: the handle
+  // of the service that includes it.
+  uint32_t properties = 0;
 };
 
 // Asynchronous GATT events.
@@ -125,6 +128,9 @@ class Gatt {
   // A characteristic's client configuration: 0 none, 1 notify, 2 indicate.
   virtual int SetNotify(uint16_t handle, int mode) = 0;
   virtual int Mtu() = 0;
+  // The connection's PHYs (1 1M, 2 2M, 3 coded): kGattSuccess, or
+  // kGattRequestNotSupported when Windows does not say (before Windows 11).
+  virtual int Phy(int* tx, int* rx) = 0;
   virtual bool NextEvent(GattEvent* out, int timeoutMs) = 0;
   // Releases the link; NextEvent then answers kClosed.
   virtual void Close() = 0;
@@ -133,6 +139,9 @@ class Gatt {
 class Socket {
  public:
   virtual ~Socket() = default;
+  // Connects a socket of OpenRfcomm (blocks; Close() from another thread ends it with
+  // E_ABORT). Accepted sockets are connected already.
+  virtual HRESULT Connect() = 0;
   // Bytes read (> 0), 0 at the end of the stream, or a negative Winsock error.
   virtual int Read(uint8_t* buffer, int length) = 0;
   // Bytes written, or a negative Winsock error.
@@ -170,9 +179,22 @@ class Backend {
   virtual HRESULT RemoteUuids(uint64_t address, bool refresh, std::vector<GUID>* out) = 0;
   virtual std::shared_ptr<Scan> StartScan(bool active, HRESULT* hr) = 0;
   virtual std::shared_ptr<Gatt> OpenGatt(uint64_t address, int addressType, HRESULT* hr) = 0;
-  // RFCOMM to `uuid` (SDP lookup) or, when channel > 0, that channel.
-  virtual std::shared_ptr<Socket> ConnectRfcomm(uint64_t address, const GUID& uuid, int channel,
-                                                bool secure, HRESULT* hr) = 0;
+  // An RFCOMM socket to `uuid` (SDP lookup) or, when channel > 0, that channel, not yet
+  // connected. Secure sockets require authentication and encryption.
+  virtual std::shared_ptr<Socket> OpenRfcomm(uint64_t address, const GUID& uuid, int channel,
+                                             bool secure, HRESULT* hr) = 0;
+  // OpenRfcomm and Connect.
+  std::shared_ptr<Socket> ConnectRfcomm(uint64_t address, const GUID& uuid, int channel,
+                                        bool secure, HRESULT* hr) {
+    std::shared_ptr<Socket> s = OpenRfcomm(address, uuid, channel, secure, hr);
+    if (!s) return nullptr;
+    *hr = s->Connect();
+    if (FAILED(*hr)) {
+      s->Close();
+      return nullptr;
+    }
+    return s;
+  }
   // An RFCOMM listener registered in SDP as `name` with `uuid`.
   virtual std::shared_ptr<Server> ListenRfcomm(const std::wstring& name, const GUID& uuid,
                                                bool secure, HRESULT* hr) = 0;

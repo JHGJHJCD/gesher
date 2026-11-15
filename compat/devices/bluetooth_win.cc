@@ -256,6 +256,7 @@ struct IGattDeviceService : IInspectable {
   virtual HRESULT STDMETHODCALLTYPE get_Uuid(GUID* value) = 0;
   virtual HRESULT STDMETHODCALLTYPE get_AttributeHandle(UINT16* value) = 0;
 };
+struct IGattDeviceServicesResult;
 struct IGattDeviceService3 : IInspectable {
   GESHER_UNUSED(1);  // get_DeviceAccessInformation
   GESHER_UNUSED(2);  // get_Session
@@ -265,6 +266,11 @@ struct IGattDeviceService3 : IInspectable {
   GESHER_UNUSED(6);  // GetCharacteristicsAsync()
   virtual HRESULT STDMETHODCALLTYPE GetCharacteristicsWithCacheModeAsync(
       int cacheMode, IAsyncOperation<IGattCharacteristicsResult*>** op) = 0;
+  GESHER_UNUSED(7);  // GetCharacteristicsForUuidAsync
+  GESHER_UNUSED(8);  // GetCharacteristicsForUuidAsync(uuid, cacheMode)
+  GESHER_UNUSED(9);  // GetIncludedServicesAsync()
+  virtual HRESULT STDMETHODCALLTYPE GetIncludedServicesWithCacheModeAsync(
+      int cacheMode, IAsyncOperation<IGattDeviceServicesResult*>** op) = 0;
 };
 struct IGattDeviceServicesResult : IInspectable {
   virtual HRESULT STDMETHODCALLTYPE get_Status(int* value) = 0;
@@ -329,6 +335,20 @@ struct IBluetoothLEDevice3 : IInspectable {
 };
 struct IBluetoothLEDevice4 : IInspectable {
   virtual HRESULT STDMETHODCALLTYPE get_BluetoothDeviceId(IInspectable** value) = 0;
+};
+struct IBluetoothLEConnectionPhyInfo : IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_IsUncoded1MPhy(uint8_t* value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_IsUncoded2MPhy(uint8_t* value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_IsCodedPhy(uint8_t* value) = 0;
+};
+struct IBluetoothLEConnectionPhy : IInspectable {
+  virtual HRESULT STDMETHODCALLTYPE get_TransmitInfo(IBluetoothLEConnectionPhyInfo** value) = 0;
+  virtual HRESULT STDMETHODCALLTYPE get_ReceiveInfo(IBluetoothLEConnectionPhyInfo** value) = 0;
+};
+// Windows 11 (24H2) and later.
+struct IBluetoothLEDevice6 : IInspectable {
+  GESHER_UNUSED(1);  // GetConnectionParameters
+  virtual HRESULT STDMETHODCALLTYPE GetConnectionPhy(IBluetoothLEConnectionPhy** value) = 0;
 };
 struct IBluetoothLEDeviceStatics : IInspectable {
   virtual HRESULT STDMETHODCALLTYPE FromIdAsync(HSTRING id,
@@ -437,6 +457,8 @@ const IID IID_IBluetoothLEDevice3 = {0xaee9e493, 0x44ac, 0x40dc,
                                      {0xaf, 0x33, 0xb2, 0xc1, 0x3c, 0x01, 0xca, 0x46}};
 const IID IID_IBluetoothLEDevice4 = {0x2b605031, 0x2248, 0x4b2f,
                                      {0xac, 0xf0, 0x7c, 0xee, 0x36, 0xfc, 0x58, 0x70}};
+const IID IID_IBluetoothLEDevice6 = {0xca7190ef, 0x0cae, 0x573c,
+                                     {0xa1, 0xca, 0xe1, 0xfc, 0x5b, 0xfc, 0x39, 0xe2}};
 const IID IID_IBluetoothLEDeviceStatics = {0xc8cf1a19, 0xf0b6, 0x4bf0,
                                            {0x86, 0x89, 0x41, 0x30, 0x3d, 0xe2, 0xd9, 0xf4}};
 const IID IID_IBluetoothLEDeviceStatics2 = {0x5f12c06b, 0x3bac, 0x43e8,
@@ -794,6 +816,8 @@ struct ClassicApi {
                                                   BLUETOOTH_DEVICE_INFO*) = nullptr;
   BOOL(WINAPI* FindNextDevice)(HBLUETOOTH_DEVICE_FIND, BLUETOOTH_DEVICE_INFO*) = nullptr;
   BOOL(WINAPI* FindDeviceClose)(HBLUETOOTH_DEVICE_FIND) = nullptr;
+  HBLUETOOTH_RADIO_FIND(WINAPI* FindFirstRadio)(const BLUETOOTH_FIND_RADIO_PARAMS*, HANDLE*) = nullptr;
+  BOOL(WINAPI* FindRadioClose)(HBLUETOOTH_RADIO_FIND) = nullptr;
   bool ok = false;
 };
 
@@ -810,9 +834,26 @@ const ClassicApi& Classic() {
         reinterpret_cast<void*>(GetProcAddress(dll, "BluetoothFindNextDevice")));
     api.FindDeviceClose = reinterpret_cast<decltype(api.FindDeviceClose)>(
         reinterpret_cast<void*>(GetProcAddress(dll, "BluetoothFindDeviceClose")));
+    api.FindFirstRadio = reinterpret_cast<decltype(api.FindFirstRadio)>(
+        reinterpret_cast<void*>(GetProcAddress(dll, "BluetoothFindFirstRadio")));
+    api.FindRadioClose = reinterpret_cast<decltype(api.FindRadioClose)>(
+        reinterpret_cast<void*>(GetProcAddress(dll, "BluetoothFindRadioClose")));
     api.ok = api.FindFirstDevice && api.FindNextDevice && api.FindDeviceClose;
   });
   return api;
+}
+
+bool ClassicRadioOn() {
+  const ClassicApi& api = Classic();
+  if (api.FindFirstRadio == nullptr || api.FindRadioClose == nullptr) return false;
+  BLUETOOTH_FIND_RADIO_PARAMS params = {};
+  params.dwSize = sizeof(params);
+  HANDLE radio = nullptr;
+  HBLUETOOTH_RADIO_FIND find = api.FindFirstRadio(&params, &radio);
+  if (find == nullptr) return false;
+  if (radio != nullptr) CloseHandle(radio);
+  api.FindRadioClose(find);
+  return true;
 }
 
 // --- the LE scan -------------------------------------------------------------------------------
@@ -1047,19 +1088,44 @@ class WinGatt final : public Gatt {
     if (services == nullptr) return status == kGattSuccess ? kGattFailure : status;
     UINT32 count = 0;
     services->get_Size(&count);
+    // Primary services (what GetGattServicesAsync lists), each followed by its
+    // characteristics and its included services; then included services that are not
+    // primary ones (secondary), with their characteristics.
+    std::vector<uint16_t> primaries;
+    std::vector<IGattDeviceService*> primaryServices;
     for (UINT32 i = 0; i < count; ++i) {
       IGattDeviceService* service = nullptr;
       if (FAILED(services->GetAt(i, &service)) || service == nullptr) continue;
+      uint16_t handle = 0;
+      service->get_AttributeHandle(&handle);
+      primaries.push_back(handle);
+      primaryServices.push_back(service);
+    }
+    services->Release();
+    std::vector<IGattDeviceService*> secondaries;
+    std::vector<uint16_t> secondaryHandles;
+    for (IGattDeviceService* service : primaryServices) {
       Attribute s;
       s.kind = kService;
       service->get_Uuid(&s.uuid);
       service->get_AttributeHandle(&s.handle);
       out->push_back(s);
       AddCharacteristics(service, out);
+      AddIncluded(service, s.handle, primaries, &secondaries, &secondaryHandles, out);
       std::lock_guard<std::mutex> lock(mu_);
       services_.push_back(service);  // keeps it open; closed in ReleaseAttributes
     }
-    services->Release();
+    for (IGattDeviceService* service : secondaries) {
+      Attribute s;
+      s.kind = kService;
+      s.properties = 1;  // secondary
+      service->get_Uuid(&s.uuid);
+      service->get_AttributeHandle(&s.handle);
+      out->push_back(s);
+      AddCharacteristics(service, out);
+      std::lock_guard<std::mutex> lock(mu_);
+      services_.push_back(service);
+    }
     return kGattSuccess;
   }
 
@@ -1203,6 +1269,34 @@ class WinGatt final : public Gatt {
     return size;
   }
 
+  int Phy(int* tx, int* rx) override {
+    winrt::EnsureApartment();
+    IBluetoothLEDevice6* device6 = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      if (device_ == nullptr || FAILED(Query(device_, IID_IBluetoothLEDevice6, &device6))) {
+        return kGattRequestNotSupported;
+      }
+    }
+    IBluetoothLEConnectionPhy* phy = nullptr;
+    int status = kGattRequestNotSupported;
+    if (SUCCEEDED(device6->GetConnectionPhy(&phy)) && phy != nullptr) {
+      IBluetoothLEConnectionPhyInfo* t = nullptr;
+      IBluetoothLEConnectionPhyInfo* r = nullptr;
+      if (SUCCEEDED(phy->get_TransmitInfo(&t)) && t != nullptr &&
+          SUCCEEDED(phy->get_ReceiveInfo(&r)) && r != nullptr) {
+        *tx = PhyOf(t);
+        *rx = PhyOf(r);
+        status = *tx != 0 && *rx != 0 ? kGattSuccess : kGattRequestNotSupported;
+      }
+      Release(t);
+      Release(r);
+      phy->Release();
+    }
+    device6->Release();
+    return status;
+  }
+
   bool NextEvent(GattEvent* out, int timeoutMs) override {
     if (events_->Pop(out, timeoutMs)) return true;
     if (events_->closed()) {
@@ -1233,6 +1327,15 @@ class WinGatt final : public Gatt {
   }
 
  private:
+  // Android's PHY value of a Windows PHY description; 0 when it says none.
+  static int PhyOf(IBluetoothLEConnectionPhyInfo* info) {
+    uint8_t flag = 0;
+    if (SUCCEEDED(info->get_IsUncoded2MPhy(&flag)) && flag) return 2;
+    if (SUCCEEDED(info->get_IsCodedPhy(&flag)) && flag) return 3;
+    if (SUCCEEDED(info->get_IsUncoded1MPhy(&flag)) && flag) return 1;
+    return 0;
+  }
+
   HRESULT Services(int cacheMode, IGattDeviceServicesResult** result) {
     *result = nullptr;
     IBluetoothLEDevice3* device3 = nullptr;
@@ -1247,6 +1350,50 @@ class WinGatt final : public Gatt {
     device3->Release();
     if (SUCCEEDED(hr)) hr = Await(op, result);
     return hr;
+  }
+
+  // kIncluded records for the services `service` includes; those that are not primary
+  // services are kept (once) in `secondaries` to be listed after the primaries.
+  void AddIncluded(IGattDeviceService* service, uint16_t parent,
+                   const std::vector<uint16_t>& primaries,
+                   std::vector<IGattDeviceService*>* secondaries,
+                   std::vector<uint16_t>* secondaryHandles, std::vector<Attribute>* out) {
+    IGattDeviceService3* service3 = nullptr;
+    if (FAILED(Query(service, IID_IGattDeviceService3, &service3))) return;
+    IAsyncOperation<IGattDeviceServicesResult*>* op = nullptr;
+    IGattDeviceServicesResult* result = nullptr;
+    HRESULT hr = service3->GetIncludedServicesWithCacheModeAsync(kUncached, &op);
+    service3->Release();
+    if (SUCCEEDED(hr)) hr = Await(op, &result);
+    if (FAILED(hr) || result == nullptr) return;
+    int communication = 1;
+    IVectorView<IGattDeviceService*>* list = nullptr;
+    result->get_Status(&communication);
+    if (communication == 0) result->get_Services(&list);
+    result->Release();
+    if (list == nullptr) return;
+    UINT32 count = 0;
+    list->get_Size(&count);
+    for (UINT32 i = 0; i < count; ++i) {
+      IGattDeviceService* included = nullptr;
+      if (FAILED(list->GetAt(i, &included)) || included == nullptr) continue;
+      Attribute a;
+      a.kind = kIncluded;
+      included->get_Uuid(&a.uuid);
+      included->get_AttributeHandle(&a.handle);
+      a.properties = parent;
+      out->push_back(a);
+      bool known = false;
+      for (uint16_t h : primaries) known = known || h == a.handle;
+      for (uint16_t h : *secondaryHandles) known = known || h == a.handle;
+      if (known) {
+        included->Release();
+      } else {
+        secondaries->push_back(included);
+        secondaryHandles->push_back(a.handle);
+      }
+    }
+    list->Release();
   }
 
   void AddCharacteristics(IGattDeviceService* service, std::vector<Attribute>* out) {
@@ -1455,10 +1602,48 @@ int WaitReady(SOCKET s, bool write, const std::atomic<bool>& closed, int timeout
 
 class WinSocket final : public Socket {
  public:
+  // A connected socket (accepted), or, with a remote address, one Connect() connects.
   WinSocket(SOCKET s, uint64_t remote, int channel) : s_(s), remote_(remote), channel_(channel) {}
+  WinSocket(SOCKET s, const SOCKADDR_BTH& target)
+      : s_(s), remote_(target.btAddr), channel_(static_cast<int>(target.port)),
+        target_(target), pending_(true) {}
   ~WinSocket() override {
     Close();
     closesocket(s_);
+  }
+
+  // A non-blocking connect and a wait that Close() ends (WaitReady), so that a blocked
+  // BluetoothSocket.connect() can be cancelled as on Android.
+  HRESULT Connect() override {
+    if (!pending_) return S_OK;
+    if (closed_.load()) return E_ABORT;
+    u_long nonBlocking = 1;
+    bool waitable = ioctlsocket(s_, FIONBIO, &nonBlocking) == 0;
+    int result = connect(s_, reinterpret_cast<const SOCKADDR*>(&target_), sizeof(target_));
+    if (result == SOCKET_ERROR) {
+      int error = WSAGetLastError();
+      if (!waitable || (error != WSAEWOULDBLOCK && error != WSAEINPROGRESS)) {
+        return closed_.load() ? E_ABORT : HRESULT_FROM_WIN32(error);
+      }
+      int ready = WaitReady(s_, true, closed_);
+      if (ready == 0) return E_ABORT;
+      if (ready < 0) return HRESULT_FROM_WIN32(-ready);
+      int soError = 0;
+      int size = sizeof(soError);
+      getsockopt(s_, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &size);
+      if (soError != 0) return HRESULT_FROM_WIN32(soError);
+    }
+    if (waitable) {
+      u_long blocking = 0;
+      ioctlsocket(s_, FIONBIO, &blocking);
+    }
+    SOCKADDR_BTH peer = {};
+    int size = sizeof(peer);
+    if (getpeername(s_, reinterpret_cast<SOCKADDR*>(&peer), &size) == 0) {
+      channel_ = static_cast<int>(peer.port);
+    }
+    pending_ = false;
+    return S_OK;
   }
 
   int Read(uint8_t* buffer, int length) override {
@@ -1501,6 +1686,8 @@ class WinSocket final : public Socket {
   SOCKET s_;
   uint64_t remote_;
   int channel_;
+  SOCKADDR_BTH target_ = {};
+  bool pending_ = false;
   std::atomic<bool> closed_{false};
 };
 
@@ -1603,8 +1790,14 @@ class Windows final : public Backend {
       adapter4->Release();
     }
     int state = 0;  // RadioState: 1 On, 2 Off, 3 Disabled
-    if (cache.radio != nullptr) cache.radio->get_State(&state);
-    a.on = state == 1;
+    if (cache.radio != nullptr) {
+      cache.radio->get_State(&state);
+      a.on = state == 1;
+    } else {
+      // No Radio object (Windows.Devices.Radios unavailable or denied): BluetoothApis
+      // lists a local radio only while it is on.
+      a.on = ClassicRadioOn();
+    }
     a.name = ComputerName();
     return a;
   }
@@ -1844,8 +2037,8 @@ class Windows final : public Backend {
     return std::make_shared<WinGatt>(device);
   }
 
-  std::shared_ptr<Socket> ConnectRfcomm(uint64_t address, const GUID& uuid, int channel,
-                                        bool secure, HRESULT* hr) override {
+  std::shared_ptr<Socket> OpenRfcomm(uint64_t address, const GUID& uuid, int channel,
+                                     bool secure, HRESULT* hr) override {
     if (!StartWinsock()) {
       *hr = E_NOTIMPL;
       return nullptr;
@@ -1856,8 +2049,10 @@ class Windows final : public Backend {
       return nullptr;
     }
     if (secure) {
+      // Android's secure sockets: an authenticated and encrypted link.
       ULONG on = TRUE;
       setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, reinterpret_cast<char*>(&on), sizeof(on));
+      setsockopt(s, SOL_RFCOMM, SO_BTH_ENCRYPT, reinterpret_cast<char*>(&on), sizeof(on));
     }
     SOCKADDR_BTH remote = {};
     remote.addressFamily = AF_BTH;
@@ -1867,19 +2062,8 @@ class Windows final : public Backend {
     } else {
       remote.serviceClassId = uuid;
     }
-    if (connect(s, reinterpret_cast<SOCKADDR*>(&remote), sizeof(remote)) == SOCKET_ERROR) {
-      *hr = HRESULT_FROM_WIN32(WSAGetLastError());
-      closesocket(s);
-      return nullptr;
-    }
-    SOCKADDR_BTH peer = {};
-    int size = sizeof(peer);
-    int port = channel;
-    if (getpeername(s, reinterpret_cast<SOCKADDR*>(&peer), &size) == 0) {
-      port = static_cast<int>(peer.port);
-    }
     *hr = S_OK;
-    return std::make_shared<WinSocket>(s, address, port);
+    return std::make_shared<WinSocket>(s, remote);
   }
 
   std::shared_ptr<Server> ListenRfcomm(const std::wstring& name, const GUID& uuid, bool secure,

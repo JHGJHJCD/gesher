@@ -331,6 +331,17 @@ jbyteArray WindowsBluetooth_gattNext(JNIEnv* env, jclass, jlong handle, jint tim
   return Bytes(env, e.data);
 }
 
+// kGattSuccess with out = {tx, rx} (1 1M, 2 2M, 3 coded), or why not.
+jint WindowsBluetooth_gattPhy(JNIEnv* env, jclass, jlong handle, jintArray out) {
+  std::shared_ptr<bt::Gatt> gatt = Gatts().Get(handle);
+  if (!gatt) return bt::kGattFailure;
+  int tx = 0, rx = 0;
+  int status = gatt->Phy(&tx, &rx);
+  SetInt(env, out, 0, tx);
+  SetInt(env, out, 1, rx);
+  return status;
+}
+
 void WindowsBluetooth_gattClose(JNIEnv*, jclass, jlong handle) {
   std::shared_ptr<bt::Gatt> gatt = Gatts().Remove(handle);
   if (gatt) gatt->Close();
@@ -338,9 +349,9 @@ void WindowsBluetooth_gattClose(JNIEnv*, jclass, jlong handle) {
 
 // --- RFCOMM -------------------------------------------------------------------------------
 
-// out: HRESULT, channel.
-jlong WindowsBluetooth_rfcommConnect(JNIEnv* env, jclass, jlong address, jstring uuid,
-                                     jint channel, jboolean secure, jintArray out) {
+// An RFCOMM socket, not connected yet (nativeRfcommConnect connects it); out: HRESULT.
+jlong WindowsBluetooth_rfcommOpen(JNIEnv* env, jclass, jlong address, jstring uuid, jint channel,
+                                  jboolean secure, jintArray out) {
   GUID g = {};
   if (uuid != nullptr) {
     ScopedUtfChars chars(env, uuid);
@@ -350,15 +361,21 @@ jlong WindowsBluetooth_rfcommConnect(JNIEnv* env, jclass, jlong address, jstring
     }
   }
   HRESULT hr = S_OK;
-  std::shared_ptr<bt::Socket> socket = bt::Get().ConnectRfcomm(
+  std::shared_ptr<bt::Socket> socket = bt::Get().OpenRfcomm(
       static_cast<uint64_t>(address), g, channel, secure == JNI_TRUE, &hr);
-  ALOGI("bluetooth: RFCOMM connect to %012llX (%s): HRESULT 0x%08lX",
-        static_cast<unsigned long long>(address), bt::GuidText(g).c_str(),
-        static_cast<unsigned long>(hr));
   SetInt(env, out, 0, static_cast<jint>(hr));
-  if (!socket) return 0;
-  SetInt(env, out, 1, socket->Channel());
-  return Sockets().Add(std::move(socket));
+  return socket ? Sockets().Add(std::move(socket)) : 0;
+}
+
+// Connects (blocks; nativeRfcommClose from another thread ends it). out: channel.
+jint WindowsBluetooth_rfcommConnect(JNIEnv* env, jclass, jlong handle, jintArray out) {
+  std::shared_ptr<bt::Socket> socket = Sockets().Get(handle);
+  if (!socket) return E_ABORT;
+  HRESULT hr = socket->Connect();
+  ALOGI("bluetooth: RFCOMM connect to %012llX: HRESULT 0x%08lX",
+        static_cast<unsigned long long>(socket->Remote()), static_cast<unsigned long>(hr));
+  if (SUCCEEDED(hr)) SetInt(env, out, 0, socket->Channel());
+  return static_cast<jint>(hr);
 }
 
 constexpr jint kChunk = 64 * 1024;
@@ -467,9 +484,10 @@ const JNINativeMethod gMethods[] = {
     {"nativeGattNotify", "(JII)I", GESHER_JNI(WindowsBluetooth_gattNotify)},
     {"nativeGattMtu", "(J)I", GESHER_JNI(WindowsBluetooth_gattMtu)},
     {"nativeGattNext", "(JI[I)[B", GESHER_JNI(WindowsBluetooth_gattNext)},
+    {"nativeGattPhy", "(J[I)I", GESHER_JNI(WindowsBluetooth_gattPhy)},
     {"nativeGattClose", "(J)V", GESHER_JNI(WindowsBluetooth_gattClose)},
-    {"nativeRfcommConnect", "(JLjava/lang/String;IZ[I)J",
-     GESHER_JNI(WindowsBluetooth_rfcommConnect)},
+    {"nativeRfcommOpen", "(JLjava/lang/String;IZ[I)J", GESHER_JNI(WindowsBluetooth_rfcommOpen)},
+    {"nativeRfcommConnect", "(J[I)I", GESHER_JNI(WindowsBluetooth_rfcommConnect)},
     {"nativeRfcommRead", "(J[BII)I", GESHER_JNI(WindowsBluetooth_rfcommRead)},
     {"nativeRfcommWrite", "(J[BII)I", GESHER_JNI(WindowsBluetooth_rfcommWrite)},
     {"nativeRfcommAvailable", "(J)I", GESHER_JNI(WindowsBluetooth_rfcommAvailable)},

@@ -47,6 +47,11 @@ const GUID kUartRx = {0x6e400002, 0xb5a3, 0xf393,
                       {0xe0, 0xa9, 0xe5, 0x0e, 0x24, 0xdc, 0xca, 0x9e}};
 const GUID kUartTx = {0x6e400003, 0xb5a3, 0xf393,
                       {0xe0, 0xa9, 0xe5, 0x0e, 0x24, 0xdc, 0xca, 0x9e}};
+// A secondary service the UART service includes, with one readable characteristic.
+const GUID kIncludedService = {0x6e400010, 0xb5a3, 0xf393,
+                               {0xe0, 0xa9, 0xe5, 0x0e, 0x24, 0xdc, 0xca, 0x9e}};
+const GUID kIncludedValue = {0x6e400011, 0xb5a3, 0xf393,
+                             {0xe0, 0xa9, 0xe5, 0x0e, 0x24, 0xdc, 0xca, 0x9e}};
 
 std::atomic<bool> gOn{true};
 
@@ -166,6 +171,9 @@ class TestGatt final : public Gatt {
     add(kCharacteristic, kUartRx, 22, 0x0C);
     add(kCharacteristic, kUartTx, 24, 0x10);
     add(kDescriptor, ShortUuid(0x2902), 25, 0);
+    add(kIncluded, kIncludedService, 30, 20);  // included by the UART service (handle 20)
+    add(kService, kIncludedService, 30, 1);    // secondary
+    add(kCharacteristic, kIncludedValue, 32, 0x02);
     return kGattSuccess;
   }
 
@@ -179,6 +187,10 @@ class TestGatt final : public Gatt {
     }
     if (kind == kCharacteristic && handle == 12) {
       value->assign(1, battery_);
+      return kGattSuccess;
+    }
+    if (kind == kCharacteristic && handle == 32) {
+      value->assign({'i', 'n', 'c'});
       return kGattSuccess;
     }
     if (kind == kDescriptor && (handle == 13 || handle == 25)) {
@@ -237,6 +249,14 @@ class TestGatt final : public Gatt {
   }
 
   int Mtu() override { return kTestMtu; }
+
+  // The test link runs on LE 2M both ways.
+  int Phy(int* tx, int* rx) override {
+    if (!connected_) return kGattError;
+    *tx = 2;
+    *rx = 2;
+    return kGattSuccess;
+  }
 
   bool NextEvent(GattEvent* out, int timeoutMs) override {
     if (events_.Pop(out, timeoutMs)) return true;
@@ -300,6 +320,8 @@ class TestSocket final : public Socket {
   TestSocket(std::shared_ptr<Pipe> in, std::shared_ptr<Pipe> out, uint64_t remote, int channel)
       : in_(std::move(in)), out_(std::move(out)), remote_(remote), channel_(channel) {}
   ~TestSocket() override { Close(); }
+
+  HRESULT Connect() override { return S_OK; }
 
   int Read(uint8_t* buffer, int length) override {
     if (closed_.load()) return 0;
@@ -368,6 +390,110 @@ class TestServer final : public Server {
   GUID uuid_;
   int channel_;
   Queue<std::shared_ptr<Socket>> pending_{16};
+};
+
+// A socket of OpenRfcomm: Connect() reaches the headset's echo services or a listener of
+// the test radio's own address; the headset's channel 3 never answers, so that a
+// Close() from another thread has a connect to end (E_ABORT).
+std::shared_ptr<Socket> ConnectTest(uint64_t address, const GUID& uuid, int channel,
+                                  HRESULT* hr) {
+  if (!gOn.load()) {
+    *hr = HRESULT_FROM_WIN32(kWsaHostUnreach);
+    return nullptr;
+  }
+  if (address == kHeadsetAddress) {
+    int service = 0;
+    if (channel == 1 || (channel <= 0 && uuid == ShortUuid(0x1101))) service = 1;
+    if (channel == 2 || (channel <= 0 && uuid == kVendorUuid)) service = 2;
+    if (service == 0) {
+      *hr = HRESULT_FROM_WIN32(kWsaConnRefused);
+      return nullptr;
+    }
+    auto echo = std::make_shared<Pipe>();
+    *hr = S_OK;
+    return std::make_shared<TestSocket>(echo, echo, address, service);
+  }
+  if (address == kAdapterAddress) {
+    std::lock_guard<std::mutex> lock(gServersMu);
+    auto it = gServers.find(GuidText(uuid));
+    if (it == gServers.end()) {
+      *hr = HRESULT_FROM_WIN32(kWsaConnRefused);
+      return nullptr;
+    }
+    auto there = std::make_shared<Pipe>();
+    auto back = std::make_shared<Pipe>();
+    int serverChannel = it->second->Channel();
+    it->second->Offer(std::make_shared<TestSocket>(there, back, kAdapterAddress, serverChannel));
+    *hr = S_OK;
+    return std::make_shared<TestSocket>(back, there, kAdapterAddress, serverChannel);
+  }
+  *hr = HRESULT_FROM_WIN32(kWsaHostUnreach);
+  return nullptr;
+}
+
+class PendingTestSocket final : public Socket {
+ public:
+  PendingTestSocket(uint64_t address, GUID uuid, int channel)
+      : address_(address), uuid_(uuid), channel_(channel) {}
+  ~PendingTestSocket() override { Close(); }
+
+  HRESULT Connect() override {
+    if (address_ == kHeadsetAddress && channel_ == 3) {
+      std::unique_lock<std::mutex> lock(mu_);
+      cv_.wait(lock, [this] { return closed_; });
+      return E_ABORT;
+    }
+    HRESULT hr = S_OK;
+    std::shared_ptr<Socket> s = ConnectTest(address_, uuid_, channel_, &hr);
+    std::lock_guard<std::mutex> lock(mu_);
+    if (closed_) {
+      if (s) s->Close();
+      return E_ABORT;
+    }
+    inner_ = s;
+    return hr;
+  }
+  int Read(uint8_t* buffer, int length) override {
+    std::shared_ptr<Socket> s = inner();
+    return s ? s->Read(buffer, length) : 0;
+  }
+  int Write(const uint8_t* buffer, int length) override {
+    std::shared_ptr<Socket> s = inner();
+    return s ? s->Write(buffer, length) : -kWsaNotConn;
+  }
+  int Available() override {
+    std::shared_ptr<Socket> s = inner();
+    return s ? s->Available() : 0;
+  }
+  int Channel() override {
+    std::shared_ptr<Socket> s = inner();
+    return s ? s->Channel() : channel_;
+  }
+  uint64_t Remote() override { return address_; }
+  void Close() override {
+    std::shared_ptr<Socket> s;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      closed_ = true;
+      s = inner_;
+    }
+    cv_.notify_all();
+    if (s) s->Close();
+  }
+
+ private:
+  std::shared_ptr<Socket> inner() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return inner_;
+  }
+
+  const uint64_t address_;
+  const GUID uuid_;
+  const int channel_;
+  std::mutex mu_;
+  std::condition_variable cv_;
+  bool closed_ = false;
+  std::shared_ptr<Socket> inner_;
 };
 
 // --- the backend ---------------------------------------------------------------------------
@@ -441,40 +567,10 @@ class Test final : public Backend {
     return std::make_shared<TestGatt>();
   }
 
-  std::shared_ptr<Socket> ConnectRfcomm(uint64_t address, const GUID& uuid, int channel, bool,
-                                        HRESULT* hr) override {
-    if (!gOn.load()) {
-      *hr = HRESULT_FROM_WIN32(kWsaHostUnreach);
-      return nullptr;
-    }
-    if (address == kHeadsetAddress) {
-      int service = 0;
-      if (channel == 1 || (channel <= 0 && uuid == ShortUuid(0x1101))) service = 1;
-      if (channel == 2 || (channel <= 0 && uuid == kVendorUuid)) service = 2;
-      if (service == 0) {
-        *hr = HRESULT_FROM_WIN32(kWsaConnRefused);
-        return nullptr;
-      }
-      auto echo = std::make_shared<Pipe>();
-      *hr = S_OK;
-      return std::make_shared<TestSocket>(echo, echo, address, service);
-    }
-    if (address == kAdapterAddress) {
-      std::lock_guard<std::mutex> lock(gServersMu);
-      auto it = gServers.find(GuidText(uuid));
-      if (it == gServers.end()) {
-        *hr = HRESULT_FROM_WIN32(kWsaConnRefused);
-        return nullptr;
-      }
-      auto there = std::make_shared<Pipe>();
-      auto back = std::make_shared<Pipe>();
-      int serverChannel = it->second->Channel();
-      it->second->Offer(std::make_shared<TestSocket>(there, back, kAdapterAddress, serverChannel));
-      *hr = S_OK;
-      return std::make_shared<TestSocket>(back, there, kAdapterAddress, serverChannel);
-    }
-    *hr = HRESULT_FROM_WIN32(kWsaHostUnreach);
-    return nullptr;
+  std::shared_ptr<Socket> OpenRfcomm(uint64_t address, const GUID& uuid, int channel, bool,
+                                     HRESULT* hr) override {
+    *hr = S_OK;
+    return std::make_shared<PendingTestSocket>(address, uuid, channel);
   }
 
   std::shared_ptr<Server> ListenRfcomm(const std::wstring&, const GUID& uuid, bool,
