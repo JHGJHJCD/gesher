@@ -1315,8 +1315,8 @@ Library* LoadCommon(const char* name, const uint8_t* data, size_t size, int fd, 
     // x86-64 only: %fs accesses become %gs ones before any of the object's code
     // runs (IFUNC resolvers run during relocation). Guest arm64 code reaches
     // TLS through TPIDR_EL0, which the translator supplies (ADR 0047).
-    if (!RewriteFsAccesses(lib->name.c_str(), data, size, lib->load_bias, &lib->fs, error,
-                           executable_tls_size)) {
+    if (!RewriteFsAccesses(lib->name.c_str(), data, size, lib->load_bias, lib->base,
+                           lib->map_size, &lib->fs, error, executable_tls_size)) {
       // A main TLS module is already registered; keep its backing object
       // alive just as later relocation failures keep registered libraries.
       if (lib->tls.module_id == 0) discard(lib);
@@ -1364,6 +1364,12 @@ Library* LoadCommon(const char* name, const uint8_t* data, size_t size, int fd, 
     }
   }
   if (!ProtectSegments(lib, data, error)) {
+    return nullptr;
+  }
+  // A self-unpacking object (UPX): its code is rewritten as it first runs,
+  // after its initializer has unpacked it (fs_rewrite.h, ADR 0084).
+  if (!aarch64 && lib->fs.self_unpacking &&
+      !DeferUnpackedCode(lib->name.c_str(), data, lib->load_bias, error)) {
     return nullptr;
   }
   // Load-time state; file_phdr points into the file image, which goes away.
@@ -1609,6 +1615,8 @@ FsRewriteCounts FsRewrites(Library* library) {
   c.decode_errors = library->fs.decode_errors;
   c.bytes_decoded = library->fs.bytes_decoded;
   c.used_unwind_info = library->fs.used_fdes;
+  c.syscalls = library->fs.syscalls;
+  c.self_unpacking = library->fs.self_unpacking;
   return c;
 }
 

@@ -139,8 +139,28 @@ struct FsRewriteCounts {
   size_t decode_errors = 0;    // bytes skipped while decoding code
   size_t bytes_decoded = 0;
   bool used_unwind_info = false;  // .eh_frame_hdr supplied ranges or boundary anchors
+  size_t syscalls = 0;         // raw `syscall` instructions turned into emulated traps
+  bool self_unpacking = false; // code unpacked at run time: rewritten on first execution
 };
 FsRewriteCounts FsRewrites(Library* library);
+
+// --- Raw system calls and code made at run time (ADR 0084) --------------------
+// A raw Linux x86-64 system call made by loaded code (a `syscall` instruction
+// the loader turned into a trap): `nr` and the six arguments as the kernel
+// takes them; returns the kernel's result, or -errno. The bionic shim installs
+// it (it maps the call to its own functions); without one every raw system
+// call returns -ENOSYS.
+using RawSyscallHandler = int64_t (*)(int64_t nr, const int64_t args[6]);
+void SetRawSyscallHandler(RawSyscallHandler handler);
+
+// mprotect/mmap/munmap for loaded code (the bionic shim's): as gesher-base's,
+// except that pages of a loaded x86-64 object that are made executable are
+// kept non-executable until their first execution, when the loader rewrites
+// the code then in them (%fs accesses, raw system calls) and gives them the
+// requested protection. Same results and errno as mprotect/mmap/munmap.
+int ProtectLoadedMemory(void* addr, size_t len, int prot);
+void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64_t offset);
+int UnmapLoadedMemory(void* addr, size_t len);
 
 // __tls_get_addr's worker: the address of loaded module `module_id`'s TLS
 // variable at `offset` in the current thread. The bionic shim wraps this as the

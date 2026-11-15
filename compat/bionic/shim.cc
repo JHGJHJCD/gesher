@@ -785,11 +785,15 @@ int BIONIC_SYSV Nftw(const char* dir, SysvNftwFn fn, int nopenfd, int flags) {
   return r;
 }
 
+// Through the loader: code a loaded object makes executable in its own image
+// (an unpacker's, a patch) is rewritten when it first runs (ADR 0084).
 void* BIONIC_SYSV Mmap(void* addr, size_t len, int prot, int flags, int fd, int64_t off) {
-  return mmap(addr, len, prot, flags, fd, static_cast<off_t>(off));
+  return gesher::elf::MapLoadedMemory(addr, len, prot, flags, fd, off);
 }
-int BIONIC_SYSV Munmap(void* addr, size_t len) { return munmap(addr, len); }
-int BIONIC_SYSV Mprotect(void* addr, size_t len, int prot) { return mprotect(addr, len, prot); }
+int BIONIC_SYSV Munmap(void* addr, size_t len) { return gesher::elf::UnmapLoadedMemory(addr, len); }
+int BIONIC_SYSV Mprotect(void* addr, size_t len, int prot) {
+  return gesher::elf::ProtectLoadedMemory(addr, len, prot);
+}
 void* BIONIC_SYSV Mremap(void* addr, size_t old_size, size_t new_size, int flags, void* target) {
   return (flags & MREMAP_FIXED) != 0 ? mremap(addr, old_size, new_size, flags, target)
                                    : mremap(addr, old_size, new_size, flags);
@@ -993,8 +997,15 @@ int64_t BIONIC_SYSV Syscall(int64_t nr, int64_t a1, int64_t a2, int64_t a3, int6
   int64_t timerfd_result;
   if (DispatchTimerfdSyscall(nr, a1, a2, a3, a4, &timerfd_result)) return timerfd_result;
   if (nr != kSysFutex && nr != 98 /* ARM64 futex */) {
-    errno = kENOSYS;
-    return -1;
+    // Any other x86-64 system call, as a raw `syscall` instruction makes it
+    // (syscall_bionic.cc): the kernel's -errno becomes errno.
+    const int64_t args[6] = {a1, a2, a3, a4, a5, a6};
+    int64_t r = RawSyscallX64(nr, args);
+    if (r < 0 && r > -4096) {
+      errno = static_cast<int>(-r);
+      return -1;
+    }
+    return r;
   }
   int op = static_cast<int>(a2);
   int command = op & FUTEX_CMD_MASK;
@@ -1272,6 +1283,7 @@ SymbolTable& Table() {
     RegisterDnsWire(*table);
     RegisterSignal(*table);
     RegisterTime(*table);
+    RegisterSyscall(*table);
     RegisterProcess(*table);  // last: it wraps entries already there
     return table;
   }();
@@ -1291,6 +1303,7 @@ void InstallBionicShim() {
   Table();
   gesher::elf::SetBionicResolver([](const char* name) { return LookupBionicSymbol(name); });
   gesher::elf::SetUnresolvedHandler(ReportUnresolved);
+  gesher::elf::SetRawSyscallHandler(RawSyscallX64);
   InstallSignalHook(false);
 }
 
