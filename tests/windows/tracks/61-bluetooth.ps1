@@ -19,7 +19,8 @@ try {
   Check 'bluetooth: without a radio there is no adapter (Windows.Devices.Bluetooth answers no default adapter)' {
     $global:LASTEXITCODE = $noRadioCode
     $noRadioOut
-  } @('BluetoothHostTest: Windows: no adapter', 'BluetoothHostTest no radio passed:')
+  } @('BluetoothHostTest: Windows: no adapter', 'BluetoothHostTest: features: bluetooth false, bluetooth_le false',
+    'BluetoothHostTest no radio passed:')
 
   $env:GESHER_BLUETOOTH_TEST = '1'
   $btOut = RunTimed "$Dir/dalvikvm.exe" $dvmBt 240
@@ -29,13 +30,16 @@ try {
 }
 
 foreach ($c in @(
+  @('system features: FEATURE_BLUETOOTH and FEATURE_BLUETOOTH_LE from the radio', 'BluetoothHostTest: features: bluetooth true, bluetooth_le true'),
   @('permissions: BLUETOOTH_CONNECT/BLUETOOTH_SCAN on API 31+, legacy BLUETOOTH below', 'BluetoothHostTest: permissions:'),
+  @('gesher.bluetooth checks Binder callers (radio, discovery, SDP, pairing) and asks the user', 'BluetoothHostTest: service policy:'),
   @('adapter state, name, hidden address and the bonded headset (class, service classes, isConnected)', 'BluetoothHostTest: adapter:'),
   @('A2DP and headset profile proxies list the connected headset', 'BluetoothHostTest: profiles:'),
   @('LE scan: filters, advertisement merged with its scan response, legacy startLeScan', 'BluetoothHostTest: LE scan:'),
   @('GATT client: connect, discovery, read, CCCD notifications, write and echo, MTU, disconnect', 'BluetoothHostTest: GATT:'),
   @('RFCOMM: service UUID and channel sockets, available(), listener accept', 'BluetoothHostTest: RFCOMM:'),
-  @('system broadcasts: radio off/on, ACL and A2DP state, discovery, ACTION_UUID', 'BluetoothHostTest: broadcasts:')
+  @('system broadcasts: radio off/on, ACL and A2DP state, discovery, ACTION_UUID', 'BluetoothHostTest: broadcasts:'),
+  @('pairing through Windows: createBond BONDING>BONDED, removeBond BONDED>NONE, a failed pairing', 'BluetoothHostTest: pairing:')
 )) {
   Check "bluetooth (test radio): $($c[0])" {
     $global:LASTEXITCODE = $btCode
