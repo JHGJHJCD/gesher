@@ -74,84 +74,55 @@ if ($env:OS -ne 'Windows_NT') {
     Write-Host 'SKIP: actual WPF interactions require Windows; the Windows CI gates run them.'
     return
 }
+# CI runs this script in its own fresh STA PowerShell step with an external
+# two-minute timeout. That bound also covers a blocked dispatcher/Click handler.
 Assert-Dialog ([Threading.Thread]::CurrentThread.ApartmentState -eq 'STA') 'WPF checks run in STA'
+Write-Host 'WPF PHASE: loading assemblies'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, UIAutomationProvider, UIAutomationTypes
 . ([scriptblock]::Create($script:DialogFunctions['Show-ModernConfirmDialog']))
 
-function Get-DialogText($node) {
-    if ($node -is [System.Windows.Controls.TextBlock]) { $node.Text }
-    if ($node -is [System.Windows.DependencyObject]) {
-        foreach ($child in [System.Windows.LogicalTreeHelper]::GetChildren($node)) { Get-DialogText $child }
-    }
-}
+$references = @(
+    [System.Windows.Window].Assembly.Location,
+    [System.Windows.Media.Visual].Assembly.Location,
+    [System.Windows.DependencyObject].Assembly.Location,
+    [System.Windows.Automation.Provider.IInvokeProvider].Assembly.Location,
+    [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location
+)
+Write-Host 'WPF PHASE: compiling the dispatcher driver'
+Add-Type -Path (Join-Path $PSScriptRoot 'WpfDialogProbe.cs') -ReferencedAssemblies $references
+
 function Invoke-WpfDialogCase {
     param([scriptblock] $Show, [ValidateSet('Confirm', 'Cancel', 'Close', 'Ok')] [string] $Action,
         [string] $ExpectedTitle, [string] $ExpectedText, [switch] $MessageDialog)
-    $script:DialogFixture = @{
-        Action = $Action; Title = $ExpectedTitle; Text = $ExpectedText
-        MessageDialog = [bool]$MessageDialog; Observed = $false; Failure = $null
-        Deadline = [DateTime]::UtcNow.AddSeconds(10)
-    }
-    $timer = [System.Windows.Threading.DispatcherTimer]::new()
-    $timer.Interval = [TimeSpan]::FromMilliseconds(20)
-    $timer.Add_Tick({
-        param($sender, $eventArgs)
-        try {
-            $case = $script:DialogFixture
-            if ([DateTime]::UtcNow -gt $case.Deadline) { throw 'Production modal did not close within 10 seconds' }
-            if ($case.Observed) { return }
-            $dialogs = @($script:window.OwnedWindows | Where-Object { $_.IsVisible })
-            if ($dialogs.Count -eq 0) { return }
-            Assert-Dialog ($dialogs.Count -eq 1) 'Exactly one production modal opens'
-            $modal = $dialogs[0]
-            $case.Observed = $true
-            Assert-Dialog ([object]::ReferenceEquals($modal.Owner, $script:window)) 'Modal belongs to the control panel'
-            Assert-Dialog ($modal.FlowDirection.ToString() -eq $script:flowDirection) 'Production reading direction matches selected language'
-            Assert-Dialog ($modal.Title -eq $case.Title) 'Literal title survives production XAML'
-            Assert-Dialog ((@(Get-DialogText $modal)) -contains $case.Text) 'Literal message and XML characters survive production XAML'
-            if ($case.MessageDialog) {
-                $button = $modal.FindName('BtnOk')
-                Assert-Dialog ($button.Content -eq (Get-GesherText 'cp_dialog_ok') -and $button.IsCancel) 'Message has a localized dismiss button'
-            } else {
-                Assert-Dialog ($modal.FindName('BtnCancel').IsCancel) 'Cancel remains the WPF cancel action'
-                Assert-Dialog ($modal.FindName('BtnCancel').Content -eq (Get-GesherText 'cp_update_cancel')) 'Cancel label is localized'
-                $button = $modal.FindName('BtnConfirm')
-            }
-            if ($case.Action -eq 'Close') {
-                $modal.Close()
-            } elseif ($case.Action -eq 'Cancel') {
-                # The automation provider invokes Button.OnClick, including
-                # IsCancel handling. Raising Click alone omits that behavior.
-                $peer = [System.Windows.Automation.Peers.ButtonAutomationPeer]::new($modal.FindName('BtnCancel'))
-                $provider = $peer.GetPattern([System.Windows.Automation.Peers.PatternInterface]::Invoke)
-                [System.Windows.Automation.Provider.IInvokeProvider].GetMethod('Invoke').Invoke($provider, $null)
-            } else {
-                $button.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent))
-            }
-        } catch {
-            $script:DialogFixture.Failure = $_
-            $sender.Stop()
-            # Closing the owner also ends a broken child's nested modal loop.
-            $script:window.Close()
-        }
-    })
+    Write-Host "WPF CASE START: $script:GesherUiLanguage / $Action / $ExpectedTitle"
+    $probe = [Gesher.Tests.WpfDialogProbe]::new($script:window, $Action, [bool]$MessageDialog)
     try {
-        $timer.Start()
+        $probe.Start()
         $result = @(& $Show)
-        if ($script:DialogFixture.Failure) { throw $script:DialogFixture.Failure }
-        Assert-Dialog $script:DialogFixture.Observed 'Production function displayed a modal'
+        if ($probe.Failure) { throw $probe.Failure }
+        # Assertions run after the modal closes, outside the dispatcher callback.
+        Assert-Dialog $probe.Observed 'Production function displayed a modal'
+        Assert-Dialog ($probe.VisibleWindowCount -eq 1) 'Exactly one production modal opens'
+        Assert-Dialog $probe.OwnerMatches 'Modal belongs to the control panel'
+        Assert-Dialog ($probe.FlowDirection -eq $script:flowDirection) 'Production reading direction matches selected language'
+        Assert-Dialog ($probe.Title -eq $ExpectedTitle) 'Literal title survives production XAML'
+        Assert-Dialog ($probe.Texts.Contains($ExpectedText)) 'Literal message and XML characters survive production XAML'
         if ($MessageDialog) {
+            Assert-Dialog ($probe.OkText -eq (Get-GesherText 'cp_dialog_ok') -and $probe.OkIsCancel) 'Message has a localized dismiss button'
             Assert-Dialog ($result.Count -eq 0) 'Message dialog does not leak return values'
         } else {
+            Assert-Dialog $probe.CancelIsCancel 'Cancel remains the WPF cancel action'
+            Assert-Dialog ($probe.CancelText -eq (Get-GesherText 'cp_update_cancel')) 'Cancel label is localized'
             Assert-Dialog ($result.Count -eq 1 -and $result[0] -is [bool]) 'Confirmation produces exactly one boolean'
             Assert-Dialog ($result[0] -eq ($Action -eq 'Confirm')) 'Only explicit confirmation approves the action'
         }
     } finally {
-        $timer.Stop()
-        foreach ($owned in @($script:window.OwnedWindows)) { $owned.Close() }
+        $probe.Dispose()
     }
+    Write-Host "WPF CASE PASS: $script:GesherUiLanguage / $Action / $ExpectedTitle"
 }
 
+Write-Host 'WPF PHASE: creating the owner window'
 $script:window = [System.Windows.Window]::new()
 $window.ShowInTaskbar = $false
 $window.ShowActivated = $false
@@ -159,7 +130,9 @@ $window.Opacity = 0
 $window.Width = 80
 $window.Height = 80
 try {
+    Write-Host 'WPF PHASE: showing the owner window'
     $window.Show()
+    Write-Host 'WPF PHASE: owner ready'
     foreach ($language in 'en', 'he') {
         $script:GesherUiLanguage = $language
         $script:flowDirection = if ($language -eq 'he') { 'RightToLeft' } else { 'LeftToRight' }
