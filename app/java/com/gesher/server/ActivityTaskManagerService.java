@@ -770,23 +770,26 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     public List<ActivityManager.RunningTaskInfo> getTasks(int maxNum,
             boolean filterOnlyVisibleRecents, boolean keepIntentExtra, int displayId) {
         List<ActivityManager.RunningTaskInfo> tasks = new ArrayList<>();
+        if (maxNum <= 0 || (displayId != Display.INVALID_DISPLAY
+                && displayId != Display.DEFAULT_DISPLAY)) return tasks;
+        Map<Integer, ActivityManager.RunningTaskInfo> selected = new HashMap<>();
         synchronized (this) {
-            // Most recent first, as RunningTasks orders them.
-            for (int i = mActivities.size() - 1; i >= 0 && tasks.size() < maxNum; i--) {
+            // Select tasks by recency, but keep visiting the older activities of
+            // selected tasks after the result cap is reached. Otherwise asking for
+            // one task incorrectly makes its top activity its base and sole activity.
+            for (int i = mActivities.size() - 1; i >= 0; i--) {
                 ActivityRecord r = mActivities.get(i);
                 if (r.state == State.DESTROYED) continue;
-                boolean seen = false;
-                for (ActivityManager.RunningTaskInfo t : tasks) {
-                    if (t.taskId == r.taskId) {
-                        t.numActivities++;
-                        t.baseActivity = r.component();
-                        t.baseIntent = keepIntentExtra ? new Intent(r.intent)
-                                : new Intent(r.intent).replaceExtras((Bundle) null);
-                        seen = true;
-                    }
+                ActivityManager.RunningTaskInfo t = selected.get(r.taskId);
+                if (t != null) {
+                    t.numActivities++;
+                    t.baseActivity = r.component();
+                    t.baseIntent = keepIntentExtra ? new Intent(r.intent)
+                            : new Intent(r.intent).replaceExtras((Bundle) null);
+                    continue;
                 }
-                if (seen) continue;
-                ActivityManager.RunningTaskInfo t = new ActivityManager.RunningTaskInfo();
+                if (tasks.size() >= maxNum) continue;
+                t = new ActivityManager.RunningTaskInfo();
                 t.taskId = r.taskId;
                 t.id = r.taskId;
                 t.baseActivity = r.component();
@@ -800,6 +803,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 t.configuration.setTo(LocaleManagerService.configurationFor(r.info.packageName));
                 t.token = r.taskToken;  // the task's window container (none of its own)
                 tasks.add(t);
+                selected.put(r.taskId, t);
             }
         }
         return tasks;

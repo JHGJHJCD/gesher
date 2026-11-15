@@ -91,7 +91,10 @@ jobs:
           python3 tools/test_statvfs_contracts.py --sanitize
           python3 tools/test_sendfile_contracts.py --sanitize
           python3 tools/test_elf_finalizers.py --sanitize
+          python3 tools/test_elf_lookup_contracts.py --sanitize
+          python3 tools/test_elf_lookup_contracts.py --linux-reference
           python3 tools/test_media_api_contracts.py --sanitize
+          python3 tools/test_aaudio_builder_contracts.py
 
       - name: Timer, DNS and media lifetime contracts
         run: |
@@ -135,7 +138,12 @@ jobs:
           "$RUNNER_TEMP/gesher-reserved-names"
 
       - name: Anonymous mapping zeroing and protection contracts
-        run: python3 tools/test_mman_zeroing_mappings.py --sanitize
+        run: |
+          python3 tools/test_mman_zeroing_mappings.py --sanitize
+          python3 tools/test_mmap_noreplace_contracts.py --sanitize
+          c++ -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all tests/mman/noreplace_holes_linux.cc -o "$RUNNER_TEMP/gesher-noreplace-holes"
+          "$RUNNER_TEMP/gesher-noreplace-holes"
+          python3 tools/test_madvise_reference.py
 
       - name: Filesystem metadata and media source ownership contracts
         run: |
@@ -154,7 +162,14 @@ jobs:
           java-version: 21
 
       - name: Audio JNI buffer contracts with checked JNI and UBSan
-        run: python3 tools/test_audio_buffer_contracts.py
+        run: |
+          python3 tools/test_audio_buffer_contracts.py
+          python3 tools/test_media_callback_contracts.py --java-home "$JAVA_HOME"
+
+      - name: WebStorage origin and running-task contracts
+        run: |
+          python3 tools/test_webstorage_origin_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_running_tasks_contracts.py
 
       - name: Settings context bootstrap and deferred construction contracts
         run: python3 tools/test_settings_context_bootstrap.py --java-home "$JAVA_HOME"

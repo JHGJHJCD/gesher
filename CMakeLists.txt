@@ -119,6 +119,10 @@ set_target_properties(net_udp_guarded_fault_probe PROPERTIES LINKER_LANGUAGE CXX
 # (stack track, docs/decisions/0036); run in CI on Windows.
 add_executable(mman_probe probes/posix/mman_probe.cc)
 target_compile_options(mman_probe PRIVATE -Wall -Wextra -Werror)
+add_executable(madvise_probe tests/native/madvise_contract.c)
+target_compile_definitions(madvise_probe PRIVATE GESHER_MADVISE_MAIN)
+target_compile_options(madvise_probe PRIVATE -Wall -Wextra -Werror)
+set_target_properties(madvise_probe PROPERTIES LINKER_LANGUAGE CXX)
 
 # eventfd and epoll, for libutils' Looper; also run in CI on Windows.
 add_executable(epoll_probe probes/posix/epoll_probe.cc)

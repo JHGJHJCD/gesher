@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <map>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -17,6 +18,8 @@
 #include "../player/extractor.h"
 #include "../video/video_decoder.h"
 #include "jni_util.h"
+#include "java_data_source.h"
+#include "receiver_lease.h"
 #include "media_jni.h"
 
 namespace gesher::media {
@@ -25,15 +28,21 @@ namespace {
 // --- MediaMetadataRetriever ----------------------------------------------------------------
 
 jfieldID gRetrieverContext;  // long mNativeContext
+std::mutex gRetrieverContextLock;
 
-struct Retriever {
+struct RetrieverSnapshot {
   std::shared_ptr<DataSource> source;  // for frames (getFrameAtTime)
   std::map<int, std::string> metadata;
   std::vector<uint8_t> album_art;
 };
 
-Retriever* GetRetriever(JNIEnv* env, jobject thiz) {
-  return reinterpret_cast<Retriever*>(env->GetLongField(thiz, gRetrieverContext));
+struct Retriever : ReceiverState {
+  RetrieverSnapshot snapshot;
+  bool opening = false;
+};
+
+ReceiverLease<Retriever> GetRetriever(JNIEnv* env, jobject thiz) {
+  return ReceiverLease<Retriever>::Acquire(env, thiz, gRetrieverContext, gRetrieverContextLock);
 }
 
 // MediaMetadataRetriever's keys, from the container's AMediaFormat keys.
@@ -46,7 +55,7 @@ const struct {
     {13, "albumartist"}, {14, "discnum"}, {15, "compilation"}, {23, "location"},
 };
 
-bool Fill(Retriever* r, std::shared_ptr<DataSource> source, std::string* error) {
+bool Fill(RetrieverSnapshot* r, std::shared_ptr<DataSource> source, std::string* error) {
   int64_t size = source->Size();
   r->source = source;
   auto ex = Extractor::Open(source, error);
@@ -59,7 +68,7 @@ bool Fill(Retriever* r, std::shared_ptr<DataSource> source, std::string* error) 
   }
   std::string mime = file.Mime();
   if (!mime.empty()) r->metadata[12] = mime;
-  file.GetBuffer("album-art", &r->album_art);
+  file.GetBuffer("albumart", &r->album_art);
   int64_t duration = -1;
   file.GetInt64("durationUs", &duration);
   bool audio = false, video = false;
@@ -93,7 +102,10 @@ bool Fill(Retriever* r, std::shared_ptr<DataSource> source, std::string* error) 
     if (file.GetInt32("bitrate", &bitrate)) {
       r->metadata[20] = std::to_string(bitrate);
     } else if (size > 0 && duration > 0) {
-      r->metadata[20] = std::to_string(size * 8 * 1000000 / duration);
+      // Stagefright uses a floating-point average. Avoid an overflowing
+      // integer numerator while retaining large sources with a valid result.
+      const double average = static_cast<double>(size) * 8E6 / static_cast<double>(duration);
+      if (average < 0x1p63) r->metadata[20] = std::to_string(static_cast<int64_t>(average));
     }
   }
   return true;
@@ -101,16 +113,32 @@ bool Fill(Retriever* r, std::shared_ptr<DataSource> source, std::string* error) 
 
 void SetFromSource(JNIEnv* env, jobject thiz, std::unique_ptr<DataSource> source,
                    const std::string& error) {
-  Retriever* r = GetRetriever(env, thiz);
+  auto r = GetRetriever(env, thiz);
   if (r == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
     return;
   }
-  std::string e = error;
-  if (source == nullptr || !Fill(r, std::move(source), &e)) {
-    MEDIA_LOGE("MediaMetadataRetriever: %s", e.c_str());
-    jniThrow(env, "java/lang/IllegalArgumentException", "setDataSource failed");
+  if (r->opening) {
+    jniThrow(env, "java/lang/IllegalStateException", "setDataSource is in progress");
+    return;
   }
+  std::string e = error;
+  RetrieverSnapshot next;
+  r->opening = true;
+  const bool opened = source != nullptr && Fill(&next, std::move(source), &e);
+  r->opening = false;
+  if (!opened) {
+    // MetadataRetrieverClient creates a fresh Stagefright retriever and only
+    // publishes it on success. The public receiver retains its old snapshot
+    // when opening a replacement fails, including its callback ownership.
+    MEDIA_LOGE("MediaMetadataRetriever: %s", e.c_str());
+    jniThrow(env, "java/lang/RuntimeException", "setDataSource failed");
+    return;
+  }
+  // Retire the prior source only after all new metadata/artwork is published,
+  // while the receiver lease still rejects nested operations from close().
+  RetrieverSnapshot retired = std::move(r->snapshot);
+  r->snapshot = std::move(next);
 }
 
 void JNICALL MMR_setDataSourcePath(JNIEnv* env, jobject thiz, jobject, jstring uri, jobjectArray keys,
@@ -140,33 +168,57 @@ void JNICALL MMR_setDataSourcePath(JNIEnv* env, jobject thiz, jobject, jstring u
 
 void JNICALL MMR_setDataSourceFD(JNIEnv* env, jobject thiz, jobject fileDescriptor, jlong offset,
                                  jlong length) {
-  if (fileDescriptor == nullptr) {
+  if (GetRetriever(env, thiz) == nullptr) {
+    jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
+    return;
+  }
+  if (fileDescriptor == nullptr || offset < 0 || length < 0) {
     jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
     return;
   }
   jclass fdc = env->FindClass("java/io/FileDescriptor");
   jint fd = env->GetIntField(fileDescriptor, env->GetFieldID(fdc, "descriptor", "I"));
+  if (fd < 0) {
+    jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
+    return;
+  }
   std::string error;
   auto source = OpenFdSource(fd, offset, length >= 0x7fffffffffffffLL ? -1 : length, &error);
   SetFromSource(env, thiz, std::move(source), error);
 }
 
+void JNICALL MMR_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject data_source) {
+  if (GetRetriever(env, thiz) == nullptr) {
+    jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
+    return;
+  }
+  auto source = JavaDataSource::Create(env, data_source);
+  if (source == nullptr) return;
+  SetFromSource(env, thiz, std::move(source), "MediaDataSource");
+}
+
 jstring JNICALL MMR_extractMetadata(JNIEnv* env, jobject thiz, jint key) {
-  Retriever* r = GetRetriever(env, thiz);
+  auto r = GetRetriever(env, thiz);
   if (r == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
     return nullptr;
   }
-  auto it = r->metadata.find(key);
-  return it != r->metadata.end() ? env->NewStringUTF(it->second.c_str()) : nullptr;
+  auto it = r->snapshot.metadata.find(key);
+  return it != r->snapshot.metadata.end() ? env->NewStringUTF(it->second.c_str()) : nullptr;
 }
 
 jbyteArray JNICALL MMR_getEmbeddedPicture(JNIEnv* env, jobject thiz, jint) {
-  Retriever* r = GetRetriever(env, thiz);
-  if (r == nullptr || r->album_art.empty()) return nullptr;
-  jbyteArray a = env->NewByteArray(static_cast<jsize>(r->album_art.size()));
-  env->SetByteArrayRegion(a, 0, static_cast<jsize>(r->album_art.size()),
-                          reinterpret_cast<const jbyte*>(r->album_art.data()));
+  auto r = GetRetriever(env, thiz);
+  if (r == nullptr) {
+    jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
+    return nullptr;
+  }
+  if (r->snapshot.album_art.empty() ||
+      r->snapshot.album_art.size() > static_cast<size_t>(std::numeric_limits<jsize>::max())) return nullptr;
+  jbyteArray a = env->NewByteArray(static_cast<jsize>(r->snapshot.album_art.size()));
+  if (a == nullptr) return nullptr;
+  env->SetByteArrayRegion(a, 0, static_cast<jsize>(r->snapshot.album_art.size()),
+                          reinterpret_cast<const jbyte*>(r->snapshot.album_art.data()));
   return a;
 }
 
@@ -211,13 +263,13 @@ std::unique_ptr<VideoFrame> DecodeRetrieverFrame(TrackReader* reader, VideoDecod
 // (keeping its aspect) when both are positive; null without video.
 jobject JNICALL MMR_getFrameAtTime(JNIEnv* env, jobject thiz, jlong time_us, jint option, jint dst_w,
                                    jint dst_h, jobject) {
-  Retriever* r = GetRetriever(env, thiz);
-  if (r == nullptr || r->source == nullptr) {
+  auto r = GetRetriever(env, thiz);
+  if (r == nullptr || r->snapshot.source == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
     return nullptr;
   }
   std::string error;
-  auto ex = Extractor::Open(r->source, &error);
+  auto ex = Extractor::Open(r->snapshot.source, &error);
   if (ex == nullptr) return nullptr;
   std::unique_ptr<VideoDecoder> decoder;
   std::unique_ptr<TrackReader> reader;
@@ -265,12 +317,11 @@ void JNICALL MMR_init(JNIEnv* env, jclass) {
 }
 
 void JNICALL MMR_setup(JNIEnv* env, jobject thiz) {
-  env->SetLongField(thiz, gRetrieverContext, reinterpret_cast<jlong>(new Retriever));
+  ReceiverLease<Retriever>::Setup(env, thiz, gRetrieverContext, gRetrieverContextLock);
 }
 
 void JNICALL MMR_release(JNIEnv* env, jobject thiz) {
-  delete GetRetriever(env, thiz);
-  env->SetLongField(thiz, gRetrieverContext, 0);
+  ReceiverLease<Retriever>::Release(env, thiz, gRetrieverContext, gRetrieverContextLock);
 }
 
 const JNINativeMethod kRetrieverMethods[] = {
@@ -278,6 +329,7 @@ const JNINativeMethod kRetrieverMethods[] = {
      "(Landroid/os/IBinder;Ljava/lang/String;[Ljava/lang/String;[Ljava/lang/String;)V",
      GESHER_NATIVE(MMR_setDataSourcePath)},
     {"_setDataSource", "(Ljava/io/FileDescriptor;JJ)V", GESHER_NATIVE(MMR_setDataSourceFD)},
+    {"_setDataSource", "(Landroid/media/MediaDataSource;)V", GESHER_NATIVE(MMR_setDataSourceCallback)},
     {"nativeExtractMetadata", "(I)Ljava/lang/String;", GESHER_NATIVE(MMR_extractMetadata)},
     {"getEmbeddedPicture", "(I)[B", GESHER_NATIVE(MMR_getEmbeddedPicture)},
     {"_getFrameAtTime", "(JIIILandroid/media/MediaMetadataRetriever$BitmapParams;)Landroid/graphics/Bitmap;",

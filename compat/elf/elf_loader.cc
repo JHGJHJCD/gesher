@@ -1510,14 +1510,26 @@ Library* LoadFromMemory(const char* name, const void* data, size_t size, std::st
 }
 
 void* Lookup(Library* library, const char* name) {
-  if (library == nullptr) return nullptr;
+  if (library == nullptr || name == nullptr) return nullptr;
   uint32_t gh = GnuHash(name), sh = SysvHash(name);
   const Elf64_Sym* sym = FindDefinedSymbol(library, name, gh, sh);
   if (sym != nullptr) return SymbolAddress(library, sym);
-  // Fall back to the dependency graph.
-  for (Library* dep : library->dependencies) {
+  // Bionic searches the complete DT_NEEDED graph breadth first: a direct
+  // dependency wins over a grandchild even when that child's parent was
+  // loaded first. A shared descendant or dependency cycle is visited once.
+  std::vector<Library*> pending;
+  std::set<Library*> seen{library};
+  auto enqueue = [&](Library* owner) {
+    for (Library* dep : owner->dependencies) {
+      if (seen.insert(dep).second) pending.push_back(dep);
+    }
+  };
+  enqueue(library);
+  for (size_t i = 0; i < pending.size(); ++i) {
+    Library* dep = pending[i];
     const Elf64_Sym* s = FindDefinedSymbol(dep, name, gh, sh);
     if (s != nullptr) return SymbolAddress(dep, s);
+    enqueue(dep);
   }
   return nullptr;
 }

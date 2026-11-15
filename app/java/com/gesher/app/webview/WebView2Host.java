@@ -419,6 +419,16 @@ public final class WebView2Host {
     }
 
     /**
+     * Clears an HTTP(S) origin's first-party file systems and IndexedDB.
+     * Native admission rejects malformed/opaque and unsupported origins without
+     * invoking the callback. IDN origins use their ASCII Punycode spelling.
+     */
+    public static boolean clearOriginData(String origin, GlobalCallback callback) {
+        if (origin == null || origin.isEmpty()) return false;
+        return submitGlobal(callback, id -> nClearOriginData(origin, id));
+    }
+
+    /**
      * Closes an idle backend and waits at most timeoutMillis (1..0xfffffffe) for its
      * native thread to terminate. Live or pending hosts, an invalid timeout, the owner
      * thread and concurrent shutdown calls are refused without starting closure.
@@ -528,4 +538,5 @@ public final class WebView2Host {
     private static native boolean nGetCookies(String url, long callbackId);
     private static native boolean nDeleteCookies(int which, long callbackId);
     private static native boolean nClearBrowsingData(int kinds, long callbackId);
+    private static native boolean nClearOriginData(String origin, long callbackId);
 }

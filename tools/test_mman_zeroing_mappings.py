@@ -38,6 +38,16 @@ def main():
         "std::map<uintptr_t, Region>::iterator FindRegion(State& s, uintptr_t addr)",
         "template <typename Fn>\nbool ForEachRun(void* addr, size_t len, Fn fn)",
     )]
+    if "bool AdviceRange(" in source:
+        functions.append(block(source, "size_t RoundUp(size_t x, size_t n)"))
+    # Older source remains runnable as a negative control for the same fixture.
+    for signature in (
+        "bool AdviceRange(uintptr_t begin, size_t length, size_t page, size_t* rounded)",
+        "bool AdviceUnlocked(uintptr_t begin, size_t length, size_t page)",
+        "bool PreflightAdvice(State& s, uintptr_t begin, size_t length, int advice)",
+    ):
+        if signature in source:
+            functions.append(block(source, signature))
     start = source.index("struct ZeroingRange {")
     end = source.index("}  // namespace", start)
     functions.append(source[start:end])
