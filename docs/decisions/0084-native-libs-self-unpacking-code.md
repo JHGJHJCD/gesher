@@ -85,6 +85,18 @@ memory that a raw `mmap`/`mprotect` (not libc's: a JIT's stays as asked)
 creates outside every loaded object becomes an object of its own, without
 unwind information, rewritten as it runs, and forgotten when unmapped.
 
+**Copies of rewritten code.** UPX 6's stub (Ijiami's) copies itself into an
+anonymous mapping and runs the copy, `ud2` and all. Each rewritten system
+call keeps the bytes around it (within its page, as rewritten); a `ud2` at an
+unknown address with the same bytes around it is a copy of that call,
+emulated and remembered from then on.
+
+**Shared file mappings over a loaded object.** UPX 5 `ftruncate`s a memfd to
+its unpacked code's size and maps it `MAP_SHARED|MAP_FIXED` over the
+library's text. gesher-base cannot place a shared view that ends in a partial
+page; into a loaded object (or for a raw system call) such a mapping becomes
+a private copy of the file's bytes. Writes through it do not reach the file.
+
 **`/proc/self/auxv` exists.** UPX 5 reads `AT_PAGESZ` from it with raw
 `openat`/`read`, and its system call helper stops on `int3` when any call
 fails (`cmp $-0x1000,%rax; jb; int3`): gesher-base now serves the auxiliary

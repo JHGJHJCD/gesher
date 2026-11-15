@@ -116,6 +116,12 @@ void TestLoadTimeSyscall() {
   if (!ok || mprotect(image, kPage, PROT_READ | PROT_EXEC) != 0) return;
   int64_t r = reinterpret_cast<Fn>(image)(5);
   Check("load time: emulated getpid(39) gets %rdi and returns %rax", r == 39005 && g_args[0] == 5);
+  // The rewritten code copied elsewhere and run there (UPX's stub copies
+  // itself into an anonymous mapping): the copy's ud2 is the same call.
+  void* copy = VirtualAlloc(nullptr, kPage, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+  if (copy != nullptr) std::memcpy(copy, image, 64);
+  Check("copied code: the copy of a rewritten syscall is emulated too",
+        copy != nullptr && reinterpret_cast<Fn>(copy)(8) == 39008);
 }
 
 void TestRunTimeCode() {

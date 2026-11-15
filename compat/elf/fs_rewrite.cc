@@ -5,6 +5,7 @@
 #include <elf.h>
 
 #include <sys/mman.h>
+#include <unistd.h>
 #include <windows.h>
 
 #include <errno.h>
@@ -636,6 +637,41 @@ std::map<uintptr_t, uint8_t>& SyscallSites() {
   return m;
 }
 
+// Code that copies itself carries our ud2 along: UPX's stub copies itself
+// into an anonymous mapping and runs the copy. Each rewritten site keeps the
+// bytes around it (as rewritten, within its page); a ud2 elsewhere with the
+// same bytes around it is a copy of that system call. Under g_lock.
+struct SyscallFingerprint {
+  uint8_t length;           // the instruction's
+  uint8_t before, after;    // bytes kept on each side of it
+  uint8_t bytes[15 + 32];
+};
+std::vector<SyscallFingerprint>& Fingerprints() {
+  static std::vector<SyscallFingerprint> v;
+  return v;
+}
+constexpr size_t kFingerprintSide = 16;
+constexpr size_t kFingerprintMin = 12;  // context bytes needed to call it a copy
+
+bool ReadSafely(uintptr_t addr, void* out, size_t n) {
+  SIZE_T got = 0;
+  return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void*>(addr), out, n, &got) &&
+         got == n;
+}
+
+// The length of the system call a ud2 at `rip` is a copy of, or 0. With
+// g_lock held.
+uint8_t CopiedSyscallLengthLocked(uintptr_t rip) {
+  uint8_t candidate[sizeof(SyscallFingerprint::bytes)];
+  for (const SyscallFingerprint& f : Fingerprints()) {
+    const size_t n = static_cast<size_t>(f.before) + f.length + f.after;
+    if (ReadSafely(rip - f.before, candidate, n) && std::memcmp(candidate, f.bytes, n) == 0) {
+      return f.length;
+    }
+  }
+  return 0;
+}
+
 LazyObject* FindObjectLocked(uintptr_t addr) {
   for (LazyObject* o : Objects()) {
     if (addr >= o->lo && addr < o->hi) return o;
@@ -910,7 +946,22 @@ bool Rewriter::Finish(const std::vector<CodeRange>& code_ranges) {
   all.insert(all.end(), traps_.begin(), traps_.end());
   std::sort(all.begin(), all.end(),
             [](const TrapSite& a, const TrapSite& b) { return a.addr < b.addr; });
-  for (const auto& site : syscalls_) SyscallSites()[site.first] = site.second;
+  for (const auto& site : syscalls_) {
+    SyscallSites()[site.first] = site.second;
+    // Its bytes as they are now that every rewrite of this pass is done.
+    SyscallFingerprint f{};
+    f.length = site.second;
+    const uintptr_t page = PageOf(site.first);
+    const uintptr_t end = site.first + site.second;
+    f.before = static_cast<uint8_t>(std::min<uintptr_t>(kFingerprintSide, site.first - page));
+    f.after = static_cast<uint8_t>(end >= page + kPage ? 0
+                                   : std::min<uintptr_t>(kFingerprintSide, page + kPage - end));
+    const size_t kept = static_cast<size_t>(f.before) + f.after;
+    if (kept >= kFingerprintMin &&
+        ReadSafely(site.first - f.before, f.bytes, kept + f.length)) {
+      Fingerprints().push_back(f);
+    }
+  }
   for (const CodeRange& r : code_ranges) Ranges().push_back(r);
   const std::vector<StubArena>& arenas = deferred_ ? o_->arenas : arenas_;
   for (size_t i = deferred_ ? first_new_arena_ : 0; i < arenas.size(); ++i) {
@@ -929,7 +980,8 @@ uint8_t KnownSyscallLength(uintptr_t address) {
   AcquireSRWLockShared(&g_lock);
   auto& sites = SyscallSites();
   auto it = sites.find(address);
-  const uint8_t length = it != sites.end() ? it->second : 0;
+  uint8_t length = it != sites.end() ? it->second : 0;
+  if (length == 0) length = CopiedSyscallLengthLocked(address);
   ReleaseSRWLockShared(&g_lock);
   const auto* bytes = reinterpret_cast<const uint8_t*>(address);
   if (length < 2 || bytes[length - 2] != 0x0F || bytes[length - 1] != 0x0B) return 0;
@@ -1070,9 +1122,15 @@ bool HandleSyscallTrap(EXCEPTION_POINTERS* info) {
   AcquireSRWLockShared(&g_lock);
   auto& sites = SyscallSites();
   auto it = sites.find(rip);
-  const uint8_t length = it != sites.end() ? it->second : 0;
+  uint8_t length = it != sites.end() ? it->second : 0;
+  const bool copied = length == 0 && (length = CopiedSyscallLengthLocked(rip)) != 0;
   ReleaseSRWLockShared(&g_lock);
   if (length < 2) return false;
+  if (copied) {  // known from now on
+    AcquireSRWLockExclusive(&g_lock);
+    SyscallSites()[rip] = length;
+    ReleaseSRWLockExclusive(&g_lock);
+  }
   // Only our own ud2: code written over the site since is something else.
   const auto* bytes = reinterpret_cast<const uint8_t*>(rip);
   if (bytes[length - 2] != 0x0F || bytes[length - 1] != 0x0B) return false;
@@ -1400,6 +1458,38 @@ uintptr_t PageEnd(uintptr_t addr, size_t len) {
   return end < addr ? UINTPTR_MAX & ~(kPage - 1) : PageOf(end + kPage - 1);
 }
 
+// A shared file mapping that gesher-base cannot place with MAP_FIXED (a
+// file whose size ends in a partial page: UPX 5 ftruncates a memfd to its
+// unpacked code's size and maps it MAP_SHARED|MAP_FIXED over the library's
+// text): a private copy of the file's bytes there instead. Writes through it
+// do not reach the file, which an unpacker that writes its code into the
+// mapping and runs it does not notice.
+void* CopyFileMapping(void* addr, size_t len, int prot, int flags, int fd, int64_t offset) {
+  void* p = mmap(addr, len, PROT_READ | PROT_WRITE,
+                 (flags & MAP_FIXED) | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if (p == MAP_FAILED) return p;
+  auto* out = static_cast<uint8_t*>(p);
+  for (size_t done = 0; done < len;) {
+    const size_t want = std::min<size_t>(len - done, 1u << 30);
+    const ssize_t got = pread(fd, out + done, want, static_cast<off_t>(offset + done));
+    if (got < 0) {
+      const int saved_errno = errno;
+      munmap(p, len);
+      errno = saved_errno;
+      return MAP_FAILED;
+    }
+    if (got == 0) break;  // past the end of the file: zeros, as Linux reads them
+    done += static_cast<size_t>(got);
+  }
+  if (prot != (PROT_READ | PROT_WRITE) && mprotect(p, len, prot) != 0) {
+    const int saved_errno = errno;
+    munmap(p, len);
+    errno = saved_errno;
+    return MAP_FAILED;
+  }
+  return p;
+}
+
 // Code a raw system call maps or makes executable outside every loaded
 // object (UPX 5 maps its decompressor from a memfd): an object of its own,
 // with no unwind information, rewritten as it runs. Forgotten when unmapped.
@@ -1463,6 +1553,10 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
   // Mapped as asked (a file view keeps its right to execute), then code
   // waits non-executable until it runs.
   void* p = mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
+  if (p == MAP_FAILED && errno == EINVAL && fixed && (flags & MAP_ANONYMOUS) == 0 &&
+      (flags & (MAP_SHARED | MAP_PRIVATE)) != MAP_PRIVATE) {
+    p = CopyFileMapping(addr, len, prot, flags, fd, offset);
+  }
   if (p != MAP_FAILED) {
     const auto start = reinterpret_cast<uintptr_t>(p);
     const uintptr_t end = PageEnd(start, len);
