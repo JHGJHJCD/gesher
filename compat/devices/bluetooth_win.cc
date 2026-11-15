@@ -504,10 +504,14 @@ constexpr int64_t kOpTimeoutMs = 30000;
 
 // --- helpers --------------------------------------------------------------------------------
 
-// A delegate (TypedEventHandler<S, A>) calling `f(sender, args)`; its vtable is
-// IUnknown's and Invoke.
+// A delegate's vtable: TypedEventHandler<S, A> is IUnknown and Invoke.
+struct IDelegate : IUnknown {
+  virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectable* sender, IInspectable* args) = 0;
+};
+
+// A delegate calling `f(sender, args)`.
 template <typename F>
-class Handler final : public IUnknown {
+class Handler final : public IDelegate {
  public:
   Handler(const IID& iid, F f) : iid_(iid), f_(std::move(f)) {}
 
@@ -526,7 +530,7 @@ class Handler final : public IUnknown {
     if (left == 0) delete this;
     return left;
   }
-  virtual HRESULT STDMETHODCALLTYPE Invoke(IInspectable* sender, IInspectable* args) {
+  HRESULT STDMETHODCALLTYPE Invoke(IInspectable* sender, IInspectable* args) override {
     f_(sender, args);
     return S_OK;
   }
