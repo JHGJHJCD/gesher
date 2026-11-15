@@ -867,6 +867,11 @@ class DeviceWatch {
     entries_[Key(address, le)] = e;
   }
 
+  int Count() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return static_cast<int>(entries_.size());
+  }
+
   void BeginListing() {
     std::lock_guard<std::mutex> lock(mu_);
     seen_.clear();
@@ -922,6 +927,7 @@ struct AdapterCache {
   IBluetoothAdapter* adapter = nullptr;
   IRadio* radio = nullptr;
   EventRegistrationToken radioToken{};
+  bool radioWatched = false;
   ULONGLONG fetchedAt = 0;
   HRESULT hr = S_OK;
 };
@@ -938,6 +944,7 @@ void RefreshAdapterLocked(AdapterCache& cache) {
   if (cache.adapter != nullptr && now - cache.fetchedAt < 5000) return;
   if (cache.adapter == nullptr && cache.fetchedAt != 0 && now - cache.fetchedAt < 2000) return;
   if (cache.radio != nullptr) cache.radio->remove_StateChanged(cache.radioToken);
+  cache.radioWatched = false;
   Release(cache.radio);
   Release(cache.adapter);
   cache.fetchedAt = now;
@@ -962,7 +969,7 @@ void RefreshAdapterLocked(AdapterCache& cache) {
       cache.radio = radio;
       IUnknown* handler = NewHandler(IID_RadioInspectableHandler,
                                      [](IInspectable*, IInspectable*) { Changes().Signal(); });
-      radio->add_StateChanged(handler, &cache.radioToken);
+      cache.radioWatched = SUCCEEDED(radio->add_StateChanged(handler, &cache.radioToken));
       handler->Release();
     }
   }
@@ -2513,6 +2520,17 @@ class Windows final : public Backend {
 };
 
 }  // namespace
+
+WatchStatus Watching() {
+  WatchStatus status;
+  {
+    AdapterCache& cache = Cache();
+    std::lock_guard<std::mutex> lock(cache.mu);
+    status.radio = cache.radioWatched;
+  }
+  status.devices = Watched().Count();
+  return status;
+}
 
 Backend& WindowsBackend() {
   static Windows* backend = new Windows();

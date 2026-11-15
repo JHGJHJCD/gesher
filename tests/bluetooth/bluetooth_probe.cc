@@ -5,6 +5,13 @@
 //
 //   bluetooth_probe.exe            adapter, bonded devices, a 4 s LE scan
 //   bluetooth_probe.exe --inquiry  ... and a classic inquiry
+//   bluetooth_probe.exe --hw "Liberty 4 Pro"
+//                                  a real radio and one paired device, read-only: adapter,
+//                                  paired devices with SDP service classes, profiles, a 10 s
+//                                  passive scan (count only), an RFCOMM connection to the
+//                                  device's vendor service (or SPP) that only reads for 2 s,
+//                                  and the event subscriptions; never writes, pairs or
+//                                  switches the radio
 //   set GESHER_BLUETOOTH_TEST=1 && bluetooth_probe.exe --check
 //                                  the test radio, with checks (exit 1 on failure)
 //
@@ -94,6 +101,151 @@ void Report(bt::Backend& backend, bool inquiry) {
     hr = backend.Inquiry(5, &cancel, [](const bt::Device& d) { PrintDevice("inquiry", d); });
     printf("bluetooth-probe: inquiry ended: hr 0x%08lX\n", static_cast<unsigned long>(hr));
   }
+}
+
+bool IsVendor(const GUID& g) {
+  // Soundcore's vendor RFCOMM services: 0cf12d31-fac3-4553-bd80-d6832e7xxxxx.
+  return bt::GuidText(g).compare(0, 31, "0cf12d31-fac3-4553-bd80-d6832e7") == 0;
+}
+
+void HwDevice(const char* what, const bt::Device& d) {
+  std::string uuids;
+  for (const GUID& g : d.uuids) uuids += " " + bt::GuidText(g);
+  printf("bluetooth-probe: %s \"%s\" class 0x%06X kind %d bonded %d connected %d uuids:%s\n",
+         what, d.name.c_str(), static_cast<unsigned>(d.classOfDevice), d.kind, d.bonded ? 1 : 0,
+         d.connected ? 1 : 0, uuids.c_str());
+}
+
+// A real radio, read-only (see the usage above). Other devices are counted, never named.
+void HwCheck(bt::Backend& backend, const std::string& want) {
+  bt::Adapter a = backend.GetAdapter();
+  printf("bluetooth-probe: hw adapter present %d on %d classic %d le %d central %d peripheral %d "
+         "ext-adv %d le2m %d coded %d max-adv %d hr 0x%08lX\n",
+         a.present, a.on, a.classic, a.le, a.central, a.peripheral, a.extendedAdvertising,
+         a.le2mPhy, a.leCodedPhy, a.maxAdvertisementDataLength, static_cast<unsigned long>(a.hr));
+  printf("bluetooth-probe: hw features: bluetooth %d, bluetooth_le %d\n", a.present ? 1 : 0,
+         a.present && a.le ? 1 : 0);
+  if (!a.present) return;
+  std::vector<bt::Device> bonded;
+  HRESULT hr = backend.Bonded(&bonded);
+  bt::WatchStatus watch = bt::Watching();
+  printf("bluetooth-probe: hw bonded: %zu device(s), hr 0x%08lX; watching radio %d, %d device(s)\n",
+         bonded.size(), static_cast<unsigned long>(hr), watch.radio ? 1 : 0, watch.devices);
+  const bt::Device* target = nullptr;
+  for (const bt::Device& d : bonded) {
+    if (target == nullptr && d.name.find(want) != std::string::npos) target = &d;
+  }
+  if (target == nullptr) {
+    printf("bluetooth-probe: hw no paired device named like \"%s\"\n", want.c_str());
+    return;
+  }
+  bt::Device device = *target;
+  HwDevice("hw target (cached SDP)", device);
+  std::vector<GUID> fresh;
+  hr = backend.RemoteUuids(device.address, true, &fresh);
+  std::string uuids;
+  for (const GUID& g : fresh) uuids += " " + bt::GuidText(g);
+  printf("bluetooth-probe: hw target SDP asked again: hr 0x%08lX, %zu class(es):%s\n",
+         static_cast<unsigned long>(hr), fresh.size(), uuids.c_str());
+  for (const GUID& g : fresh) {
+    bool have = false;
+    for (const GUID& h : device.uuids) have = have || h == g;
+    if (!have) device.uuids.push_back(g);
+  }
+  auto has = [&device](uint16_t id) {
+    for (const GUID& g : device.uuids) {
+      if (g == bt::ShortUuid(id)) return true;
+    }
+    return false;
+  };
+  bool a2dp = has(0x110B) || has(0x110D);
+  bool headset = has(0x111E) || has(0x1108);
+  printf("bluetooth-probe: hw profiles: A2DP %s, headset %s\n",
+         a2dp ? (device.connected ? "connected" : "disconnected") : "not offered",
+         headset ? (device.connected ? "connected" : "disconnected") : "not offered");
+
+  if (a.on) {
+    std::shared_ptr<bt::Scan> scan = backend.StartScan(false, &hr);
+    printf("bluetooth-probe: hw passive LE scan started: hr 0x%08lX\n", static_cast<unsigned long>(hr));
+    if (scan) {
+      std::set<uint64_t> seen;
+      int reports = 0;
+      ULONGLONG end = GetTickCount64() + 10000;
+      while (GetTickCount64() < end) {
+        bt::Advertisement adv;
+        if (scan->Next(&adv, 200)) {
+          ++reports;
+          seen.insert(adv.address);
+        } else if (FAILED(scan->Error())) {
+          break;
+        }
+      }
+      printf("bluetooth-probe: hw passive LE scan: %d report(s) from %zu address(es) in 10 s, "
+             "error 0x%08lX\n", reports, seen.size(), static_cast<unsigned long>(scan->Error()));
+      scan->Stop();
+    }
+  }
+
+  GUID service = bt::ShortUuid(0x1101);
+  const char* kind = "SPP";
+  for (const GUID& g : device.uuids) {
+    if (IsVendor(g)) {
+      service = g;
+      kind = "vendor";
+      break;
+    }
+  }
+  if (!has(0x1101) && strcmp(kind, "SPP") == 0) {
+    printf("bluetooth-probe: hw no vendor or SPP service listed; trying SPP anyway\n");
+  }
+  ULONGLONG start = GetTickCount64();
+  std::shared_ptr<bt::Socket> socket = backend.OpenRfcomm(device.address, service, 0, false, &hr);
+  HRESULT connected = socket ? socket->Connect() : hr;
+  printf("bluetooth-probe: hw RFCOMM %s %s: hr 0x%08lX after %llu ms, channel %d\n", kind,
+         bt::GuidText(service).c_str(), static_cast<unsigned long>(connected),
+         static_cast<unsigned long long>(GetTickCount64() - start),
+         socket && SUCCEEDED(connected) ? socket->Channel() : -1);
+  if (socket && SUCCEEDED(connected)) {
+    // Read only: whatever the device sends by itself within 2 s.
+    int total = 0;
+    std::string first;
+    ULONGLONG end = GetTickCount64() + 2000;
+    while (GetTickCount64() < end) {
+      int available = socket->Available();
+      if (available <= 0) {
+        Sleep(20);
+        continue;
+      }
+      uint8_t buffer[512];
+      int n = socket->Read(buffer, available < 512 ? available : 512);
+      if (n <= 0) break;
+      for (int i = 0; i < n && first.size() < 96; ++i) {
+        char hex[4];
+        snprintf(hex, sizeof(hex), "%02x", buffer[i]);
+        first += hex;
+      }
+      total += n;
+    }
+    printf("bluetooth-probe: hw RFCOMM read %d byte(s) in 2 s unasked%s%s\n", total,
+           total > 0 ? ": " : "", first.c_str());
+  }
+  if (socket) socket->Close();
+  printf("bluetooth-probe: hw RFCOMM closed\n");
+
+  // Event subscriptions: what Windows announces while we wait (a connection change, a
+  // radio switch); nothing is asked of the device.
+  backend.WaitForChange(0);
+  bool changed = backend.WaitForChange(15000);
+  std::vector<bt::Device> after;
+  backend.Bonded(&after);
+  int connectedNow = -1;
+  for (const bt::Device& d : after) {
+    if (d.address == device.address) connectedNow = d.connected ? 1 : 0;
+  }
+  watch = bt::Watching();
+  printf("bluetooth-probe: hw events: change announced in 15 s %d; target connected %d; "
+         "watching radio %d, %d device(s)\n", changed ? 1 : 0, connectedNow, watch.radio ? 1 : 0,
+         watch.devices);
 }
 
 // GESHER_BLUETOOTH_TEST's radio, end to end.
@@ -250,11 +402,18 @@ void CheckTestRadio(bt::Backend& backend) {
 int main(int argc, char** argv) {
   setvbuf(stdout, nullptr, _IONBF, 0);
   bool inquiry = false, check = false;
+  const char* hw = nullptr;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--inquiry") == 0) inquiry = true;
     if (strcmp(argv[i], "--check") == 0) check = true;
+    if (strcmp(argv[i], "--hw") == 0) hw = i + 1 < argc ? argv[i + 1] : "Liberty 4 Pro";
   }
   bt::Backend& backend = bt::Get();
+  if (hw != nullptr) {
+    HwCheck(backend, hw);
+    printf("bluetooth-probe: done\n");
+    return 0;
+  }
   if (check) {
     CheckTestRadio(backend);
     printf("bluetooth-probe: %d failure(s)\n", gFailures);

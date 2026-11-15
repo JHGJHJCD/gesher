@@ -209,6 +209,14 @@ class Backend {
                                                bool secure, HRESULT* hr) = 0;
 };
 
+// Diagnostics of the Windows backend's event subscriptions: the radio's StateChanged,
+// and how many paired devices' ConnectionStatusChanged are registered.
+struct WatchStatus {
+  bool radio = false;
+  int devices = 0;
+};
+WatchStatus Watching();  // bluetooth_win.cc
+
 // The test radio when GESHER_BLUETOOTH_TEST=1, else Windows'.
 Backend& Get();
 Backend& WindowsBackend();  // bluetooth_win.cc
