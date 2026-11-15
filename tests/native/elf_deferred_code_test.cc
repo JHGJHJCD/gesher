@@ -19,6 +19,7 @@
 
 #include <elf.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #include <windows.h>
 
 #include <gesher/elf_loader.h>
@@ -243,6 +244,38 @@ void TestSelfUnpacking() {
   Check("unpacking: UnmapLoadedMemory", elf::UnmapLoadedMemory(image + kPage, 3 * kPage) == 0);
 }
 
+// UPX 5: a memfd ftruncated to a size that ends in a partial page, mapped
+// MAP_SHARED|MAP_FIXED over a library's image, written, msynced and unmapped;
+// the memfd then holds what was written (it is mapped again to be run).
+void TestSharedCopy() {
+  uint8_t* image = MapImage(3);
+  if (image == nullptr) return Check("shared copy: image mapped", false);
+  FakeFile file(1, 3, 0);
+  elf::FsRewriteStats stats;
+  std::string error;
+  if (!elf::RewriteFsAccesses("deferred-test-shared", file.bytes.data(), file.bytes.size(), image,
+                              image, 3 * kPage, &stats, &error)) {
+    return Check("shared copy: object registered", false);
+  }
+  const int fd = memfd_create("deferred-test", 0);
+  Check("shared copy: memfd of 0x1170 bytes", fd >= 0 && ftruncate(fd, 0x1170) == 0);
+  if (fd < 0) return;
+  void* p = elf::MapLoadedMemory(image + kPage, 0x1170, PROT_READ | PROT_WRITE,
+                                 MAP_SHARED | MAP_FIXED, fd, 0, true);
+  Check("shared copy: MAP_SHARED|MAP_FIXED over the object", p == image + kPage);
+  if (p != image + kPage) return;
+  std::memset(p, 0x5A, 0x1170);
+  uint8_t back[16] = {};
+  Check("shared copy: msync writes it to the file",
+        elf::SyncLoadedMemory(p, 0x1170, MS_SYNC) == 0 && pread(fd, back, 16, 0x1000) == 16 &&
+            back[0] == 0x5A && back[15] == 0x5A);
+  std::memset(p, 0x6B, 16);
+  Check("shared copy: munmap writes it to the file",
+        elf::UnmapLoadedMemory(p, 0x1170) == 0 && pread(fd, back, 16, 0) == 16 &&
+            back[0] == 0x6B && back[15] == 0x6B);
+  close(fd);
+}
+
 }  // namespace
 
 int main() {
@@ -250,6 +283,7 @@ int main() {
   TestLoadTimeSyscall();
   TestRunTimeCode();
   TestSelfUnpacking();
+  TestSharedCopy();
   if (failures == 0) {
     std::printf("\nelf_deferred_code_test all passed\n");
   } else {

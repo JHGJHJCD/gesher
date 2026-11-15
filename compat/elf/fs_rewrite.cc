@@ -659,15 +659,27 @@ bool ReadSafely(uintptr_t addr, void* out, size_t n) {
          got == n;
 }
 
-// The length of the system call a ud2 at `rip` is a copy of, or 0. With
-// g_lock held.
+// The length of the system call a ud2 at `rip` is a copy of, or 0: the same
+// instruction bytes, and at least kFingerprintMin bytes around them that
+// match outwards from it (a copy may end soon after: UPX copies its stub up
+// to its last `ret`). With g_lock held.
 uint8_t CopiedSyscallLengthLocked(uintptr_t rip) {
-  uint8_t candidate[sizeof(SyscallFingerprint::bytes)];
   for (const SyscallFingerprint& f : Fingerprints()) {
-    const size_t n = static_cast<size_t>(f.before) + f.length + f.after;
-    if (ReadSafely(rip - f.before, candidate, n) && std::memcmp(candidate, f.bytes, n) == 0) {
-      return f.length;
+    uint8_t insn[15];
+    if (!ReadSafely(rip, insn, f.length) || std::memcmp(insn, f.bytes + f.before, f.length) != 0) {
+      continue;
     }
+    size_t back = 0, forward = 0;
+    uint8_t byte;
+    while (back < f.before && ReadSafely(rip - 1 - back, &byte, 1) &&
+           byte == f.bytes[f.before - 1 - back]) {
+      ++back;
+    }
+    while (forward < f.after && ReadSafely(rip + f.length + forward, &byte, 1) &&
+           byte == f.bytes[f.before + f.length + forward]) {
+      ++forward;
+    }
+    if (back + forward >= kFingerprintMin) return f.length;
   }
   return 0;
 }
@@ -1458,35 +1470,72 @@ uintptr_t PageEnd(uintptr_t addr, size_t len) {
   return end < addr ? UINTPTR_MAX & ~(kPage - 1) : PageOf(end + kPage - 1);
 }
 
+// The copies CopyFileMapping made of shared mappings, written back to their
+// file (a duplicate of the descriptor they were mapped from) by msync and
+// before munmap. Under g_lazy_lock.
+struct SharedCopy {
+  uintptr_t start;
+  size_t len;
+  int fd;
+  int64_t offset;
+};
+std::vector<SharedCopy>& SharedCopies() {
+  static std::vector<SharedCopy> v;
+  return v;
+}
+
+// Writes what [lo, hi) holds of each copy back to its file; with `forget`,
+// drops the copies [lo, hi) covers entirely.
+void WriteBackLocked(uintptr_t lo, uintptr_t hi, bool forget) {
+  auto& copies = SharedCopies();
+  for (auto it = copies.begin(); it != copies.end();) {
+    const uintptr_t a = std::max(lo, it->start), b = std::min(hi, it->start + it->len);
+    for (uintptr_t at = a; at < b;) {
+      const ssize_t put = pwrite(it->fd, reinterpret_cast<const void*>(at),
+                                 std::min<size_t>(b - at, 1u << 30),
+                                 static_cast<off_t>(it->offset + (at - it->start)));
+      if (put <= 0) break;
+      at += static_cast<uintptr_t>(put);
+    }
+    if (forget && lo <= it->start && it->start + it->len <= hi) {
+      close(it->fd);
+      it = copies.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
 // A shared file mapping that gesher-base cannot place with MAP_FIXED (a
 // file whose size ends in a partial page: UPX 5 ftruncates a memfd to its
 // unpacked code's size and maps it MAP_SHARED|MAP_FIXED over the library's
-// text): a private copy of the file's bytes there instead. Writes through it
-// do not reach the file, which an unpacker that writes its code into the
-// mapping and runs it does not notice.
+// text): a private copy of the file's bytes there instead, written back to
+// the file by msync and munmap (UPX writes its code into the mapping, then
+// unmaps it and maps the memfd again, privately, to run it). With
+// g_lazy_lock held.
 void* CopyFileMapping(void* addr, size_t len, int prot, int flags, int fd, int64_t offset) {
+  const int keep = dup(fd);
+  if (keep < 0) return MAP_FAILED;
+  auto fail = [&](void* mapped) {
+    const int saved_errno = errno;
+    if (mapped != nullptr) munmap(mapped, len);
+    close(keep);
+    errno = saved_errno;
+    return MAP_FAILED;
+  };
   void* p = mmap(addr, len, PROT_READ | PROT_WRITE,
                  (flags & MAP_FIXED) | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (p == MAP_FAILED) return p;
+  if (p == MAP_FAILED) return fail(nullptr);
   auto* out = static_cast<uint8_t*>(p);
   for (size_t done = 0; done < len;) {
     const size_t want = std::min<size_t>(len - done, 1u << 30);
     const ssize_t got = pread(fd, out + done, want, static_cast<off_t>(offset + done));
-    if (got < 0) {
-      const int saved_errno = errno;
-      munmap(p, len);
-      errno = saved_errno;
-      return MAP_FAILED;
-    }
+    if (got < 0) return fail(p);
     if (got == 0) break;  // past the end of the file: zeros, as Linux reads them
     done += static_cast<size_t>(got);
   }
-  if (prot != (PROT_READ | PROT_WRITE) && mprotect(p, len, prot) != 0) {
-    const int saved_errno = errno;
-    munmap(p, len);
-    errno = saved_errno;
-    return MAP_FAILED;
-  }
+  if (prot != (PROT_READ | PROT_WRITE) && mprotect(p, len, prot) != 0) return fail(p);
+  SharedCopies().push_back({reinterpret_cast<uintptr_t>(p), len, keep, offset});
   return p;
 }
 
@@ -1545,6 +1594,8 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
   const bool fixed = (flags & MAP_FIXED) != 0;
   const bool exec = (prot & PROT_EXEC) != 0;
   AcquireSRWLockExclusive(&g_lazy_lock);
+  // A copy MAP_FIXED replaces: its writes reach the file first.
+  if (fixed && len != 0 && !SharedCopies().empty()) WriteBackLocked(hint, hint + len, true);
   const bool into_object = fixed && len != 0 && OverlapsObjectLocked(hint, PageEnd(hint, len));
   if (!into_object && !(raw_syscall && exec && len != 0)) {
     ReleaseSRWLockExclusive(&g_lazy_lock);
@@ -1577,9 +1628,20 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
   return p;
 }
 
-int UnmapLoadedMemory(void* addr, size_t len) {
-  const int r = munmap(addr, len);
+int SyncLoadedMemory(void* addr, size_t len, int flags) {
   const auto start = reinterpret_cast<uintptr_t>(addr);
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  if (!SharedCopies().empty() && len != 0) WriteBackLocked(start, start + len, false);
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  return msync(addr, len, flags);
+}
+
+int UnmapLoadedMemory(void* addr, size_t len) {
+  const auto start = reinterpret_cast<uintptr_t>(addr);
+  AcquireSRWLockExclusive(&g_lazy_lock);
+  if (!SharedCopies().empty() && len != 0) WriteBackLocked(start, start + len, true);
+  ReleaseSRWLockExclusive(&g_lazy_lock);
+  const int r = munmap(addr, len);
   if (r == 0 && len != 0 && (start & (kPage - 1)) == 0) {
     const int saved_errno = errno;
     AcquireSRWLockExclusive(&g_lazy_lock);

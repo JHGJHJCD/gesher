@@ -166,6 +166,9 @@ int ProtectLoadedMemory(void* addr, size_t len, int prot, bool raw_syscall = fal
 void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64_t offset,
                       bool raw_syscall = false);
 int UnmapLoadedMemory(void* addr, size_t len);
+// msync for loaded code: also writes back the private copies made of shared
+// file mappings gesher-base cannot place (MapLoadedMemory), as munmap does.
+int SyncLoadedMemory(void* addr, size_t len, int flags);
 
 // __tls_get_addr's worker: the address of loaded module `module_id`'s TLS
 // variable at `offset` in the current thread. The bionic shim wraps this as the

@@ -1492,11 +1492,34 @@ int madvise(void* addr, size_t length, int advice) {
   return 0;
 }
 
+// As Linux: the address must be page-aligned and the flags valid; a range
+// with unmapped pages is ENOMEM; file views are flushed, and anonymous or
+// private memory (nothing to write back) succeeds. UPX's unpacker msyncs the
+// copy of a memfd it maps over a library's text.
 int msync(void* addr, size_t length, int flags) {
-  (void)flags;
-  if (!FlushViewOfFile(addr, length)) {
+  const uintptr_t start = reinterpret_cast<uintptr_t>(addr);
+  if ((start & (state().page_size - 1)) != 0 ||
+      (flags & ~(MS_ASYNC | MS_INVALIDATE | MS_SYNC)) != 0 ||
+      (flags & (MS_ASYNC | MS_SYNC)) == (MS_ASYNC | MS_SYNC)) {
     errno = EINVAL;
     return -1;
+  }
+  const uintptr_t end = start + length;
+  for (uintptr_t at = start; at < end;) {
+    MEMORY_BASIC_INFORMATION info;
+    if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) == 0 ||
+        info.State != MEM_COMMIT) {
+      errno = ENOMEM;
+      return -1;
+    }
+    const uintptr_t run_end =
+        std::min(end, reinterpret_cast<uintptr_t>(info.BaseAddress) + info.RegionSize);
+    if (info.Type == MEM_MAPPED &&
+        !FlushViewOfFile(reinterpret_cast<void*>(at), static_cast<SIZE_T>(run_end - at))) {
+      errno = EINVAL;
+      return -1;
+    }
+    at = run_end;
   }
   return 0;
 }

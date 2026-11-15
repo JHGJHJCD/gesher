@@ -95,7 +95,14 @@ emulated and remembered from then on.
 its unpacked code's size and maps it `MAP_SHARED|MAP_FIXED` over the
 library's text. gesher-base cannot place a shared view that ends in a partial
 page; into a loaded object (or for a raw system call) such a mapping becomes
-a private copy of the file's bytes. Writes through it do not reach the file.
+a private copy of the file's bytes, written back to the file by `msync` and
+`munmap` (and when `MAP_FIXED` replaces it): UPX writes its unpacked code into
+the mapping, msyncs and unmaps it, then maps the memfd again privately,
+read-execute, to run it. gesher-base's `msync` now follows Linux: anonymous
+or private memory succeeds, unmapped pages are ENOMEM, views are flushed.
+Copies of a system call are recognized from at least 12 matching bytes
+around the instruction, outwards from it: a copy can end right after it
+(UPX copies its stub up to its last `ret`).
 
 **`/proc/self/auxv` exists.** UPX 5 reads `AT_PAGESZ` from it with raw
 `openat`/`read`, and its system call helper stops on `int3` when any call
