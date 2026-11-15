@@ -309,8 +309,6 @@ int fsync(int fd) {
   }
   return gesher::CrtResult(_commit(fd));
 }
-int fdatasync(int fd) { return fsync(fd); }
-
 int gesher_ftruncate(int fd, off_t length) {
   if (length < 0) return errno = EINVAL, -1;
   // Pin the actual descriptor throughout the resize and cache update. A path
@@ -379,6 +377,8 @@ int gesher_ftruncate(int fd, off_t length) {
   if (failure != ERROR_SUCCESS) return errno = gesher::ErrnoFromWin32(failure), -1;
   return 0;
 }
+
+int fdatasync(int fd) { return fsync(fd); }
 
 // Positioned I/O must not change the shared cursor, including through dup().
 // ReadFile/WriteFile with OVERLAPPED still advance a synchronous FILE_OBJECT's
