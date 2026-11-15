@@ -18,6 +18,9 @@
 AppId={{6A1F3C2E-5B7D-4E8A-9C0F-1D2E3F4A5B6C}
 AppName=Gesher
 AppVersion={#AppVersion}
+VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
+VersionInfoProductTextVersion={#AppVersion}
 AppPublisher=Gesher
 DefaultDirName={localappdata}\Programs\Gesher
 DisableDirPage=yes
@@ -129,12 +132,19 @@ Source: "gesher-app.cmd"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gesher-app.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gesher-app-microg.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gesher-control-panel.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gesher-update.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "gesher-runtime-files.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "gesher-ui.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "ui-messages.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "licenses\APKSIG-LICENSE.txt"; DestDir: "{app}\licenses"; Flags: ignoreversion
 Source: "README.txt"; DestDir: "{app}"; Flags: ignoreversion isreadme; Languages: en
 Source: "README.he.txt"; DestDir: "{app}"; DestName: "README.txt"; Flags: ignoreversion isreadme; Languages: he
 Source: "gesher.ico"; DestDir: "{app}"; Flags: ignoreversion
+
+[INI]
+; The updater reads this installation's version, not a CI artifact name or a
+; registry entry that could describe a different checkout.
+Filename: "{app}\gesher-version.ini"; Section: "Gesher"; Key: "Version"; String: "{#AppVersion}"; Flags: uninsdeleteentry uninsdeletesectionifempty
 
 [Tasks]
 ; android.webkit.WebView runs on Microsoft Edge WebView2 (docs/webview.md):
@@ -200,6 +210,7 @@ Root: HKCU; Subkey: "Software\Classes\CLSID\{{C18D9445-A7F0-472E-985F-AC354EBEB6
 Filename: "{cmd}"; Parameters: "/d /c """"{app}\gesher-app.cmd"" shutdown"""; Flags: runhidden waituntilterminated; RunOnceId: "GesherDeviceShutdown"
 
 [UninstallDelete]
+Type: files; Name: "{app}\gesher-version.ini"
 ; The runtime's directories (gesher.ps1), the installed packages and the logs.
 Type: filesandordirs; Name: "{localappdata}\Gesher"
 ; The installed apps' Start menu shortcuts (gesher-app install; their icons are

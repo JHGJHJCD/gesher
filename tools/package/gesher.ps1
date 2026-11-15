@@ -38,11 +38,12 @@ foreach ($d in 'system/framework', 'art', 'data', 'i18n/etc/icu', 'tzdata') {
 }
 # ICU's data, where the i18n module keeps it on Android; refreshed when a new
 # version of Gesher brings a different one.
+. (Join-Path $here 'gesher-runtime-files.ps1')
+$runtimeSync = New-GesherRuntimeSync -InstallDirectory $here -ProfileDirectory $root -Component dex
 $data = Get-Item (Join-Path $here 'icudt*l.dat')
 $icu = Join-Path $root "i18n/etc/icu/$($data.Name)"
-if (-not (Test-Path $icu) -or (Get-Item $icu).Length -ne $data.Length) {
-  Copy-Item $data.FullName $icu
-}
+Sync-GesherRuntimeFile -Source $data.FullName -Destination $icu -State $runtimeSync
+Complete-GesherRuntimeSync -State $runtimeSync
 
 $env:ANDROID_ROOT = NoDrive "$root/system"
 $env:ANDROID_ART_ROOT = NoDrive "$root/art"

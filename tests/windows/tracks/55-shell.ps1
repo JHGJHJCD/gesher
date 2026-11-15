@@ -94,6 +94,15 @@ if (-not $problems) {
   $failed++
 }
 
+# The dashboard must outlive its launcher so Setup can replace the executable
+# while the dashboard monitors the update. Exercise the actual built launcher.
+try {
+  & (Join-Path $PSScriptRoot '..\shell\ControlPanelLauncherChecks.ps1') -LauncherPath "$Dir/gesher-launch.exe"
+} catch {
+  Write-Host "FAIL  shell: control-panel launcher handoff ($_)"
+  $failed++
+}
+
 # gesher-launch's splash window (compat/shell/gesher_launch.cc): a launch shows
 # one (class GesherSplash) while the app starts, with the app's label and icon
 # (its shortcut's, under %LOCALAPPDATA%\Gesher\data\data\<package>\gesher-shell)

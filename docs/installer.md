@@ -231,6 +231,18 @@ gone.
 
 ## The Gesher device and (un)installing
 
+The Control Center's [Updates card](updates.md) discovers stable GitHub releases
+and starts the verified installer for the current installation directory. Setup
+writes `gesher-version.ini` from its own `AppVersion`; the updater also verifies
+the downloaded installer's Windows product version. Updates are in-place
+installations, so installed apps and their data are retained. Running the
+uninstaller first is not part of an update.
+
+The packaged `gesher-runtime-files.ps1` helper invalidates the profile's cached
+runtime copies once per installed version, even for equal-size resources. App
+and dex launchers record separate completed generations; a failed copy is retried
+and neither path changes app data.
+
 The device runs `dalvikvm.exe`, `binderd.exe` and `servicemanager.exe` from the
 install folder and keeps files of `%LOCALAPPDATA%\Gesher` open, so:
 
