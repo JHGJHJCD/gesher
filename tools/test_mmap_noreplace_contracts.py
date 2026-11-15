@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Exercise production placeholder NOREPLACE admission with a recording Win32 boundary.
+"""Exercise production NOREPLACE admission with a recording Win32 boundary.
 
-Registry types, reservation/split/punch operations and GroupAnonymous are copied
-verbatim from production. The boundary only records native calls and injects
-allocation failures; it does not decide Linux mapping ownership. Real Windows
-placeholder and file behavior is exercised separately by the native mman probe.
+Registry types, placeholder operations, MapAnonymous and munmap are copied
+verbatim from production. The boundary records native calls, retains plain
+Windows reservations and injects allocation failures; it does not decide Linux
+page ownership. Real Windows behavior is exercised separately by native probes.
 Use --source-ref with the pre-fix revision as an unchanged-assertion control.
 """
 from __future__ import annotations
@@ -55,6 +55,7 @@ def main() -> None:
         "DWORD AnonymousCommit(int prot)",
         "std::map<uintptr_t, Region>::iterator FindRegion(State& s, uintptr_t addr)",
         "std::map<uintptr_t, Region>::iterator AddRegion(State& s, uintptr_t start, size_t size,",
+        "void Release(uintptr_t start, Region& region)",
         "std::map<uintptr_t, Region>::iterator SplitEntry(State& s,",
         "uintptr_t Reserve(State& s, void* at, size_t len)",
         "uintptr_t ReserveNear(State& s, void* hint, size_t len)",
@@ -68,6 +69,8 @@ def main() -> None:
         "std::map<uintptr_t, Region>::iterator Punch(State& s, uintptr_t begin, uintptr_t end)",
         "bool FillAnonymous(std::map<uintptr_t, Region>::iterator it, int prot, Origin origin)",
         "void* GroupAnonymous(State& s, void* start, size_t len, int prot, int flags)",
+        "void* MapAnonymous(State& s, void* start, size_t len, int prot, int flags)",
+        "int munmap(void* addr, size_t length)",
     ]
     production = "\n\n".join(block(source, signature) for signature in signatures)
     template = (ROOT / "tests/mman/noreplace_mapping_host.cc.in").read_text()
