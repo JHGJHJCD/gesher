@@ -47,26 +47,29 @@ public final class NativeLibs {
      * not in base.apk.
      */
     public static String abiFor(String... apks) throws IOException {
-        for (String abi : SUPPORTED) {
-            for (String apk : apks) {
-                if (has(apk, abi)) return abi;
-            }
-        }
-        return null;
-    }
-
-    private static boolean has(String apk, String abi) throws IOException {
-        String prefix = "lib/" + abi + "/";
-        try (ZipFile zip = new ZipFile(apk)) {
-            for (Enumeration<? extends ZipEntry> e = zip.entries(); e.hasMoreElements(); ) {
-                String name = e.nextElement().getName();
-                if (name.startsWith(prefix) && name.endsWith(".so")
-                        && name.indexOf('/', prefix.length()) < 0) {
-                    return true;
+        int best = SUPPORTED.length;
+        if (best == 0) return null;
+        String[] prefixes = new String[best];
+        for (int i = 0; i < best; i++) prefixes[i] = "lib/" + SUPPORTED[i] + "/";
+        // Keep searching later splits for a preferred ABI, without reopening any
+        // archive just to search it again for the fallback ABI.
+        for (String apk : apks) {
+            try (ZipFile zip = new ZipFile(apk)) {
+                for (Enumeration<? extends ZipEntry> e = zip.entries(); e.hasMoreElements(); ) {
+                    String name = e.nextElement().getName();
+                    if (!name.endsWith(".so")) continue;
+                    for (int i = 0; i < best; i++) {
+                        String prefix = prefixes[i];
+                        if (name.startsWith(prefix) && name.indexOf('/', prefix.length()) < 0) {
+                            if (i == 0) return SUPPORTED[0];
+                            best = i;
+                            break;
+                        }
+                    }
                 }
             }
         }
-        return false;
+        return best < SUPPORTED.length ? SUPPORTED[best] : null;
     }
 
     /**

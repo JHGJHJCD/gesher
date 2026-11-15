@@ -72,6 +72,7 @@ public class SurfaceActivity extends Activity {
     private TextureView mT, mU;
     private boolean mFixed;
     private boolean mPhase1Announced;
+    private Runnable mTextureUpdateCheck;
 
     static FrameLayout.LayoutParams at(int x, int y, int w, int h) {
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h);
@@ -181,6 +182,9 @@ public class SurfaceActivity extends Activity {
 
             @Override
             public void onSurfaceTextureUpdated(SurfaceTexture st) {
+                Runnable check = mTextureUpdateCheck;
+                mTextureUpdateCheck = null;
+                if (check != null) mMain.post(check);
             }
         });
         mRoot.addView(mT, at(250, 250, 150, 150));
@@ -201,6 +205,34 @@ public class SurfaceActivity extends Activity {
     }
 
     private void phase2() {
+        // Both producers have published exactly one frame. A cache keyed only
+        // by their surface-local frame number would keep the old cyan image.
+        SurfaceTexture replacement = new SurfaceTexture(false);
+        replacement.setDefaultBufferSize(150, 150);
+        Surface producer = new Surface(replacement);
+        Canvas frame = producer.lockCanvas(null);
+        frame.drawColor(Color.GREEN);
+        producer.unlockCanvasAndPost(frame);
+        producer.release();
+        mTextureUpdateCheck = () -> {
+            Bitmap bitmap = mT.getBitmap();
+            if (bitmap == null || bitmap.getPixel(75, 75) != Color.GREEN) {
+                throw new AssertionError("replacement TextureView retained the previous frame");
+            }
+            bitmap.recycle();
+            say("T replacement first frame: green");
+            phase2Draw();
+        };
+        mT.setSurfaceTexture(replacement);
+        mT.invalidate();
+        mMain.postDelayed(() -> {
+            if (mTextureUpdateCheck != null) {
+                throw new AssertionError("replacement TextureView did not update within 5 seconds");
+            }
+        }, 5000);
+    }
+
+    private void phase2Draw() {
         mFixed = true;
         mA.getHolder().setFixedSize(50, 25);
         // TextureView.lockCanvas: a magenta frame into T's SurfaceTexture.

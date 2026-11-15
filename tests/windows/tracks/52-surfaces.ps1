@@ -177,6 +177,10 @@ function SurfaceChecks([string] $Mode, $r) {
     InOrder $t @('surfaces: T onSurfaceTextureAvailable 150x150', 'surfaces: T: drew cyan', 'surfaces: T getBitmap 150x150 center ff00ffff')
     if ($s[1]) { Regions $s[1] @(,@('T cyan', 260, 260, 390, 390, 0x00ffff)) })
   # Phase 2: setFixedSize.
+  SurfaceCheck "TextureView ($Mode): replacing its SurfaceTexture uses the new first frame" @(
+    InOrder $t @('surfaces: T getBitmap 150x150 center ff00ffff',
+                 'surfaces: T replacement first frame: green',
+                 'surfaces: T lockCanvas: drew magenta 150x150'))
   SurfaceCheck "SurfaceView ($Mode): setFixedSize(50, 25): surfaceChanged 50x25, the buffer scaled to the view" @(
     (& $none 2)
     InOrder $t @('surfaces: A surfaceChanged format ', ' 50x25', 'surfaces: A: drew 50x25')

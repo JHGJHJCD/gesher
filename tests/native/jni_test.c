@@ -18,6 +18,8 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "jni_argument_callbacks.h"
+
 static JavaVM* g_vm;
 static jclass g_class;  // gesher/JniTest, a global reference
 static int failures;
@@ -102,6 +104,7 @@ JNIEXPORT jint JNICALL Java_gesher_JniTest_callbacks(JNIEnv* env, jclass cls, jo
   jvalue arg;
   arg.i = 50;
   check("CallStaticIntMethodA", (*env)->CallStaticIntMethodA(env, cls, twice, &arg) == 100);
+  check("18-argument callbacks (variadic, V and A)", jni_argument_wide_callback(env, cls));
 
   // Mixed arguments: some in registers, some on the stack of the variadic call.
   jmethodID describe = (*env)->GetStaticMethodID(

@@ -48,6 +48,16 @@ public class JniTest {
         return 2 * x;
     }
 
+    // Native callbacks exceed inline storage and spill both register banks.
+    static double wideCallback(int i1, double d1, int i2, double d2, int i3, double d3,
+            int i4, double d4, int i5, double d5, int i6, double d6,
+            int i7, double d7, int i8, double d8, int i9, double d9) {
+        return 100.0 * (i1 + 2 * i2 + 3 * i3 + 4 * i4 + 5 * i5 + 6 * i6
+                + 7 * i7 + 8 * i8 + 9 * i9)
+                + d1 + 2 * d2 + 3 * d3 + 4 * d4 + 5 * d5 + 6 * d6
+                + 7 * d7 + 8 * d8 + 9 * d9;
+    }
+
     static int combine(int a, double b, long c) {
         return a * 100 + (int) (b * 10) + (int) c;
     }

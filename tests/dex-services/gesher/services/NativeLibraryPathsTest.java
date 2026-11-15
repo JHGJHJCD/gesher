@@ -30,9 +30,48 @@ public final class NativeLibraryPathsTest {
         }
     }
 
+    private static void discovery(Path root) throws IOException {
+        Path plain = root.resolve("plain.apk");
+        Path arm = root.resolve("arm.apk");
+        Path x64 = root.resolve("x64.apk");
+        Path unsupported = root.resolve("unsupported.apk");
+        Path missing = root.resolve("missing.apk");
+        Path corrupt = root.resolve("corrupt.apk");
+        archive(plain, "classes.dex", "assets/elsewhere.so", "lib/x86_64/nested/ignored.so",
+                "lib/arm64-v8a/nested/ignored.so", "lib/x86_64/not.so.txt");
+        archive(arm, "lib/arm64-v8a/libarm.so");
+        archive(x64, "lib/x86_64/libx64.so");
+        archive(unsupported, "lib/armeabi-v7a/libold.so", "lib/x86/libold.so");
+        Files.write(corrupt, PAYLOAD);
+        check(NativeLibs.abiFor() == null, "No archives have no native ABI");
+        check(NativeLibs.abiFor(plain.toString(), unsupported.toString()) == null,
+                "Java-only and unsupported libraries have no supported ABI");
+        check(NativeLibs.ABI.equals(NativeLibs.forApk(plain.toString())), "Java-only directory fallback");
+        check("arm64-v8a".equals(NativeLibs.abiFor(plain.toString(), arm.toString())),
+                "Native libraries may live in an ABI split");
+        check(NativeLibs.ABI.equals(NativeLibs.abiFor(arm.toString(), x64.toString())),
+                "Preferred ABI in a later split beats an earlier fallback");
+        check(NativeLibs.ABI.equals(NativeLibs.abiFor(x64.toString(), arm.toString())),
+                "Split order does not change ABI preference");
+        check(NativeLibs.ABI.equals(NativeLibs.abiFor(x64.toString(), missing.toString())),
+                "Preferred ABI stops before an unnecessary unreadable split");
+        for (Path bad : new Path[] {missing, corrupt}) {
+            boolean rejected = false;
+            try { NativeLibs.abiFor(arm.toString(), bad.toString()); }
+            catch (IOException expected) { rejected = true; }
+            check(rejected, "Fallback ABI does not hide an unreadable required split");
+            check(NativeLibs.ABI.equals(NativeLibs.forApk(bad.toString())),
+                    "forApk preserves unreadable-archive fallback");
+        }
+        // Discovery is not a persistent cache: replacing an archive is immediately visible.
+        archive(arm, "lib/x86_64/replaced.so");
+        check(NativeLibs.ABI.equals(NativeLibs.abiFor(arm.toString())), "Replaced APK is rescanned");
+    }
+
     public static void main(String[] args) throws Exception {
         Path root = Files.createTempDirectory("gesher-native-library-paths-");
         try {
+            discovery(root);
             Path apk = root.resolve("fixture.apk");
             Path destination = Files.createDirectory(root.resolve("lib"));
             archive(apk, "lib/arm64-v8a/libother.so", "lib/x86_64/libvalid.so",

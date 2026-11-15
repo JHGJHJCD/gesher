@@ -99,9 +99,15 @@ JNIEnv* Env() {
 class FrameImages {
  public:
   sk_sp<SkImage> Get(const std::shared_ptr<const SurfaceFrame>& f) {
-    if (f == nullptr) return nullptr;
     std::lock_guard<std::mutex> lock(mu_);
-    if (image_ != nullptr && number_ == f->number) return image_;
+    if (f == nullptr) {
+      image_.reset();
+      frame_ = nullptr;
+      return nullptr;
+    }
+    // Frame numbers are local to a QueueSurface. A replacement surface may
+    // publish the same number while owning completely different pixels.
+    if (image_ != nullptr && frame_ == f.get()) return image_;
     auto* keep = new std::shared_ptr<const SurfaceFrame>(f);
     sk_sp<SkData> data = SkData::MakeWithProc(
         f->pixels.data(), f->pixels.size() * 4,
@@ -109,14 +115,16 @@ class FrameImages {
         keep);
     SkImageInfo info = SkImageInfo::Make(f->width, f->height, kRGBA_8888_SkColorType, kPremul_SkAlphaType);
     image_ = SkImages::RasterFromData(info, std::move(data), static_cast<size_t>(f->width) * 4);
-    number_ = f->number;
+    // The image's SkData retains this frame, so its address cannot be reused
+    // while it identifies a cache entry. Returned images keep their own owner.
+    frame_ = image_ != nullptr ? f.get() : nullptr;
     return image_;
   }
 
  private:
   std::mutex mu_;
   sk_sp<SkImage> image_;
-  uint64_t number_ = 0;
+  const SurfaceFrame* frame_ = nullptr;
 };
 
 // --- SurfaceTexture -------------------------------------------------------------------------
@@ -309,12 +317,10 @@ class TextureLayer : public android::VirtualLightRefBase {
   FrameImages images;
 
   sk_sp<SkImage> Image() {
-    android::sp<QueueSurface> s;
-    {
-      std::lock_guard<std::mutex> lock(mu);
-      s = surface;
-    }
-    return s != nullptr ? images.Get(s->Latest()) : nullptr;
+    // Serialize cache publication with attachment/detachment. Otherwise an
+    // older in-flight read could repopulate the cache after detach cleared it.
+    std::lock_guard<std::mutex> lock(mu);
+    return images.Get(surface != nullptr ? surface->Latest() : nullptr);
   }
 };
 
@@ -397,6 +403,7 @@ void JNICALL HR_detachSurfaceTexture(JNIEnv*, jclass, jlong, jlong layer_ptr) {
   if (TextureLayer* layer = LayerOf(layer_ptr)) {
     std::lock_guard<std::mutex> lock(layer->mu);
     layer->surface = nullptr;
+    layer->images.Get(nullptr);
   }
 }
 
@@ -440,7 +447,11 @@ void JNICALL TL_setSurfaceTexture(JNIEnv* env, jclass, jlong ptr, jobject surfac
   SurfaceTextureState* s = surface_texture != nullptr ? StateOf(env, surface_texture) : nullptr;
   if (layer == nullptr) return;
   std::lock_guard<std::mutex> lock(layer->mu);
-  layer->surface = s != nullptr ? s->surface : nullptr;
+  android::sp<QueueSurface> next = s != nullptr ? s->surface : nullptr;
+  if (layer->surface != next) {
+    layer->surface = std::move(next);
+    layer->images.Get(nullptr);
+  }
 }
 
 void JNICALL TL_updateSurfaceTexture(JNIEnv*, jclass, jlong) {}

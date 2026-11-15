@@ -111,6 +111,13 @@ jobs:
       - name: MediaPlayer PCM priming and playback lifecycle contracts
         run: python3 tools/test_media_player_priming.py --sanitize
 
+      - name: JNI and mixer allocation bounds and surface image-cache lifetime
+        run: |
+          python3 tools/test_jni_argument_storage.py --sanitize
+          python3 tools/test_audio_mixer_allocations.py --sanitize
+          python3 tools/test_audio_rate_history.py --sanitize
+          python3 tools/test_surface_image_cache.py --sanitize
+
       - name: Host event loop, audio state and surface geometry contracts
         run: |
           python3 tools/test_host_event_loop_contracts.py --sanitize
@@ -183,6 +190,11 @@ jobs:
 
       - name: APK native library filename contracts
         run: python3 tools/test_native_library_paths.py --java-home "$JAVA_HOME"
+
+      - name: Java service dispatch, durable settings, APK scans and bounded launcher logs
+        run: |
+          python3 tools/test_java_performance_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_launcher_log_contracts.py --java-home "$JAVA_HOME"
 
       - name: Validate user interface translations
         run: |
