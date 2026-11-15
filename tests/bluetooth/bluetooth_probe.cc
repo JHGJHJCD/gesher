@@ -303,8 +303,16 @@ void HwCheck(bt::Backend& backend, const std::string& want, bool queryState) {
         int n = socket->Read(buffer, available < 1024 ? available : 1024);
         if (n <= 0) break;
         reply.insert(reply.end(), buffer, buffer + n);
-        // A whole frame came: stop waiting.
-        if (reply.size() >= 9 && reply.size() >= static_cast<size_t>(reply[7] | reply[8] << 8)) break;
+        // Stop once the state update (command 01 01) is in; other frames (the device
+        // also reports its connections) come first.
+        bool state = false;
+        for (size_t at = 0; at + 9 <= reply.size();) {
+          size_t length = reply[at + 7] | reply[at + 8] << 8;
+          if (length < 10 || at + length > reply.size()) break;
+          state = state || (reply[at + 5] == 0x01 && reply[at + 6] == 0x01);
+          at += length;
+        }
+        if (state) break;
       }
       printf("bluetooth-probe: hw reply: %zu byte(s): %s\n", reply.size(),
              Hex(reply.data(), reply.size()).c_str());
