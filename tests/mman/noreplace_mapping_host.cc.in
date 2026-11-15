@@ -1,6 +1,7 @@
 // Copyright (C) 2026 The Gesher Authors; SPDX-License-Identifier: Apache-2.0
-// Production placeholder bookkeeping and admission with recording Win32 calls.
-// No physical memory behavior, address selection or file mapping is simulated.
+// Production mapping bookkeeping and admission with recording Win32 calls.
+// Only the whole native reservation is retained; logical page ownership is
+// decided by extracted production code. No bytes or file views are simulated.
 #include <algorithm>
 #include <cerrno>
 #include <cstdint>
@@ -19,7 +20,7 @@ using ULONG = uint32_t;
 using HANDLE = void*;
 constexpr DWORD PAGE_NOACCESS = 1, PAGE_READONLY = 2, PAGE_READWRITE = 4,
     PAGE_EXECUTE_READ = 32, PAGE_EXECUTE_READWRITE = 64;
-constexpr DWORD MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000, MEM_RELEASE = 0x8000,
+constexpr DWORD MEM_COMMIT = 0x1000, MEM_RESERVE = 0x2000, MEM_DECOMMIT = 0x4000, MEM_RELEASE = 0x8000,
     MEM_REPLACE_PLACEHOLDER = 0x4000, MEM_RESERVE_PLACEHOLDER = 0x40000,
     MEM_PRESERVE_PLACEHOLDER = 2, MEM_COALESCE_PLACEHOLDERS = 1;
 constexpr int PROT_NONE = 0, PROT_READ = 1, PROT_WRITE = 2, PROT_EXEC = 4;
@@ -44,9 +45,37 @@ struct NativeCall {
   DWORD protection;
 };
 std::vector<NativeCall> calls;
-bool fail_reserve = false, fail_replace = false;
+bool fail_reserve = false, fail_replace = false, fail_commit = false, placeholders = true;
+std::map<uintptr_t, size_t> plain_reservations;
+void* VirtualAlloc(void* address, size_t length, DWORD flags, DWORD protection) {
+  const uintptr_t at = address == nullptr ? kBase : reinterpret_cast<uintptr_t>(address);
+  calls.push_back({"plain-alloc", at, length, flags, protection});
+  if ((flags & MEM_RESERVE) != 0) {
+    if (fail_reserve) return nullptr;
+    for (const auto& [start, size] : plain_reservations) {
+      if (at < start + size && start < at + length) return nullptr;
+    }
+    plain_reservations.emplace(at, length);
+    return reinterpret_cast<void*>(at);
+  }
+  if (fail_commit) return nullptr;
+  for (const auto& [start, size] : plain_reservations) {
+    if (at >= start && at + length <= start + size) return reinterpret_cast<void*>(at);
+  }
+  return nullptr;
+}
 bool VirtualFree(void* address, size_t length, DWORD flags) {
   calls.push_back({"free", reinterpret_cast<uintptr_t>(address), length, flags, 0});
+  if (flags == MEM_RELEASE) plain_reservations.erase(reinterpret_cast<uintptr_t>(address));
+  return true;
+}
+bool VirtualProtect(void* address, size_t length, DWORD protection, DWORD* old) {
+  calls.push_back({"protect", reinterpret_cast<uintptr_t>(address), length, 0, protection});
+  *old = PAGE_READWRITE;
+  return true;
+}
+bool UnmapViewOfFile(void* address) {
+  calls.push_back({"unmap", reinterpret_cast<uintptr_t>(address), 0, 0, 0});
   return true;
 }
 bool CloseHandle(HANDLE handle) {
@@ -54,6 +83,7 @@ bool CloseHandle(HANDLE handle) {
   return true;
 }
 struct PlaceholderBoundary {
+  bool available() const { return placeholders; }
   void* alloc2(int, void* address, size_t length, DWORD flags, DWORD protection, void*, int) const {
     calls.push_back({"alloc", reinterpret_cast<uintptr_t>(address), length, flags, protection});
     bool replacement = (flags & MEM_REPLACE_PLACEHOLDER) != 0;
@@ -68,6 +98,11 @@ struct PlaceholderBoundary {
 const PlaceholderBoundary& Placeholders() { static PlaceholderBoundary boundary; return boundary; }
 
 @TYPES@
+
+// Route the extracted public munmap to each fixture's isolated registry.
+State* active_state = nullptr;
+State& state() { return *active_state; }
+#define TRACE(...) ((void)0)
 
 // Partial file-view remapping is outside this anonymous fixture. A NOREPLACE
 // collision must fail admission before this boundary can ever be reached.
@@ -92,7 +127,11 @@ std::string Snapshot(const State& state) {
   for (const auto& [address, length] : state.groups) out << 'g' << address << ':' << length << ';';
   return out.str();
 }
-void ResetBoundary() { calls.clear(); fail_reserve = fail_replace = false; errno = 0; }
+void ResetBoundary() {
+  calls.clear(); plain_reservations.clear();
+  fail_reserve = fail_replace = fail_commit = false;
+  placeholders = true; errno = 0;
+}
 void Prepare(State& state, int protection = PROT_READ | PROT_WRITE) {
   ResetBoundary();
   void* value = GroupAnonymous(state, reinterpret_cast<void*>(kBase), 4 * kPage,
@@ -211,6 +250,127 @@ void ExistingBehaviorAndFailure() {
   Check(calls.size() == 1 && calls[0].operation == "alloc", "failed replacement cannot release a live group");
   ResetBoundary();
 }
+
+void PreparePlain(State& value, int protection = PROT_READ | PROT_WRITE) {
+  ResetBoundary();
+  placeholders = false;
+  active_state = &value;
+  void* mapped = MapAnonymous(value, reinterpret_cast<void*>(kBase), 8 * kPage,
+                              protection, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE);
+  Check(mapped == reinterpret_cast<void*>(kBase) && value.regions.at(kBase).group == 0,
+        "plain reservation created through production MapAnonymous");
+  calls.clear();
+}
+
+void RetirePlain(State& value, size_t first, size_t pages) {
+  active_state = &value;
+  calls.clear();
+  Check(munmap(reinterpret_cast<void*>(kBase + first * kPage), pages * kPage) == 0,
+        "production munmap retires a plain subrange");
+  Check(calls.size() == 1 && calls[0].operation == "free" &&
+        calls[0].address == kBase + first * kPage && calls[0].length == pages * kPage &&
+        calls[0].flags == MEM_DECOMMIT && plain_reservations.at(kBase) == 8 * kPage,
+        "partial plain unmap decommits only requested pages and keeps native reservation");
+  const Region& region = value.regions.at(kBase);
+  Check(std::none_of(region.live.begin() + first, region.live.begin() + first + pages,
+                     [](bool live) { return live; }),
+        "production munmap records logical holes independently of native reservation");
+  calls.clear();
+}
+
+void RejectPlainUnchanged(State& value, uintptr_t address, size_t length, int flags,
+                          const char* label) {
+  const std::string before = Snapshot(value);
+  const auto native_before = plain_reservations;
+  calls.clear(); errno = 0;
+  void* mapped = MapAnonymous(value, reinterpret_cast<void*>(address), length,
+                              PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | flags);
+  Check(mapped == MAP_FAILED && errno == EEXIST, label);
+  Check(Snapshot(value) == before && plain_reservations == native_before && calls.empty(),
+        "plain collision rejects the whole range without native or registry mutation");
+}
+
+void PlainHoleReuse() {
+  for (bool api_available : {false, true}) {
+    for (int fixed : {MAP_FIXED_NOREPLACE, MAP_FIXED | MAP_FIXED_NOREPLACE}) {
+      for (int protection : {PROT_NONE, PROT_READ | PROT_WRITE}) {
+        State value; PreparePlain(value);
+        RetirePlain(value, 0, 2);
+        const auto reservation = plain_reservations;
+        placeholders = api_available;
+        void* mapped = MapAnonymous(value, reinterpret_cast<void*>(kBase), 2 * kPage,
+                                    protection, MAP_PRIVATE | MAP_ANONYMOUS | fixed);
+        Check(mapped == reinterpret_cast<void*>(kBase),
+              "plain logical hole reused exactly with either fixed flag and API availability");
+        const bool expected_calls = protection == PROT_NONE ? calls.empty() :
+            calls.size() == 1 && calls[0].operation == "plain-alloc" &&
+            calls[0].address == kBase && calls[0].length == 2 * kPage &&
+            calls[0].flags == MEM_COMMIT && calls[0].protection == PAGE_READWRITE;
+        Check(expected_calls && plain_reservations == reservation,
+              "plain hole reuse only commits its pages without releasing or replacing the reservation");
+        const Region& region = value.regions.at(kBase);
+        Check(region.live_pages == 8 && AllPages(region, true, Origin::kPrivateAnonymous) &&
+              value.regions.size() == 1 && value.groups.empty(),
+              "plain hole reuse publishes liveness and origin while retaining the live tail");
+        RejectPlainUnchanged(value, kBase, kPage, fixed,
+                             "reused PROT_NONE or accessible plain page blocks a second NOREPLACE");
+      }
+    }
+  }
+}
+
+void PlainCollisionsAndFailure() {
+  for (bool api_available : {false, true}) {
+    for (int fixed : {MAP_FIXED_NOREPLACE, MAP_FIXED | MAP_FIXED_NOREPLACE}) {
+      for (int protection : {PROT_NONE, PROT_READ | PROT_WRITE}) {
+        State value; PreparePlain(value, protection);
+        placeholders = api_available;
+        RejectPlainUnchanged(value, kBase, 2 * kPage, fixed,
+                             "live plain pages including PROT_NONE reject NOREPLACE");
+        RetirePlain(value, 1, 2);
+        RejectPlainUnchanged(value, kBase + kPage, 3 * kPage, fixed,
+                             "plain hole followed by a live page rejects atomically");
+        RejectPlainUnchanged(value, kBase, 3 * kPage, fixed,
+                             "plain live page followed by holes rejects atomically");
+        const std::string before = Snapshot(value);
+        const auto native_before = plain_reservations;
+        calls.clear(); fail_commit = true; errno = 0;
+        void* mapped = MapAnonymous(value, reinterpret_cast<void*>(kBase + kPage), 2 * kPage,
+                                    PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | fixed);
+        Check(mapped == MAP_FAILED && errno == ENOMEM && Snapshot(value) == before &&
+              plain_reservations == native_before,
+              "failed plain recommit leaves holes and all live neighbours unchanged");
+        Check(calls.size() == 1 && calls[0].operation == "plain-alloc" &&
+              calls[0].address == kBase + kPage && calls[0].length == 2 * kPage &&
+              calls[0].flags == MEM_COMMIT,
+              "failed plain recommit never decommits, releases or relocates any page");
+        fail_commit = false;
+      }
+    }
+  }
+
+  State adjacent; PreparePlain(adjacent);
+  RetirePlain(adjacent, 1, 1);
+  RetirePlain(adjacent, 2, 2);
+  void* joined = MapAnonymous(adjacent, reinterpret_cast<void*>(kBase + kPage), 3 * kPage,
+                              PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE);
+  Check(joined == reinterpret_cast<void*>(kBase + kPage) && adjacent.regions.at(kBase).live_pages == 8,
+        "adjacent plain holes are reusable in one exact mapping");
+  Check(calls.size() == 1 && calls[0].operation == "plain-alloc" &&
+        calls[0].address == kBase + kPage && calls[0].length == 3 * kPage &&
+        calls[0].flags == MEM_COMMIT && calls[0].protection == PAGE_READONLY,
+        "adjacent plain hole reuse preserves both live neighbours and requested protection");
+
+  State replace; PreparePlain(replace);
+  void* mapped = MapAnonymous(replace, reinterpret_cast<void*>(kBase + kPage), kPage,
+                              PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED);
+  Check(mapped == reinterpret_cast<void*>(kBase + kPage) && calls.size() == 2 &&
+        calls[0].operation == "free" && calls[0].flags == MEM_DECOMMIT &&
+        calls[1].operation == "plain-alloc" && calls[1].flags == MEM_COMMIT,
+        "ordinary plain MAP_FIXED retains existing page replacement behavior");
+  ResetBoundary();
+  active_state = nullptr;
+}
 }  // namespace
 
 int main() {
@@ -218,6 +378,8 @@ int main() {
   Collisions();
   FragmentedHoles();
   ExistingBehaviorAndFailure();
-  std::printf("mmap NOREPLACE placeholder contracts: %d checks, %d failures\n", checks, failures);
+  PlainHoleReuse();
+  PlainCollisionsAndFailure();
+  std::printf("mmap NOREPLACE contracts: %d checks, %d failures\n", checks, failures);
   return failures == 0 ? 0 : 1;
 }

@@ -212,8 +212,12 @@ function Invoke-PanelLauncherCase([string] $Command, [string] $Directory, [bool]
 
 $work = Join-Path ([IO.Path]::GetTempPath()) ('gesher-panel-launch-' + [guid]::NewGuid().ToString('N'))
 try {
+    # Windows paths ignore case: settings and SeTtInGs must not share the
+    # previous child's ready.json, identity record or release gate.
+    $caseIndex = 0
     foreach ($command in 'control-panel', 'settings', 'dashboard', 'gui', 'SeTtInGs') {
-        Invoke-PanelLauncherCase -Command $command -Directory (Join-Path $work ('detached ' + $command)) -Detached $true
+        $caseIndex++
+        Invoke-PanelLauncherCase -Command $command -Directory (Join-Path $work ('detached {0} {1}' -f $caseIndex, $command)) -Detached $true
     }
     Invoke-PanelLauncherCase -Command 'control-panel' -Directory (Join-Path $work 'redirected') -Detached $false -Redirect
     # A command that does not open the dashboard retains its old wait behavior,
