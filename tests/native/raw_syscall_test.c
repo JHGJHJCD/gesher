@@ -25,9 +25,12 @@
 #include <unistd.h>
 
 #ifdef GESHER_UPX_VARIANT
-// UPX packs a shared library through its DT_INIT (lld sets it from _init),
-// and only one worth compressing.
-void _init(void) {}
+// UPX packs a shared library through its DT_INIT, which it runs once it has
+// unpacked the code (-Wl,-init=gesher_upx_init: the packers' libraries have
+// one), and only one worth compressing.
+static int upx_init_ran;
+void gesher_upx_init(void) { upx_init_ran = 1; }
+int gesher_upx_init_ran(void) { return upx_init_ran; }
 __attribute__((used)) static const unsigned char gesher_upx_filler[256 * 1024] = {1, 2, 3};
 #endif
 
@@ -182,6 +185,9 @@ int gesher_selftest(void) {
                           message[0] != '\0');
 
     check_patched_code();
+#ifdef GESHER_UPX_VARIANT
+    check("DT_INIT ran after unpacking", gesher_upx_init_ran());
+#endif
 
     if (failures == 0) printf("raw_syscall: all passed\n");
     fflush(stdout);
