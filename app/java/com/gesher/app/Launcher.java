@@ -101,7 +101,60 @@ public final class Launcher {
     /** {@link #DETACH_ENV} as this process got it (it is not handed on to the device). */
     private static boolean sDetachRequested;
 
+    /**
+     * Set by gesher-launch when nobody reads this launcher's output (a double-clicked
+     * .apk, a Start menu shortcut), and by the Control Center: a file whose text it shows
+     * to the user if the launch or install fails. This launcher writes the reason there
+     * (UTF-8), as a user can read it.
+     */
+    static final String ERROR_FILE_ENV = "GESHER_LAUNCH_ERROR_FILE";
+    /** {@link #ERROR_FILE_ENV} as this process got it (it is not handed on either). */
+    private static String sErrorFile;
+
     private Launcher() {
+    }
+
+    /**
+     * The failure as a user can act on it, for the installer's refusals
+     * (com.gesher.server.Installer's INSTALL_FAILED_* codes); null for others.
+     */
+    static String describeFailure(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            String m = c.getMessage();
+            if (m == null) continue;
+            int at = m.indexOf("INSTALL_FAILED_");
+            if (at < 0) continue;
+            m = m.substring(at);
+            int colon = m.indexOf(':');
+            String code = colon < 0 ? m.trim() : m.substring(0, colon).trim();
+            String detail = colon < 0 ? "" : m.substring(colon + 1).trim();
+            switch (code) {
+                case "INSTALL_FAILED_UPDATE_INCOMPATIBLE":
+                    return text("install_update_incompatible", detail);
+                case "INSTALL_FAILED_BAD_SIGNATURE":
+                    return text("install_bad_signature", detail);
+                case "INSTALL_FAILED_BAD_SPLIT_SIGNATURE":
+                    return text("install_bad_split_signature", detail);
+                case "INSTALL_FAILED_NO_MATCHING_ABIS":
+                case "INSTALL_FAILED_BAD_DEX_METADATA":
+                    // Their text already says what is wrong.
+                    return detail.isEmpty() ? code : detail;
+                default:
+                    // Others name only the package or file: the code says what failed.
+                    return m.trim();
+            }
+        }
+        return null;
+    }
+
+    /** Writes the failure for gesher-launch or the Control Center to show; best effort. */
+    private static void reportFailure(String message) {
+        if (sErrorFile == null || sErrorFile.isEmpty() || message == null) return;
+        try {
+            Files.write(new File(sErrorFile).toPath(), message.getBytes(StandardCharsets.UTF_8));
+        } catch (Throwable ignored) {
+            // The message box is a convenience; the failure is on stderr already.
+        }
     }
 
     private static void log(String message) {
@@ -117,11 +170,16 @@ public final class Launcher {
             // starts must not inherit it.
             sDetachRequested = "1".equals(System.getenv(DETACH_ENV));
             if (sDetachRequested) android.system.Os.unsetenv(DETACH_ENV);
+            sErrorFile = System.getenv(ERROR_FILE_ENV);
+            if (sErrorFile != null) android.system.Os.unsetenv(ERROR_FILE_ENV);
             code = run(args);
         } catch (Throwable t) {
             System.out.flush();
-            System.err.println(TAG + ": " + text("failed", t));
+            String message = describeFailure(t);
+            System.err.println(TAG + ": " + (message != null ? message : text("failed", t)));
             t.printStackTrace();
+            reportFailure(message != null ? message
+                    : t.getMessage() != null ? t.getMessage() : String.valueOf(t));
             code = 1;
         }
         System.out.flush();
@@ -501,6 +559,7 @@ public final class Launcher {
                 ServiceManager.getService("package"));
         if (pm.getPackageInfo(pkg, 0L, 0) == null) {
             log(text("not_installed_url", pkg, url));
+            reportFailure(text("not_installed_url", pkg, url));
             return 1;
         }
         Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url))
@@ -582,6 +641,7 @@ public final class Launcher {
             PackageInfo pinfo = pm.getPackageInfo(pkg, 0L, 0);
             if (pinfo == null) {
                 log(text("not_installed_hint", pkg));
+                reportFailure(text("not_installed_hint", pkg));
                 return 1;
             }
             if (pinfo.applicationInfo != null && pinfo.applicationInfo.sourceDir != null) {
