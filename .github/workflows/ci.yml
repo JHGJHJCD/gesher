@@ -51,6 +51,7 @@ jobs:
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1
+          tests/windows/shell/Issue32And33Contracts.ps1
           tests/windows/shell/RuntimeFileChecks.ps1
   reader-ownership:
     needs: [source-identity]
@@ -670,6 +671,7 @@ jobs:
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1
+          tests/windows/shell/Issue32And33Contracts.ps1
           tests/windows/shell/RuntimeFileChecks.ps1
 
       - name: Verify and assemble windows-x64 artifact

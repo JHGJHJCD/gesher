@@ -127,7 +127,12 @@ public final class UiMessages {
             case "cp_drag_drop_hint": value = lang.equals("he") ? "\u05d2\u05e8\u05d5\u05e8 \u05d5\u05e9\u05d7\u05e8\u05e8 \u05e7\u05d5\u05d1\u05e6\u05d9 APK \u05dc\u05db\u05d0\u05df \u05dc\u05d4\u05ea\u05e7\u05e0\u05d4 \u05de\u05d4\u05d9\u05e8\u05d4" : "Drag and drop APK files here to install"; break;
             case "cp_btn_launch": value = lang.equals("he") ? "\u05d4\u05e4\u05e2\u05dc" : "Launch"; break;
             case "cp_btn_uninstall": value = lang.equals("he") ? "\u05d4\u05e1\u05e8" : "Uninstall"; break;
+            case "cp_uninstall_title": value = lang.equals("he") ? "\u05d4\u05e1\u05e8\u05ea \u05d9\u05d9\u05e9\u05d5\u05dd" : "Uninstall Application"; break;
             case "cp_uninstall_confirm": value = lang.equals("he") ? "\u05d4\u05d0\u05dd \u05dc\u05d4\u05e1\u05d9\u05e8 \u05d0\u05ea \u05d4\u05d9\u05d9\u05e9\u05d5\u05dd {0}?" : "Are you sure you want to uninstall {0}?"; break;
+            case "cp_uninstall_detail": value = lang.equals("he") ? "\u05d4\u05d9\u05d9\u05e9\u05d5\u05dd \u05d5\u05db\u05dc \u05d4\u05e0\u05ea\u05d5\u05e0\u05d9\u05dd \u05d4\u05de\u05e7\u05d5\u05de\u05d9\u05d9\u05dd \u05e9\u05dc\u05d5 \u05d9\u05d5\u05e1\u05e8\u05d5 \u05de\u05d2\u05e9\u05e8." : "This application and its local data will be removed from Gesher."; break;
+            case "cp_uninstall_failed": value = lang.equals("he") ? "\u05d4\u05e1\u05e8\u05ea {0} \u05e0\u05db\u05e9\u05dc\u05d4." : "Failed to uninstall {0}."; break;
+            case "cp_install_failed": value = lang.equals("he") ? "\u05d4\u05ea\u05e7\u05e0\u05ea {0} \u05e0\u05db\u05e9\u05dc\u05d4." : "Failed to install {0}."; break;
+            case "cp_dialog_ok": value = lang.equals("he") ? "\u05d0\u05d9\u05e9\u05d5\u05e8" : "OK"; break;
             case "cp_status_ready": value = lang.equals("he") ? "\u05de\u05d5\u05db\u05df" : "Ready"; break;
             case "cp_status_working": value = lang.equals("he") ? "\u05de\u05e2\u05d1\u05d3, \u05e0\u05d0 \u05dc\u05d4\u05de\u05ea\u05d9\u05df\u2026" : "Working, please wait\u2026"; break;
             case "cp_staging": value = lang.equals("he") ? "\u05de\u05d2\u05d3\u05d9\u05e8 \u05e9\u05d9\u05e8\u05d5\u05ea\u05d9\u05dd\u2026" : "Configuring services\u2026"; break;

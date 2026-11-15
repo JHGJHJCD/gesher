@@ -82,7 +82,7 @@ function Get-InstalledApps {
     $apps = [System.Collections.Generic.List[PSObject]]::new()
     $packagesFile = Join-Path $root 'data/system/packages.list'
     if (-not (Test-Path -LiteralPath $packagesFile)) { return $apps }
-    
+
     $lines = Get-Content -LiteralPath $packagesFile
     foreach ($line in $lines) {
         if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) { continue }
@@ -90,7 +90,7 @@ function Get-InstalledApps {
         if ($parts.Count -lt 1) { continue }
         $pkg = $parts[0].Trim()
         if ([string]::IsNullOrEmpty($pkg)) { continue }
-        
+
         $label = $pkg
         $iconPath = $null
         $propFile = Join-Path $root "data/data/$pkg/gesher-shell/shortcut.properties"
@@ -110,7 +110,7 @@ function Get-InstalledApps {
             $candidate = Join-Path $root "data/data/$pkg/gesher-shell/icon.ico"
             if (Test-Path -LiteralPath $candidate) { $iconPath = $candidate }
         }
-        
+
         $apps.Add([PSCustomObject]@{
             Package = $pkg
             Label = $label
@@ -922,7 +922,7 @@ function Show-ModernConfirmDialog {
                 <RowDefinition Height="20"/>
                 <RowDefinition Height="Auto"/>
             </Grid.RowDefinitions>
-            
+
             <Grid Grid.Row="0" Margin="0,0,0,14">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="Auto"/>
@@ -985,9 +985,10 @@ function Show-ModernConfirmDialog {
 }
 
 function Show-UninstallConfirmDialog([string] $pkg, [string] $label = $pkg, $iconImage = $null) {
+    $subTitle = if ($label -ne $pkg) { $pkg } else { $null }
     return Show-ModernConfirmDialog `
         -Title (Get-GesherText 'cp_uninstall_title') `
-        -SubTitle (if ($label -ne $pkg) { $pkg } else { $null }) `
+        -SubTitle $subTitle `
         -Message (Get-GesherText 'cp_uninstall_confirm' @($label)) `
         -Detail (Get-GesherText 'cp_uninstall_detail') `
         -ConfirmText (Get-GesherText 'cp_btn_uninstall') `
@@ -1240,9 +1241,6 @@ $btnEnableMicrog.Add_Click({
     try {
         & (Join-Path $here 'gesher-app.ps1') shutdown
         & (Join-Path $here 'gesher-app-microg.ps1') -AutoDownload
-        if ($LASTEXITCODE -ne 0) {
-            throw (Get-GesherText 'cp_staging')
-        }
         & (Join-Path $here 'gesher-app.ps1') start
     } catch {
         Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
