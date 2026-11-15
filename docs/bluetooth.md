@@ -98,7 +98,8 @@ Design: [0085](decisions/0085-bluetooth-host-radio.md). Tests:
 
 ## Not there
 
-- LE advertising (BluetoothLeAdvertiser starts fail with FEATURE_UNSUPPORTED; Windows'
+- LE advertising (`getBluetoothLeAdvertiser()` returns null and extended advertising
+  capability and data length are false/zero; Windows'
   BluetoothLEAdvertisementPublisher could back it), GATT server (`openGattServer` is null;
   GattServiceProvider could back it), L2CAP channels, LE Audio, HID, PAN, PBAP/MAP.
 - Custom pairing (PIN entry by the app, ACTION_PAIRING_REQUEST, setPin,

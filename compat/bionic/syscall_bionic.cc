@@ -224,15 +224,22 @@ int RegexError(std::regex_constants::error_type code) {
 
 int BIONIC_SYSV Regcomp(BionicRegex* preg, const char* pattern, int cflags) {
   if (preg == nullptr || pattern == nullptr) return kRegInvarg;
+  // std::regex's POSIX grammars cannot express REG_NEWLINE's internal line
+  // anchors. Reject unsupported modes instead of reporting a compiled regex
+  // that silently uses different matching rules.
+  constexpr int supported = kRegExtended | kRegIcase | kRegNosub | kRegPend;
+  if ((cflags & ~supported) != 0 ||
+      ((cflags & kRegPend) != 0 &&
+       (preg->re_endp == nullptr || reinterpret_cast<uintptr_t>(preg->re_endp) <
+                                     reinterpret_cast<uintptr_t>(pattern)))) return kRegInvarg;
   std::regex::flag_type flags =
       (cflags & kRegExtended) != 0 ? std::regex::extended : std::regex::basic;
   if ((cflags & kRegIcase) != 0) flags |= std::regex::icase;
   if ((cflags & kRegNosub) != 0) flags |= std::regex::nosubs;
-  // REG_NEWLINE (newline-sensitive . [^ ] ^ $) is not modelled.
-  std::string text = (cflags & kRegPend) != 0 && preg->re_endp != nullptr
-                         ? std::string(pattern, preg->re_endp)
-                         : std::string(pattern);
   try {
+    std::string text = (cflags & kRegPend) != 0 && preg->re_endp != nullptr
+                           ? std::string(pattern, preg->re_endp)
+                           : std::string(pattern);
     auto* compiled = new CompiledRegex{std::regex(text, flags), (cflags & kRegNosub) != 0};
     preg->re_magic = kRegMagic;
     preg->re_nsub = compiled->re.mark_count();
@@ -251,11 +258,16 @@ int BIONIC_SYSV Regexec(const BionicRegex* preg, const char* string, size_t nmat
   if (string == nullptr) return kRegInvarg;
   const auto* compiled = static_cast<const CompiledRegex*>(preg->re_g);
   const char* begin = string;
-  const char* end = string + std::strlen(string);
+  const char* end;
   if ((eflags & kRegStartend) != 0) {
-    if (pmatch == nullptr) return kRegInvarg;
+    // REG_STARTEND accepts a bounded byte sequence, including embedded NULs;
+    // it must not first scan for a terminator outside that sequence.
+    if (pmatch == nullptr || pmatch[0].rm_so < 0 || pmatch[0].rm_eo < pmatch[0].rm_so)
+      return kRegInvarg;
     begin = string + pmatch[0].rm_so;
     end = string + pmatch[0].rm_eo;
+  } else {
+    end = string + std::strlen(string);
   }
   auto mflags = std::regex_constants::match_default;
   if ((eflags & kRegNotbol) != 0) mflags |= std::regex_constants::match_not_bol;
@@ -315,7 +327,14 @@ void BIONIC_SYSV Regfree(BionicRegex* preg) {
 }  // namespace
 
 int64_t RawSyscallX64(int64_t nr, const int64_t a[6]) {
+  // A raw kernel call returns -errno without modifying libc's thread-local
+  // errno. syscall(2)'s caller sets errno only after a negative result.
+  struct PreserveErrno {
+    int saved = errno;
+    ~PreserveErrno() { errno = saved; }
+  } preserve_errno;
   if (nr == 13) return RtSigaction(a);  // rt_sigaction: the kernel's layout
+  if (nr == 14 && a[3] != 8) return -kEINVAL;  // rt_sigprocmask sigsetsize
   // mmap/mprotect: code they make executable anywhere waits for its first
   // execution, when the loader rewrites it (an unpacker's own code).
   if (nr == 9) {
@@ -346,8 +365,20 @@ int64_t RawSyscallX64(int64_t nr, const int64_t a[6]) {
   const ResolvedCall& call = Calls()[nr];
   if (call.fn == nullptr) return -kENOSYS;
   errno = 0;
-  const int64_t r = call.fn(a[0], a[1], a[2], a[3], a[4], a[5]);
+  // The older kernel interfaces have fewer arguments than libc's wrappers.
+  // Registers beyond the kernel signature are unspecified, not extra flags.
+  const int64_t r = call.fn(a[0], nr == 284 ? 0 : a[1], a[2],
+                           nr == 268 || nr == 269 ? 0 : a[3], a[4], a[5]);
   const int error = errno != 0 ? errno : kEINVAL;
+  if (nr == 204 && static_cast<int32_t>(r) == 0) {
+    // libc sched_getaffinity returns zero; the raw syscall returns the bytes
+    // in the CPU mask. Use the same configured CPU count as the host shim.
+    using SysconfFn = int64_t (BIONIC_SYSV*)(int);
+    static auto sysconf_fn = reinterpret_cast<SysconfFn>(LookupBionicSymbol("sysconf"));
+    if (sysconf_fn == nullptr) return -kENOSYS;
+    const int64_t count = sysconf_fn(0x60);  // bionic _SC_NPROCESSORS_CONF
+    return ((count > 0 ? count : 1) + 63) / 64 * 8;
+  }
   switch (call.ret) {
     case 'i': {
       const auto v = static_cast<int32_t>(r);

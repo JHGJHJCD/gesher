@@ -67,7 +67,7 @@ same earbuds from Windows over RFCOMM while Windows keeps the A2DP link.
 
 - An app gets an adapter only when the PC has a radio; then paired devices, LE scanning,
   GATT client, RFCOMM client and server and the A2DP/headset proxies work through Windows.
-- Not covered: LE advertising (fails with FEATURE_UNSUPPORTED), GATT server
+- Not covered: LE advertising (`getBluetoothLeAdvertiser()` returns null), GATT server
   (openGattServer is null), L2CAP channels, custom pairing by the app, ACTION_REQUEST_ENABLE
   (no activity resolves it), LE Audio, hearing aids, HID, PAN, PBAP/MAP.
 - Real hardware is not exercised in CI: the Windows paths' answers with a radio and a

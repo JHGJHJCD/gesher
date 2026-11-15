@@ -73,8 +73,7 @@ public final class BluetoothGatt implements BluetoothProfile {
 
     /** Connected GATT clients of this process, per device (two clients may share one). */
     private static final Map<String, Integer> sConnected = new HashMap<>();
-    private final java.util.concurrent.atomic.AtomicBoolean mCounted =
-            new java.util.concurrent.atomic.AtomicBoolean();
+    private boolean mCounted;  // guarded by mLock with the connection state
 
     private final BluetoothDevice mDevice;
     private final Context mContext;
@@ -88,6 +87,7 @@ public final class BluetoothGatt implements BluetoothProfile {
     private final Map<Integer, BluetoothGattCharacteristic> mCharacteristics = new HashMap<>();
     private final Map<Integer, BluetoothGattDescriptor> mDescriptors = new HashMap<>();
     private final Map<Integer, byte[]> mSyntheticValues = new HashMap<>();
+    private final Set<Integer> mNotifications = new HashSet<>();
     private long mNative;          // the WindowsBluetooth GATT handle while connecting/connected
     private int mState = STATE_DISCONNECTED;
     private int mGeneration;       // bumped by disconnect/close: stale work stops
@@ -124,9 +124,10 @@ public final class BluetoothGatt implements BluetoothProfile {
         }
     }
 
-    /** This client's link counts for its device while it is up. */
+    /** This client's link counts for its device while it is up; called with mLock held. */
     private void counted(boolean up) {
-        if (mCounted.getAndSet(up) == up) return;
+        if (mCounted == up) return;
+        mCounted = up;
         String address = mDevice.getAddress();
         synchronized (sConnected) {
             int n = sConnected.getOrDefault(address, 0) + (up ? 1 : -1);
@@ -142,8 +143,10 @@ public final class BluetoothGatt implements BluetoothProfile {
         return out;
     }
 
-    private void post(Runnable r) {
+    private void post(int generation, Runnable r) {
         mHandler.post(() -> {
+            // An app-supplied Handler may delay callbacks past disconnect/close.
+            if (!current(generation)) return;
             try {
                 r.run();
             } catch (RuntimeException e) {
@@ -176,8 +179,19 @@ public final class BluetoothGatt implements BluetoothProfile {
 
     private void connectNow(int generation) {
         for (;;) {
+            if (!current(generation)) return;
             int[] hr = new int[1];
             long handle = WindowsBluetooth.nativeGattOpen(mDevice.value(), mDevice.getAddressType(), hr);
+            boolean cancelled;
+            synchronized (mLock) {
+                cancelled = generation != mGeneration || mClosed;
+                // Publish before blocking so disconnect/close can cancel this attempt.
+                if (!cancelled) mNative = handle;
+            }
+            if (cancelled) {
+                if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
+                return;
+            }
             int[] mtu = new int[] {23};
             int result = handle == 0 ? hr[0]
                     : WindowsBluetooth.nativeGattConnect(handle, CONNECT_TIMEOUT_MS, mtu);
@@ -185,29 +199,30 @@ public final class BluetoothGatt implements BluetoothProfile {
             Log.i(TAG, "connect " + mDevice + ": " + (connected ? "connected, MTU " + mtu[0]
                     : WindowsBluetooth.hresult(result)));
             synchronized (mLock) {
-                if (generation != mGeneration || mClosed) {
-                    if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
-                    return;
-                }
-                if (connected) {
-                    mNative = handle;
+                cancelled = generation != mGeneration || mClosed;
+                if (!cancelled && connected) {
                     mState = STATE_CONNECTED;
                     mMtu = mtu[0];
-                } else if (handle != 0) {
-                    WindowsBluetooth.nativeGattClose(handle);
+                    counted(true);
+                    // The native event reader can immediately report a lost connection.
+                    post(generation, () -> mCallback.onConnectionStateChange(
+                            this, GATT_SUCCESS, STATE_CONNECTED));
+                } else if (!cancelled) {
+                    mNative = 0;
+                    if (!mAutoConnect) mState = STATE_DISCONNECTED;
                 }
             }
+            if (cancelled || !connected) {
+                if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
+                if (cancelled) return;
+            }
             if (connected) {
-                counted(true);
                 startEvents(handle, generation);
-                post(() -> mCallback.onConnectionStateChange(this, GATT_SUCCESS, STATE_CONNECTED));
                 return;
             }
             if (!mAutoConnect) {
-                synchronized (mLock) {
-                    if (generation == mGeneration) mState = STATE_DISCONNECTED;
-                }
-                post(() -> mCallback.onConnectionStateChange(this, GATT_ERROR, STATE_DISCONNECTED));
+                post(generation, () -> mCallback.onConnectionStateChange(
+                        this, GATT_ERROR, STATE_DISCONNECTED));
                 return;
             }
             // autoConnect: wait for the device as Android does, until disconnect or close.
@@ -238,11 +253,15 @@ public final class BluetoothGatt implements BluetoothProfile {
                 case WindowsBluetooth.EVENT_NOTIFICATION: {
                     BluetoothGattCharacteristic c;
                     synchronized (mLock) {
+                        if (!mNotifications.contains(meta[1])) break;
                         c = mCharacteristics.get(meta[1]);
                     }
                     if (c == null || data == null) break;
                     final byte[] value = data;
-                    post(() -> {
+                    post(generation, () -> {
+                        synchronized (mLock) {
+                            if (!mNotifications.contains(c.getInstanceId())) return;
+                        }
                         c.setValue(value);
                         mCallback.onCharacteristicChanged(this, c, value);
                     });
@@ -256,11 +275,11 @@ public final class BluetoothGatt implements BluetoothProfile {
                     break;
                 case WindowsBluetooth.EVENT_MTU:
                     synchronized (mLock) {
-                        mMtu = meta[2];
+                        if (generation == mGeneration && !mClosed) mMtu = meta[2];
                     }
                     break;
                 case WindowsBluetooth.EVENT_SERVICES_CHANGED:
-                    post(() -> mCallback.onServiceChanged(this));
+                    post(generation, () -> mCallback.onServiceChanged(this));
                     break;
                 case WindowsBluetooth.EVENT_CLOSED:
                 default:
@@ -272,18 +291,23 @@ public final class BluetoothGatt implements BluetoothProfile {
     /** The link went down without the app asking. */
     private void lost(int generation, int status) {
         long handle;
+        int nextGeneration;
         synchronized (mLock) {
             if (generation != mGeneration || mState == STATE_DISCONNECTED) return;
             handle = mNative;
             mNative = 0;
             mState = STATE_DISCONNECTED;
             mBusy = false;
-            mGeneration++;
+            nextGeneration = ++mGeneration;
+            mSyntheticValues.clear();
+            mNotifications.clear();
+            counted(false);
         }
-        counted(false);
         if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
-        post(() -> mCallback.onConnectionStateChange(this, status, STATE_DISCONNECTED));
-        if (mAutoConnect) connectAsync();
+        post(nextGeneration, () -> mCallback.onConnectionStateChange(this, status, STATE_DISCONNECTED));
+        synchronized (mLock) {
+            if (mAutoConnect && nextGeneration == mGeneration && !mClosed) connectAsync();
+        }
     }
 
     public boolean connect() {
@@ -300,17 +324,21 @@ public final class BluetoothGatt implements BluetoothProfile {
         BluetoothHost.enforceConnect(mContext);
         long handle;
         boolean wasUp;
+        int generation;
         synchronized (mLock) {
             handle = mNative;
             wasUp = mState != STATE_DISCONNECTED;
             mNative = 0;
             mState = STATE_DISCONNECTED;
             mBusy = false;
-            mGeneration++;
+            generation = ++mGeneration;
+            mSyntheticValues.clear();
+            mNotifications.clear();
+            counted(false);
         }
-        counted(false);
         if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
-        if (wasUp) post(() -> mCallback.onConnectionStateChange(this, GATT_SUCCESS, STATE_DISCONNECTED));
+        if (wasUp) post(generation, () -> mCallback.onConnectionStateChange(
+                this, GATT_SUCCESS, STATE_DISCONNECTED));
     }
 
     public void close() {
@@ -321,9 +349,12 @@ public final class BluetoothGatt implements BluetoothProfile {
             handle = mNative;
             mNative = 0;
             mState = STATE_DISCONNECTED;
+            mBusy = false;
             mGeneration++;
+            mSyntheticValues.clear();
+            mNotifications.clear();
+            counted(false);
         }
-        counted(false);
         if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
         mWorker.shutdownNow();
         if (mOwnThread != null) mOwnThread.quitSafely();
@@ -363,9 +394,9 @@ public final class BluetoothGatt implements BluetoothProfile {
             int[] status = new int[1];
             String[] lines = WindowsBluetooth.nativeGattDiscover(handle, status);
             if (!current(generation[0])) return;
-            if (status[0] == GATT_SUCCESS) build(lines);
+            if (status[0] == GATT_SUCCESS) build(lines, generation[0]);
             final int result = status[0];
-            post(() -> mCallback.onServicesDiscovered(this, result));
+            post(generation[0], () -> mCallback.onServicesDiscovered(this, result));
         });
     }
 
@@ -374,7 +405,7 @@ public final class BluetoothGatt implements BluetoothProfile {
         return discoverServices();
     }
 
-    private void build(String[] lines) {
+    private void build(String[] lines, int generation) {
         List<BluetoothGattService> services = new ArrayList<>();
         Map<Integer, BluetoothGattCharacteristic> characteristics = new HashMap<>();
         Map<Integer, BluetoothGattDescriptor> descriptors = new HashMap<>();
@@ -418,6 +449,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             if (including != null && included != null) including.addIncludedService(included);
         }
         synchronized (mLock) {
+            if (generation != mGeneration || mClosed) return;
             mServices.clear();
             mServices.addAll(services);
             mCharacteristics.clear();
@@ -500,7 +532,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             if (!current(generation[0])) return;
             final byte[] result = value != null ? value : new byte[0];
             final int s = status[0];
-            post(() -> {
+            post(generation[0], () -> {
                 release(generation[0]);
                 if (s == GATT_SUCCESS) characteristic.setValue(result);
                 mCallback.onCharacteristicRead(this, characteristic, result, s);
@@ -567,7 +599,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             int status = WindowsBluetooth.nativeGattWrite(handle,
                     WindowsBluetooth.ATTRIBUTE_CHARACTERISTIC, id, copy, withResponse);
             if (!current(generation[0])) return;
-            post(() -> {
+            post(generation[0], () -> {
                 release(generation[0]);
                 mCallback.onCharacteristicWrite(this, characteristic, status);
             });
@@ -600,7 +632,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             if (!current(generation[0])) return;
             final byte[] result = value != null ? value : new byte[0];
             final int s = status[0];
-            post(() -> {
+            post(generation[0], () -> {
                 release(generation[0]);
                 if (s == GATT_SUCCESS) descriptor.setValue(result);
                 mCallback.onDescriptorRead(this, descriptor, s, result);
@@ -639,7 +671,7 @@ public final class BluetoothGatt implements BluetoothProfile {
                 status = WindowsBluetooth.nativeGattNotify(handle, owner.getInstanceId(), mode);
                 if (status == GATT_SUCCESS) {
                     synchronized (mLock) {
-                        mSyntheticValues.put(id, copy);
+                        if (generation[0] == mGeneration && !mClosed) mSyntheticValues.put(id, copy);
                     }
                 }
             } else {
@@ -648,7 +680,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             }
             if (!current(generation[0])) return;
             final int s = status;
-            post(() -> {
+            post(generation[0], () -> {
                 release(generation[0]);
                 mCallback.onDescriptorWrite(this, descriptor, s);
             });
@@ -668,8 +700,12 @@ public final class BluetoothGatt implements BluetoothProfile {
             boolean enable) {
         BluetoothHost.enforceConnect(mContext);
         synchronized (mLock) {
-            return mState == STATE_CONNECTED && characteristic != null
-                    && characteristic.getService() != null;
+            if (mState != STATE_CONNECTED || mClosed || characteristic == null
+                    || characteristic.getService() == null) return false;
+            int id = characteristic.getInstanceId();
+            if (mCharacteristics.get(id) != characteristic) return false;
+            if (enable) mNotifications.add(id); else mNotifications.remove(id);
+            return true;
         }
     }
 
@@ -707,11 +743,13 @@ public final class BluetoothGatt implements BluetoothProfile {
     /** The RSSI of the device's last advertisement this process saw (Windows has no call). */
     public boolean readRemoteRssi() {
         BluetoothHost.enforceConnect(mContext);
+        final int generation;
         synchronized (mLock) {
             if (mState != STATE_CONNECTED) return false;
+            generation = mGeneration;
         }
         Integer rssi = android.bluetooth.le.BluetoothLeScanner.lastRssi(mDevice.getAddress());
-        post(() -> mCallback.onReadRemoteRssi(this, rssi != null ? rssi : -127,
+        post(generation, () -> mCallback.onReadRemoteRssi(this, rssi != null ? rssi : -127,
                 rssi != null ? GATT_SUCCESS : GATT_FAILURE));
         return true;
     }
@@ -726,10 +764,11 @@ public final class BluetoothGatt implements BluetoothProfile {
             int now = WindowsBluetooth.nativeGattMtu(handle);
             if (!current(generation[0])) return;
             synchronized (mLock) {
+                if (generation[0] != mGeneration || mClosed) return;
                 mMtu = now;
             }
             final int reported = Math.max(23, Math.min(mtu, now));
-            post(() -> mCallback.onMtuChanged(this, reported, GATT_SUCCESS));
+            post(generation[0], () -> mCallback.onMtuChanged(this, reported, GATT_SUCCESS));
         });
     }
 
@@ -783,7 +822,7 @@ public final class BluetoothGatt implements BluetoothProfile {
                 phy[1] = BluetoothDevice.PHY_LE_1M;
             }
             final int result = update ? GATT_REQUEST_NOT_SUPPORTED : status;
-            post(() -> {
+            post(generation[0], () -> {
                 if (update) {
                     mCallback.onPhyUpdate(this, phy[0], phy[1], result);
                 } else {

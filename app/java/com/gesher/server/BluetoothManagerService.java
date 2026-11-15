@@ -408,7 +408,9 @@ public final class BluetoothManagerService extends Binder {
             mWatch.setDaemon(true);
             mWatch.start();
         }
-        poll();
+        // The watch initializes its own baseline. Enumerating paired devices may
+        // block in Windows; never perform that work on the app's Binder caller.
+        // state() can answer from the adapter until the first poll finishes.
     }
 
     /** Looks at Windows once and broadcasts what changed. */

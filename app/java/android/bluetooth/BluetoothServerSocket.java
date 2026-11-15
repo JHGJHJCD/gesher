@@ -56,9 +56,15 @@ public final class BluetoothServerSocket implements Closeable {
             int step = (int) Math.min(left, 500);
             long handle = WindowsBluetooth.nativeRfcommAccept(mNative, step, out);
             if (handle != 0) {
-                BluetoothDevice remote = BluetoothHost.device(WindowsBluetooth.address(out[1]),
-                        BluetoothDevice.ADDRESS_TYPE_PUBLIC, mContext);
-                return new BluetoothSocket(remote, handle, (int) out[2]);
+                synchronized (this) {
+                    if (!mClosed) {
+                        BluetoothDevice remote = BluetoothHost.device(WindowsBluetooth.address(out[1]),
+                                BluetoothDevice.ADDRESS_TYPE_PUBLIC, mContext);
+                        return new BluetoothSocket(remote, handle, (int) out[2]);
+                    }
+                }
+                WindowsBluetooth.nativeRfcommClose(handle);
+                throw new IOException("socket closed");
             }
             // 0x8007274C: WSAETIMEDOUT, the step ended; anything else ends the listener.
             if ((int) out[0] != 0x8007274C) {
@@ -70,8 +76,10 @@ public final class BluetoothServerSocket implements Closeable {
 
     @Override
     public void close() throws IOException {
-        if (mClosed) return;
-        mClosed = true;
+        synchronized (this) {
+            if (mClosed) return;
+            mClosed = true;
+        }
         WindowsBluetooth.nativeRfcommServerClose(mNative);
     }
 

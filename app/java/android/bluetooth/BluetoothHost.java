@@ -12,7 +12,8 @@ import android.os.Build;
 import android.util.Log;
 import com.gesher.server.WindowsBluetooth;
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -149,7 +150,9 @@ public final class BluetoothHost {
         List<java.util.UUID> uuids = new ArrayList<>();
     }
 
-    private static final Map<String, Known> sKnown = new HashMap<>();
+    // LE privacy addresses rotate. Bound recent devices but retain all host pairings.
+    private static final int MAX_KNOWN_DEVICES = 512;
+    private static final Map<String, Known> sKnown = new LinkedHashMap<>(64, 0.75f, true);
     private static long sBondedAt = Long.MIN_VALUE / 2;
     private static List<WindowsBluetooth.Device> sBonded = new ArrayList<>();
 
@@ -176,6 +179,7 @@ public final class BluetoothHost {
             }
             sBonded = list;
             sBondedAt = now;
+            trimKnownLocked();
         }
         return new ArrayList<>(list);
     }
@@ -187,6 +191,13 @@ public final class BluetoothHost {
             sKnown.put(address, k);
         }
         return k;
+    }
+
+    private static void trimKnownLocked() {
+        Iterator<Known> entries = sKnown.values().iterator();
+        while (sKnown.size() > MAX_KNOWN_DEVICES && entries.hasNext()) {
+            if (!entries.next().bonded) entries.remove();
+        }
     }
 
     /** A snapshot of what is known about {@code address} (paired devices refreshed first). */
@@ -213,6 +224,7 @@ public final class BluetoothHost {
             Known k = knownLocked(address);
             k.kind |= WindowsBluetooth.KIND_LE;
             if (name != null && !name.isEmpty()) k.name = name;
+            trimKnownLocked();
         }
     }
 
@@ -220,6 +232,7 @@ public final class BluetoothHost {
     static void sawUuids(String address, List<java.util.UUID> uuids) {
         synchronized (sKnown) {
             knownLocked(address).uuids = new ArrayList<>(uuids);
+            trimKnownLocked();
         }
     }
 

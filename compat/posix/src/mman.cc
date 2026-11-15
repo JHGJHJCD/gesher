@@ -1527,7 +1527,14 @@ int msync(void* addr, size_t length, int flags) {
     errno = EINVAL;
     return -1;
   }
+  // Linux synchronizes whole pages and rejects an address range whose end
+  // wraps. Keep its unsigned length rounding, including a zero rounded span.
+  length = RoundUp(length, state().page_size);
   const uintptr_t end = start + length;
+  if (end < start) {
+    errno = ENOMEM;
+    return -1;
+  }
   for (uintptr_t at = start; at < end;) {
     MEMORY_BASIC_INFORMATION info;
     if (VirtualQuery(reinterpret_cast<void*>(at), &info, sizeof(info)) == 0 ||

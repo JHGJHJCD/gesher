@@ -10,6 +10,7 @@ import android.bluetooth.BluetoothGattCallback;
 import android.bluetooth.BluetoothGattCharacteristic;
 import android.bluetooth.BluetoothGattDescriptor;
 import android.bluetooth.BluetoothGattService;
+import android.bluetooth.BluetoothHost;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
 import android.bluetooth.BluetoothServerSocket;
@@ -121,6 +122,12 @@ public final class BluetoothHostTest {
         BluetoothManagerService service = new BluetoothManagerService(broadcasts::add, null);
         service.setPollInterval(200);
         ServiceManager.initServiceCache(Map.of(BluetoothManagerService.NAME, service));
+
+        java.lang.reflect.Field watch = BluetoothManagerService.class.getDeclaredField("mWatch");
+        watch.setAccessible(true);
+        check(watch.get(service) == null, "radio watch is lazy before any adapter access");
+        check(BluetoothAdapter.getDefaultAdapter() != null && watch.get(service) != null,
+                "obtaining an adapter starts the watch for external radio/device broadcasts");
 
         features(true);
         permissions();
@@ -300,6 +307,19 @@ public final class BluetoothHostTest {
         check(!(Boolean) BluetoothDevice.class.getMethod("isEncrypted").invoke(headset),
                 "no encryption claimed without a secure socket");
         check(adapter.getRemoteDevice(HEADSET).equals(headset), "getRemoteDevice equals the bonded device");
+        check(!adapter.isLeExtendedAdvertisingSupported(), "extended advertisements are not exposed yet");
+        check(adapter.getBluetoothLeAdvertiser() == null && adapter.getLeMaximumAdvertisingDataLength() == 0,
+                "unavailable advertising returns no advertiser and no extended data capacity");
+        for (int i = 0; i < 1024; i++) {
+            BluetoothHost.sawLe(WindowsBluetooth.address(0xc00000000000L + i), "rotating " + i);
+        }
+        java.lang.reflect.Field cache = BluetoothHost.class.getDeclaredField("sKnown");
+        cache.setAccessible(true);
+        Map<?, ?> known = (Map<?, ?>) cache.get(null);
+        synchronized (known) {
+            check(known.size() <= 512 && known.containsKey(HEADSET),
+                    "rotating LE addresses are bounded without evicting the bonded headset");
+        }
         try {
             adapter.getRemoteDevice("00:11:22:33:44:5g");
             check(false, "an invalid address is rejected");

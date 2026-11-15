@@ -40,6 +40,7 @@ public final class BluetoothSocket implements Closeable {
     private final Object mLock = new Object();
     private long mNative;
     private boolean mConnected;
+    private boolean mConnecting;
     private boolean mSecureCounted;
     private boolean mClosed;
     private final InputStream mInput = new Input();
@@ -63,7 +64,19 @@ public final class BluetoothSocket implements Closeable {
         synchronized (mLock) {
             if (mClosed) throw new IOException("socket closed");
             if (mConnected) throw new IOException("already connected");
+            if (mConnecting) throw new IOException("connection already in progress");
+            mConnecting = true;
         }
+        try {
+            connectOnce();
+        } finally {
+            synchronized (mLock) {
+                mConnecting = false;
+            }
+        }
+    }
+
+    private void connectOnce() throws IOException {
         BluetoothHost.enforceConnect(mDevice.context());
         if (!BluetoothHost.on()) throw new IOException("Bluetooth is off");
         int[] hr = new int[1];

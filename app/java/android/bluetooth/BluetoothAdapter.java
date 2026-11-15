@@ -95,11 +95,14 @@ public final class BluetoothAdapter {
 
     private final Context mContext;
     private BluetoothLeScanner mScanner;
-    private BluetoothLeAdvertiser mAdvertiser;
     private final Map<LeScanCallback, ScanCallback> mLeScans = new HashMap<>();
 
     BluetoothAdapter(Context context) {
         mContext = context;
+        // Start the system's event watch even for apps that only read adapter/device
+        // state. Those apps still need broadcasts when Windows changes the radio or
+        // a paired device connects; they need not start discovery or pairing first.
+        BluetoothManagerService.Client.state();
     }
 
     /** @deprecated as in the module: use BluetoothManager#getAdapter(). */
@@ -247,13 +250,9 @@ public final class BluetoothAdapter {
         }
     }
 
-    /** Advertising is not available yet: its starts fail with FEATURE_UNSUPPORTED. */
+    /** Android returns null when LE advertising is unavailable on this device. */
     public BluetoothLeAdvertiser getBluetoothLeAdvertiser() {
-        if (!isLeEnabled()) return null;
-        synchronized (this) {
-            if (mAdvertiser == null) mAdvertiser = new BluetoothLeAdvertiser();
-            return mAdvertiser;
-        }
+        return null;
     }
 
     public boolean isMultipleAdvertisementSupported() {
@@ -278,7 +277,9 @@ public final class BluetoothAdapter {
     }
 
     public boolean isLeExtendedAdvertisingSupported() {
-        return BluetoothHost.adapter().extendedAdvertising();
+        // The host controller may support it, but Gesher currently exposes only
+        // legacy advertisement records and does not implement extended advertising.
+        return false;
     }
 
     public boolean isLePeriodicAdvertisingSupported() {
@@ -286,7 +287,8 @@ public final class BluetoothAdapter {
     }
 
     public int getLeMaximumAdvertisingDataLength() {
-        return BluetoothHost.adapter().maxAdvertisingDataLength;
+        // Android reports zero when extended advertising is not supported.
+        return 0;
     }
 
     public int getMaxConnectedAudioDevices() {

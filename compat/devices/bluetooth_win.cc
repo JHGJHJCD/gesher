@@ -639,6 +639,51 @@ HRESULT Await(IAsyncOperation<T>* op, T* result, int64_t timeoutMs = kOpTimeoutM
   return hr;
 }
 
+// GATT operations can outlive a Java disconnect. Cancel them while waiting so a
+// closed connection does not keep a worker (or the radio) alive until the normal
+// 30 s Windows timeout. The caller still owns any result returned before Close.
+template <typename T>
+HRESULT AwaitGatt(IAsyncOperation<T>* op, T* result, const std::atomic<bool>& closed,
+                  int64_t timeoutMs = kOpTimeoutMs) {
+  if (op == nullptr) return E_POINTER;
+  winrt::IAsyncInfo* info = nullptr;
+  HRESULT hr = Query(op, winrt::IID_IAsyncInfo, &info);
+  if (SUCCEEDED(hr)) {
+    ULONGLONG start = GetTickCount64();
+    for (;;) {
+      if (closed.load()) {
+        info->Cancel();
+        hr = E_ABORT;
+        break;
+      }
+      int status = 0;
+      hr = info->get_Status(&status);
+      if (FAILED(hr)) break;
+      if (status != 0) {
+        if (status == 1) {
+          hr = op->GetResults(result);
+        } else if (status == 2) {
+          hr = E_ABORT;
+        } else {
+          HRESULT error = E_FAIL;
+          info->get_ErrorCode(&error);
+          hr = FAILED(error) ? error : E_FAIL;
+        }
+        break;
+      }
+      if (GetTickCount64() - start >= static_cast<ULONGLONG>(timeoutMs < 0 ? 0 : timeoutMs)) {
+        info->Cancel();
+        hr = HRESULT_FROM_WIN32(ERROR_TIMEOUT);
+        break;
+      }
+      Sleep(10);
+    }
+    info->Release();
+  }
+  op->Release();
+  return hr;
+}
+
 void CloseObject(IUnknown* object) {
   winrt::IClosable* closable = nullptr;
   if (object != nullptr && SUCCEEDED(Query(object, winrt::IID_IClosable, &closable))) {
@@ -1161,12 +1206,13 @@ class WinGatt final : public Gatt {
   ~WinGatt() override { Close(); }
 
   HRESULT Connect(int timeoutMs, int* mtu) override {
+    std::lock_guard<std::mutex> connectLock(connectMu_);
     winrt::EnsureApartment();
     IBluetoothLEDevice4* device4 = nullptr;
     IInspectable* deviceId = nullptr;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      if (device_ == nullptr) return E_ABORT;
+      if (closed_.load() || device_ == nullptr) return E_ABORT;
       if (session_ == nullptr && SUCCEEDED(Query(device_, IID_IBluetoothLEDevice4, &device4))) {
         device4->get_BluetoothDeviceId(&deviceId);
         device4->Release();
@@ -1178,8 +1224,9 @@ class WinGatt final : public Gatt {
       IGattSession* session = nullptr;
       if (SUCCEEDED(Factory(kGattSessionClass, IID_IGattSessionStatics, &statics)) &&
           SUCCEEDED(statics->FromDeviceIdAsync(deviceId, &op)) &&
-          SUCCEEDED(Await(op, &session, 10000)) && session != nullptr) {
+          SUCCEEDED(AwaitOperation(op, &session, 10000)) && session != nullptr) {
         session->put_MaintainConnection(1);
+        EventRegistrationToken sessionToken{}, pduToken{};
         std::shared_ptr<Queue<GattEvent>> events = events_;
         IUnknown* status = NewHandler(IID_SessionStatusHandler,
                                       [events](IInspectable*, IInspectable* argsObject) {
@@ -1194,7 +1241,7 @@ class WinGatt final : public Gatt {
           e.value = value == 1 ? 1 : 0;
           events->Push(std::move(e));
         });
-        session->add_SessionStatusChanged(status, &sessionToken_);
+        session->add_SessionStatusChanged(status, &sessionToken);
         status->Release();
         IUnknown* pdu = NewHandler(IID_SessionInspectableHandler,
                                    [events](IInspectable* sender, IInspectable*) {
@@ -1209,13 +1256,24 @@ class WinGatt final : public Gatt {
           e.value = size;
           events->Push(std::move(e));
         });
-        session->add_MaxPduSizeChanged(pdu, &pduToken_);
+        session->add_MaxPduSizeChanged(pdu, &pduToken);
         pdu->Release();
-        std::lock_guard<std::mutex> lock(mu_);
-        if (device_ == nullptr) {
+        {
+          std::lock_guard<std::mutex> lock(mu_);
+          if (!closed_.load() && device_ != nullptr && session_ == nullptr) {
+            session_ = session;
+            sessionToken_ = sessionToken;
+            pduToken_ = pduToken;
+            session = nullptr;
+          }
+        }
+        if (session != nullptr) {
+          // Close won while FromDeviceIdAsync was running.
+          session->remove_SessionStatusChanged(sessionToken);
+          session->remove_MaxPduSizeChanged(pduToken);
+          session->put_MaintainConnection(0);
+          CloseObject(session);
           session->Release();
-        } else {
-          session_ = session;
         }
       }
       Release(statics);
@@ -1230,7 +1288,7 @@ class WinGatt final : public Gatt {
       int status = 0;
       {
         std::lock_guard<std::mutex> lock(mu_);
-        if (device_ == nullptr) return E_ABORT;
+        if (closed_.load() || device_ == nullptr) return E_ABORT;
         device_->get_ConnectionStatus(&status);
       }
       if (status == 1) break;
@@ -1248,6 +1306,9 @@ class WinGatt final : public Gatt {
   }
 
   int Discover(std::vector<Attribute>* out) override {
+    std::lock_guard<std::mutex> discoveryLock(discoveryMu_);
+    out->clear();
+    if (closed_.load()) return kGattError;
     winrt::EnsureApartment();
     ReleaseAttributes();
     IGattDeviceServicesResult* result = nullptr;
@@ -1289,7 +1350,12 @@ class WinGatt final : public Gatt {
       AddCharacteristics(service, out);
       AddIncluded(service, s.handle, primaries, &secondaries, &secondaryHandles, out);
       std::lock_guard<std::mutex> lock(mu_);
-      services_.push_back(service);  // keeps it open; closed in ReleaseAttributes
+      if (closed_.load()) {
+        CloseObject(service);
+        service->Release();
+      } else {
+        services_.push_back(service);  // keeps it open; closed in ReleaseAttributes
+      }
     }
     for (IGattDeviceService* service : secondaries) {
       Attribute s;
@@ -1300,7 +1366,16 @@ class WinGatt final : public Gatt {
       out->push_back(s);
       AddCharacteristics(service, out);
       std::lock_guard<std::mutex> lock(mu_);
-      services_.push_back(service);
+      if (closed_.load()) {
+        CloseObject(service);
+        service->Release();
+      } else {
+        services_.push_back(service);
+      }
+    }
+    if (closed_.load()) {
+      out->clear();
+      return kGattError;
     }
     return kGattSuccess;
   }
@@ -1321,7 +1396,7 @@ class WinGatt final : public Gatt {
       d->Release();
     }
     IGattReadResult* result = nullptr;
-    if (SUCCEEDED(hr)) hr = Await(op, &result);
+    if (SUCCEEDED(hr)) hr = AwaitOperation(op, &result);
     if (FAILED(hr) || result == nullptr) return kGattError;
     int communication = 1;
     result->get_Status(&communication);
@@ -1372,6 +1447,13 @@ class WinGatt final : public Gatt {
     if (c == nullptr) return kGattFailure;
     if (mode != 0) {
       std::lock_guard<std::mutex> lock(mu_);
+      // A concurrent Close/discovery must not leave an event handler attached to
+      // an attribute that ReleaseAttributes has already removed.
+      auto current = chars_.find(handle);
+      if (closed_.load() || current == chars_.end() || current->second != c) {
+        c->Release();
+        return kGattError;
+      }
       if (notifyTokens_.find(handle) == notifyTokens_.end()) {
         std::shared_ptr<Queue<GattEvent>> events = events_;
         IUnknown* handler = NewHandler(IID_ValueChangedHandler,
@@ -1405,7 +1487,7 @@ class WinGatt final : public Gatt {
       IAsyncOperation<IGattWriteResult*>* op = nullptr;
       IGattWriteResult* result = nullptr;
       if (SUCCEEDED(c3->WriteClientCharacteristicConfigurationDescriptorWithResultAsync(mode, &op)) &&
-          SUCCEEDED(Await(op, &result)) && result != nullptr) {
+          SUCCEEDED(AwaitOperation(op, &result)) && result != nullptr) {
         int communication = 1;
         IReference<uint8_t>* protocolError = nullptr;
         result->get_Status(&communication);
@@ -1420,7 +1502,7 @@ class WinGatt final : public Gatt {
       IAsyncOperation<int>* op = nullptr;
       int communication = 1;
       if (SUCCEEDED(c->WriteClientCharacteristicConfigurationDescriptorAsync(mode, &op)) &&
-          SUCCEEDED(Await(op, &communication))) {
+          SUCCEEDED(AwaitOperation(op, &communication))) {
         status = GattStatus(communication, nullptr, kGattWriteNotPermitted);
       } else {
         status = kGattError;
@@ -1483,6 +1565,8 @@ class WinGatt final : public Gatt {
   }
 
   void Close() override {
+    if (closed_.exchange(true)) return;
+    events_->Close();
     winrt::EnsureApartment();
     ReleaseAttributes();
     std::lock_guard<std::mutex> lock(mu_);
@@ -1499,10 +1583,15 @@ class WinGatt final : public Gatt {
       CloseObject(device_);
       Release(device_);
     }
-    events_->Close();
   }
 
  private:
+  template <typename T>
+  HRESULT AwaitOperation(IAsyncOperation<T>* op, T* result,
+                         int64_t timeoutMs = kOpTimeoutMs) {
+    return AwaitGatt(op, result, closed_, timeoutMs);
+  }
+
   // Android's PHY value of a Windows PHY description; 0 when it says none.
   static int PhyOf(IBluetoothLEConnectionPhyInfo* info) {
     uint8_t flag = 0;
@@ -1517,14 +1606,14 @@ class WinGatt final : public Gatt {
     IBluetoothLEDevice3* device3 = nullptr;
     {
       std::lock_guard<std::mutex> lock(mu_);
-      if (device_ == nullptr) return E_ABORT;
+      if (closed_.load() || device_ == nullptr) return E_ABORT;
       HRESULT hr = Query(device_, IID_IBluetoothLEDevice3, &device3);
       if (FAILED(hr)) return hr;
     }
     IAsyncOperation<IGattDeviceServicesResult*>* op = nullptr;
     HRESULT hr = device3->GetGattServicesWithCacheModeAsync(cacheMode, &op);
     device3->Release();
-    if (SUCCEEDED(hr)) hr = Await(op, result);
+    if (SUCCEEDED(hr)) hr = AwaitOperation(op, result);
     return hr;
   }
 
@@ -1540,7 +1629,7 @@ class WinGatt final : public Gatt {
     IGattDeviceServicesResult* result = nullptr;
     HRESULT hr = service3->GetIncludedServicesWithCacheModeAsync(kUncached, &op);
     service3->Release();
-    if (SUCCEEDED(hr)) hr = Await(op, &result);
+    if (SUCCEEDED(hr)) hr = AwaitOperation(op, &result);
     if (FAILED(hr) || result == nullptr) return;
     int communication = 1;
     IVectorView<IGattDeviceService*>* list = nullptr;
@@ -1579,7 +1668,7 @@ class WinGatt final : public Gatt {
     IGattCharacteristicsResult* result = nullptr;
     HRESULT hr = service3->GetCharacteristicsWithCacheModeAsync(kUncached, &op);
     service3->Release();
-    if (SUCCEEDED(hr)) hr = Await(op, &result);
+    if (SUCCEEDED(hr)) hr = AwaitOperation(op, &result);
     if (FAILED(hr) || result == nullptr) return;
     int communication = 1;
     IVectorView<IGattCharacteristic*>* list = nullptr;
@@ -1603,6 +1692,10 @@ class WinGatt final : public Gatt {
       out->push_back(a);
       AddDescriptors(c, out);
       std::lock_guard<std::mutex> lock(mu_);
+      if (closed_.load()) {
+        c->Release();
+        continue;
+      }
       auto it = chars_.find(a.handle);
       if (it != chars_.end()) it->second->Release();
       chars_[a.handle] = c;
@@ -1617,7 +1710,7 @@ class WinGatt final : public Gatt {
     IGattDescriptorsResult* result = nullptr;
     HRESULT hr = c3->GetDescriptorsWithCacheModeAsync(kUncached, &op);
     c3->Release();
-    if (SUCCEEDED(hr)) hr = Await(op, &result);
+    if (SUCCEEDED(hr)) hr = AwaitOperation(op, &result);
     if (FAILED(hr) || result == nullptr) return;
     int communication = 1;
     IVectorView<IGattDescriptor*>* list = nullptr;
@@ -1636,6 +1729,10 @@ class WinGatt final : public Gatt {
       d->get_AttributeHandle(&a.handle);
       out->push_back(a);
       std::lock_guard<std::mutex> lock(mu_);
+      if (closed_.load()) {
+        d->Release();
+        continue;
+      }
       auto it = descs_.find(a.handle);
       if (it != descs_.end()) it->second->Release();
       descs_[a.handle] = d;
@@ -1645,6 +1742,7 @@ class WinGatt final : public Gatt {
 
   IGattCharacteristic* Characteristic(uint16_t handle) {
     std::lock_guard<std::mutex> lock(mu_);
+    if (closed_.load()) return nullptr;
     auto it = chars_.find(handle);
     if (it == chars_.end()) return nullptr;
     it->second->AddRef();
@@ -1653,6 +1751,7 @@ class WinGatt final : public Gatt {
 
   IGattDescriptor* Descriptor(uint16_t handle) {
     std::lock_guard<std::mutex> lock(mu_);
+    if (closed_.load()) return nullptr;
     auto it = descs_.find(handle);
     if (it == descs_.end()) return nullptr;
     it->second->AddRef();
@@ -1666,7 +1765,7 @@ class WinGatt final : public Gatt {
       IGattWriteResult* result = nullptr;
       HRESULT hr = c3->WriteValueWithResultAndOptionAsync(buffer, option, &op);
       c3->Release();
-      if (SUCCEEDED(hr)) hr = Await(op, &result);
+      if (SUCCEEDED(hr)) hr = AwaitOperation(op, &result);
       if (FAILED(hr) || result == nullptr) return kGattError;
       int communication = 1;
       IReference<uint8_t>* protocolError = nullptr;
@@ -1678,7 +1777,7 @@ class WinGatt final : public Gatt {
     IAsyncOperation<int>* op = nullptr;
     int communication = 1;
     if (FAILED(c->WriteValueWithOptionAsync(buffer, option, &op)) ||
-        FAILED(Await(op, &communication))) {
+        FAILED(AwaitOperation(op, &communication))) {
       return kGattError;
     }
     return GattStatus(communication, nullptr, kGattWriteNotPermitted);
@@ -1691,7 +1790,7 @@ class WinGatt final : public Gatt {
       IGattWriteResult* result = nullptr;
       HRESULT hr = d2->WriteValueWithResultAsync(buffer, &op);
       d2->Release();
-      if (SUCCEEDED(hr)) hr = Await(op, &result);
+      if (SUCCEEDED(hr)) hr = AwaitOperation(op, &result);
       if (FAILED(hr) || result == nullptr) return kGattError;
       int communication = 1;
       IReference<uint8_t>* protocolError = nullptr;
@@ -1702,7 +1801,7 @@ class WinGatt final : public Gatt {
     }
     IAsyncOperation<int>* op = nullptr;
     int communication = 1;
-    if (FAILED(d->WriteValueAsync(buffer, &op)) || FAILED(Await(op, &communication))) {
+    if (FAILED(d->WriteValueAsync(buffer, &op)) || FAILED(AwaitOperation(op, &communication))) {
       return kGattError;
     }
     return GattStatus(communication, nullptr, kGattWriteNotPermitted);
@@ -1727,6 +1826,9 @@ class WinGatt final : public Gatt {
   }
 
   std::mutex mu_;
+  std::mutex connectMu_;
+  std::mutex discoveryMu_;
+  std::atomic<bool> closed_{false};
   IBluetoothLEDevice* device_;
   IGattSession* session_ = nullptr;
   std::shared_ptr<Queue<GattEvent>> events_;
@@ -1786,6 +1888,20 @@ bool StartWinsock() {
     return Ws().ok && WSAStartup(MAKEWORD(2, 2), &data) == 0;
   }();
   return ok;
+}
+
+HRESULT SetRfcommSecurity(SOCKET socket, bool secure) {
+  if (!secure) return S_OK;
+  // Both client sockets and listeners must require authentication AND
+  // encryption. Do not silently create an insecure socket if either fails.
+  ULONG on = TRUE;
+  if (Ws().setsockopt(socket, SOL_RFCOMM, SO_BTH_AUTHENTICATE,
+                      reinterpret_cast<const char*>(&on), sizeof(on)) == SOCKET_ERROR ||
+      Ws().setsockopt(socket, SOL_RFCOMM, SO_BTH_ENCRYPT,
+                      reinterpret_cast<const char*>(&on), sizeof(on)) == SOCKET_ERROR) {
+    return HRESULT_FROM_WIN32(WSAGetLastError());
+  }
+  return S_OK;
 }
 
 // Waits until `s` is readable (or writable) or `closed` is set, in short steps
@@ -2320,11 +2436,10 @@ class Windows final : public Backend {
       *hr = HRESULT_FROM_WIN32(WSAGetLastError());
       return nullptr;
     }
-    if (secure) {
-      // Android's secure sockets: an authenticated and encrypted link.
-      ULONG on = TRUE;
-      Ws().setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, reinterpret_cast<char*>(&on), sizeof(on));
-      Ws().setsockopt(s, SOL_RFCOMM, SO_BTH_ENCRYPT, reinterpret_cast<char*>(&on), sizeof(on));
+    *hr = SetRfcommSecurity(s, secure);
+    if (FAILED(*hr)) {
+      closesocket(s);
+      return nullptr;
     }
     SOCKADDR_BTH remote = {};
     remote.addressFamily = AF_BTH;
@@ -2349,9 +2464,10 @@ class Windows final : public Backend {
       *hr = HRESULT_FROM_WIN32(WSAGetLastError());
       return nullptr;
     }
-    if (secure) {
-      ULONG on = TRUE;
-      Ws().setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, reinterpret_cast<char*>(&on), sizeof(on));
+    *hr = SetRfcommSecurity(s, secure);
+    if (FAILED(*hr)) {
+      closesocket(s);
+      return nullptr;
     }
     SOCKADDR_BTH local = {};
     local.addressFamily = AF_BTH;

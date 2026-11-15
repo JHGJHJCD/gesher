@@ -960,6 +960,13 @@ bool Rewriter::Finish(const std::vector<CodeRange>& code_ranges) {
   AcquireSRWLockExclusive(&g_lock);
   EnsureHandler();
   auto& all = Traps();
+  // A page can be rewritten more than once. Replace a previous trap at the
+  // same instruction address so the handler cannot choose an obsolete stub.
+  // Other existing traps still describe unchanged int3 bytes in that page.
+  std::set<uintptr_t> replaced;
+  for (const TrapSite& trap : traps_) replaced.insert(trap.addr);
+  all.erase(std::remove_if(all.begin(), all.end(),
+      [&](const TrapSite& trap) { return replaced.count(trap.addr) != 0; }), all.end());
   all.insert(all.end(), traps_.begin(), traps_.end());
   std::sort(all.begin(), all.end(),
             [](const TrapSite& a, const TrapSite& b) { return a.addr < b.addr; });
@@ -1070,7 +1077,8 @@ bool RewriteOnExecution(LazyObject* o, uintptr_t entry, bool regenerated,
   std::string error;
   Rewriter rewriter(o, true, &stats, &error, 0, o->lo, o->hi, restore);
   std::set<uintptr_t> visited;
-  for (size_t next = 0; next < roots.size(); ++next) {
+  bool rewritten = true;
+  for (size_t next = 0; rewritten && next < roots.size(); ++next) {
     uintptr_t address = roots[next];
     const uintptr_t end = limit(address);
     while (address < end && visited.insert(address).second) {
@@ -1093,13 +1101,16 @@ bool RewriteOnExecution(LazyObject* o, uintptr_t entry, bool regenerated,
       }
       if (!rewriter.Rewrite(reinterpret_cast<uint8_t*>(address), in)) {
         std::fprintf(stderr, "gesher elf: %s\n", error.c_str());
+        rewritten = false;
         break;
       }
       if (EndsBlock(in)) break;
       address += in.length;
     }
   }
-  return rewriter.Finish({});
+  // Register any instructions already patched even after a later failure,
+  // but do not let the caller execute a partially rewritten page.
+  return rewriter.Finish({}) && rewritten;
 }
 
 bool HandleExecuteFault(uintptr_t addr) {
@@ -1118,10 +1129,11 @@ bool HandleExecuteFault(uintptr_t addr) {
   } else {
     const PendingPage p = it->second;
     std::map<uintptr_t, int> restore;
-    RewriteOnExecution(p.object, addr, p.regenerated, &restore);
-    restore.erase(page);
-    for (const auto& r : restore) mprotect(reinterpret_cast<void*>(r.first), kPage, r.second);
-    if (mprotect(reinterpret_cast<void*>(page), kPage, p.prot) == 0) {
+    bool rewritten = RewriteOnExecution(p.object, addr, p.regenerated, &restore);
+    for (const auto& r : restore) {
+      if (mprotect(reinterpret_cast<void*>(r.first), kPage, r.second) != 0) rewritten = false;
+    }
+    if (rewritten && mprotect(reinterpret_cast<void*>(page), kPage, p.prot) == 0) {
       FlushInstructionCache(GetCurrentProcess(), reinterpret_cast<void*>(page), kPage);
       pending.erase(page);
       p.object->done[page] = p.prot;
@@ -1799,10 +1811,14 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
     if (replace) ForgetSharedCopiesLocked(start, end);
     if (copied.backing) SharedCopies().push_back(std::move(copied));
     if (!OverlapsObjectLocked(start, end)) NewCodeObjectLocked(start, end);
-    ForEachObjectRun(start, end,
+    int protection_error = 0;
+    const bool protected_code = ForEachObjectRun(start, end,
         [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
           if (exec) {
-            mprotect(reinterpret_cast<void*>(lo), hi - lo, PendingProt(prot));
+            if (mprotect(reinterpret_cast<void*>(lo), hi - lo, PendingProt(prot)) != 0) {
+              protection_error = errno;
+              return false;
+            }
             DeferPagesLocked(o, lo, hi, prot);
           } else {
             ForgetPagesLocked(o, lo, hi);
@@ -1810,6 +1826,25 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
           return true;
         },
         [](uintptr_t, uintptr_t) { return true; });  // outside: as asked
+    if (!protected_code) {
+      // Mapping succeeded but making the code wait for rewriting failed.
+      // Never return success with executable, unrewritten pages. Retire the
+      // newly mapped range and any partial pending/copy records with it.
+      if (munmap(p, len) == 0) {
+        ForgetSharedCopiesLocked(start, end);
+        ForEachObjectRun(start, end,
+            [](uintptr_t lo, uintptr_t hi, LazyObject* o) {
+              ForgetPagesLocked(o, lo, hi);
+              return true;
+            }, [](uintptr_t, uintptr_t) { return true; });
+        auto& objects = Objects();
+        objects.erase(std::remove_if(objects.begin(), objects.end(),
+            [&](const LazyObject* o) { return o->anonymous && o->lo >= start && o->hi <= end; }),
+            objects.end());
+      }
+      errno = protection_error;
+      p = MAP_FAILED;
+    }
   }
   ReleaseSRWLockExclusive(&g_lazy_lock);
   return p;
@@ -1817,14 +1852,12 @@ void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64
 
 int SyncLoadedMemory(void* addr, size_t len, int flags) {
   const auto start = reinterpret_cast<uintptr_t>(addr);
-  if (len > UINTPTR_MAX - start || start + len > UINTPTR_MAX - (kPage - 1)) {
-    errno = EINVAL;
-    return -1;
-  }
   // Invalid flags, alignment or unmapped pages must not publish copy changes.
+  // The base call also validates the page-rounded range and its overflow.
   if (msync(addr, len, flags) != 0) return -1;
+  const size_t span = (len + kPage - 1) & ~(kPage - 1);
   AcquireSRWLockExclusive(&g_lazy_lock);
-  const bool ok = len == 0 || SharedCopies().empty() || WriteBackLocked(start, PageEnd(start, len));
+  const bool ok = span == 0 || SharedCopies().empty() || WriteBackLocked(start, start + span);
   ReleaseSRWLockExclusive(&g_lazy_lock);
   return ok ? 0 : -1;
 }

@@ -47,6 +47,10 @@ public final class BluetoothLeScanner {
     /** A device that has not advertised for this long is lost (CALLBACK_TYPE_MATCH_LOST). */
     static final long LOST_AFTER_MS = 10_000;
 
+    // Like Android's controller buffer, a full batch is delivered before the
+    // requested delay. A very long report delay must not retain every report.
+    static final int MAX_BATCH_REPORTS = 512;
+
     private final Context mContext;
 
     /** @hide */
@@ -224,10 +228,19 @@ public final class BluetoothLeScanner {
             for (Client c : sClients.values()) {
                 if (!c.mayReceive || !c.matches(result)) continue;
                 ScanResult forClient = withContext(result, c.context);
-                c.lastSeen.put(address, forClient);
                 int type = c.callbackType();
+                if ((type & (ScanSettings.CALLBACK_TYPE_FIRST_MATCH
+                        | ScanSettings.CALLBACK_TYPE_MATCH_LOST)) != 0) {
+                    c.lastSeen.put(address, forClient);
+                }
                 if (c.settings.getReportDelayMillis() > 0) {
                     c.batch.add(forClient);
+                    if (c.batch.size() >= MAX_BATCH_REPORTS) {
+                        List<ScanResult> results = new ArrayList<>(c.batch);
+                        c.batch.clear();
+                        c.batchAt = SystemClock.elapsedRealtime();
+                        calls.add(() -> batch(c, results));
+                    }
                     continue;
                 }
                 if ((type & ScanSettings.CALLBACK_TYPE_ALL_MATCHES) != 0
@@ -270,7 +283,9 @@ public final class BluetoothLeScanner {
                         calls.add(() -> batch(c, results));
                     }
                 }
-                if ((c.callbackType() & ScanSettings.CALLBACK_TYPE_MATCH_LOST) != 0) {
+                // FIRST_MATCH-only scans also forget a device after it leaves,
+                // so a later arrival can produce a new first-match callback.
+                if (!c.lastSeen.isEmpty()) {
                     for (Iterator<Map.Entry<String, ScanResult>> it = c.lastSeen.entrySet().iterator();
                             it.hasNext();) {
                         Map.Entry<String, ScanResult> e = it.next();
@@ -278,7 +293,9 @@ public final class BluetoothLeScanner {
                             ScanResult lost = e.getValue();
                             it.remove();
                             c.found.remove(e.getKey());
-                            calls.add(() -> report(c, ScanSettings.CALLBACK_TYPE_MATCH_LOST, lost));
+                            if ((c.callbackType() & ScanSettings.CALLBACK_TYPE_MATCH_LOST) != 0) {
+                                calls.add(() -> report(c, ScanSettings.CALLBACK_TYPE_MATCH_LOST, lost));
+                            }
                         }
                     }
                 }

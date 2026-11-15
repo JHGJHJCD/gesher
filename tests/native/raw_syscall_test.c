@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/eventfd.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/utsname.h>
@@ -111,11 +112,37 @@ static void check_patched_code(void) {
 }
 
 int gesher_selftest(void) {
+    errno = EDOM;
+    check("raw success preserves libc errno", raw0(SYS_getpid) == getpid() && errno == EDOM);
+    errno = EDOM;
+    check("raw failure preserves libc errno",
+          raw3(SYS_close, 12345, 0, 0) == -EBADF && errno == EDOM);
     check("raw getpid", raw0(SYS_getpid) == getpid());
     check("raw gettid", raw0(SYS_gettid) == gettid());
     check("raw syscall keeps the registers the kernel keeps", raw_keeps_registers());
     check("raw unknown number is -ENOSYS", raw0(500) == -ENOSYS);
     check("raw bad descriptor is -EBADF", raw3(SYS_close, 12345, 0, 0) == -EBADF);
+
+    // eventfd(2) predates eventfd2(2) and takes just initval. Unused argument
+    // registers must not be forwarded as libc eventfd's flags.
+    long event = raw3(SYS_eventfd, 7, -1, 0);
+    uint64_t event_value = 0;
+    check("raw eventfd ignores its unused flags register", event >= 0);
+    if (event >= 0) {
+        check("raw eventfd retains initial value",
+              read((int)event, &event_value, sizeof(event_value)) == sizeof(event_value) &&
+                  event_value == 7);
+        close((int)event);
+    }
+    uint64_t cpus[16] = {0};
+    long affinity = raw3(SYS_sched_getaffinity, 0, sizeof(cpus), (long)&cpus);
+    uint64_t any_cpu = 0;
+    for (size_t i = 0; i < sizeof(cpus) / sizeof(cpus[0]); ++i) any_cpu |= cpus[i];
+    check("raw sched_getaffinity returns mask bytes instead of libc zero",
+          affinity > 0 && affinity <= (long)sizeof(cpus) && affinity % sizeof(uint64_t) == 0 &&
+              any_cpu != 0);
+    check("raw rt_sigprocmask validates kernel sigsetsize",
+          raw6(SYS_rt_sigprocmask, 0, 0, 0, 0, 0, 0) == -EINVAL);
 
     int fds[2];
     if (pipe(fds) == 0) {
@@ -148,6 +175,8 @@ int gesher_selftest(void) {
                                    (ts.tv_sec != 0 || ts.tv_nsec != 0));
 
     check("syscall(2) getppid", syscall(SYS_getppid) == getppid());
+    errno = EDOM;
+    check("syscall(2) success preserves errno", syscall(SYS_getpid) == getpid() && errno == EDOM);
     errno = 0;
     check("syscall(2) failure sets errno", syscall(SYS_close, 12345) == -1 && errno == EBADF);
 
@@ -176,11 +205,21 @@ int gesher_selftest(void) {
                                     m[2].rm_so == 6 && m[2].rm_eo == 8);
     check("regexec no match", regexec(&re, "nothing", 0, NULL, 0) == REG_NOMATCH);
     regfree(&re);
+    const char bounded[] = {'x', '4', '2', 'y'};
+    check("regcomp bounded input", regcomp(&re, "[0-9]+", REG_EXTENDED) == 0);
+    m[0].rm_so = 1;
+    m[0].rm_eo = 3;
+    check("REG_STARTEND accepts a non-terminated byte sequence",
+          regexec(&re, bounded, 1, m, REG_STARTEND) == 0 &&
+              m[0].rm_so == 1 && m[0].rm_eo == 3);
+    regfree(&re);
     check("regcomp basic, icase", regcomp(&re, "^fr\\(i\\)da", REG_ICASE | REG_NOSUB) == 0 &&
                                       regexec(&re, "FRIDA-server", 0, NULL, 0) == 0);
     regfree(&re);
     char message[64];
     check("regcomp bad pattern", regcomp(&re, "(", REG_EXTENDED) != 0);
+    check("unsupported REG_NEWLINE is rejected explicitly",
+          regcomp(&re, "^x$", REG_EXTENDED | REG_NEWLINE) == REG_INVARG);
     check("regerror", regerror(REG_NOMATCH, &re, message, sizeof(message)) > 1 &&
                           message[0] != '\0');
 

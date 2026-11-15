@@ -113,6 +113,9 @@ jobs:
           python3 tools/test_positioned_io_contracts.py --sanitize
           python3 tools/test_memfd_contracts.py --sanitize
           python3 tools/test_memfd_tail_contracts.py
+          python3 tools/test_raw_syscall_contracts.py --sanitize
+          python3 tools/test_deferred_rewrite_failures.py --sanitize
+          python3 tools/test_msync_contracts.py --sanitize
           python3 tools/test_retriever_frame_contracts.py --sanitize
           python3 tools/test_utc_time_contracts.py --sanitize
 
@@ -217,6 +220,14 @@ jobs:
         run: |
           python3 tools/test_webstorage_origin_contracts.py --java-home "$JAVA_HOME"
           python3 tools/test_running_tasks_contracts.py
+
+      - name: Bluetooth cancellation, notifications and scan retention contracts
+        run: |
+          python3 tools/test_bluetooth_native_contracts.py --sanitize
+          python3 tools/test_bluetooth_gatt_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_bluetooth_socket_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_bluetooth_scan_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_bluetooth_watch_contracts.py --java-home "$JAVA_HOME"
 
       - name: MediaDataSource adapter contracts with checked JNI and UBSan
         run: python3 tools/test_media_callback_adapter.py
