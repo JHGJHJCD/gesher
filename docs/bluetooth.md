@@ -1,6 +1,6 @@
 # Bluetooth (bluetooth track)
 
-Design: [0084](decisions/0084-bluetooth-host-radio.md). Tests:
+Design: [0085](decisions/0085-bluetooth-host-radio.md). Tests:
 `tests/windows/tracks/61-bluetooth.ps1` with `gesher.services.BluetoothHostTest`
 (services-tests.dex), and `.github/workflows/bluetooth.yml` with
 `tests/bluetooth/bluetooth_probe.cc` (the backend alone).
@@ -19,15 +19,26 @@ Design: [0084](decisions/0084-bluetooth-host-radio.md). Tests:
 
 ## What apps get
 
+- **System features**: `FEATURE_BLUETOOTH` when Windows has an adapter (looked at when
+  the system server starts), `FEATURE_BLUETOOTH_LE` when it also reports LE support; both
+  absent without a radio (the CI runners). `hasSystemFeature`, `getSystemAvailableFeatures`
+  and the features cache in shared memory agree.
 - **Adapter**: present when Windows has a radio (WinRT `BluetoothAdapter.GetDefaultAsync`).
   `getState()`/`isEnabled()` follow Windows' radio (Settings, Bluetooth on/off).
   `getName()` is the computer name; `getAddress()` is `02:00:00:00:00:00` as on Android.
   `enable()`/`disable()` ask Windows (`Radio.SetStateAsync`, after `RequestAccessAsync`);
-  apps targeting API 33+ get false, as on Android.
+  apps targeting API 33+ get false, as on Android. Without a Radio object (Windows.Devices.
+  Radios unavailable) the state comes from BluetoothApis (a local radio is listed only
+  while it is on).
 - **Permissions**: BLUETOOTH_CONNECT / BLUETOOTH_SCAN for apps targeting API 31+,
   BLUETOOTH / BLUETOOTH_ADMIN below, else SecurityException. Scan results need
   ACCESS_FINE_LOCATION (API 29+, either location permission below) unless BLUETOOTH_SCAN
   is declared `neverForLocation`; without it the scan runs silently, as on Android.
+  `gesher.bluetooth` checks its Binder callers itself, by package and target SDK, as the
+  module's service does: switching the radio needs BLUETOOTH_CONNECT (API 31+) or
+  BLUETOOTH_ADMIN and is refused to apps targeting API 33+; since it is the PC's radio the
+  user also confirms it (the runtime-permission consent dialog). Discovery needs
+  BLUETOOTH_SCAN / BLUETOOTH_ADMIN, SDP refresh BLUETOOTH_CONNECT / BLUETOOTH.
 - **Paired devices**: Windows' pairings, classic and LE (`DeviceInformation.FindAllAsync`
   with the paired selectors), with name, class of device, connection state and the SDP
   service classes of their records (`BluetoothDevice.SdpRecords`, parsed for
@@ -43,17 +54,29 @@ Design: [0084](decisions/0084-bluetooth-host-radio.md). Tests:
   PendingIntent scans and the legacy `startLeScan` work. Callbacks on the main thread.
 - **GATT client**: `connectGatt` opens the device (`FromBluetoothAddressAsync`, with the
   address type) and a GattSession with MaintainConnection; Windows connects. Discovery
-  reads services, characteristics and descriptors uncached; reads and writes (with and
+  reads services, characteristics and descriptors uncached, and included services
+  (`GetIncludedServicesAsync`): those that are not primary services are listed as
+  SERVICE_TYPE_SECONDARY; reads and writes (with and
   without response) map to Windows' calls with their ATT error as the status (an
   unreachable device is 133, as on Android). One request at a time, as the module.
   Writing a CCCD subscribes through `WriteClientCharacteristicConfigurationDescriptor`;
   notifications and indications arrive as `onCharacteristicChanged`. `requestMtu` reports
   Windows' negotiated MaxPduSize (never above the request). `autoConnect` retries until
-  the device is there. `readRemoteRssi` answers the last advertisement's RSSI.
+  the device is there. `readRemoteRssi` answers the last advertisement's RSSI. The hidden
+  `readUsingCharacteristicUuid` reads the first discovered characteristic of the UUID in
+  the handle range (false when there is none). `readPhy` reports the PHY Windows 11
+  gives (`GetConnectionPhy`), else 1M with GATT_REQUEST_NOT_SUPPORTED; `setPreferredPhy`
+  is declined (GATT_REQUEST_NOT_SUPPORTED, the PHY unchanged): Windows chooses it. Several
+  clients of the process may connect to one device; it stays connected until the last
+  one closes.
 - **RFCOMM**: `createRfcommSocketToServiceRecord` / `createInsecure...` connect AF_BTH
   sockets by service UUID (Windows looks it up in SDP); the hidden `createRfcommSocket(int)`
   that SPP apps call by reflection connects to a channel. Streams, `available()`, and an
-  IOException at the end of the stream, as on Android. `listenUsingRfcommWithServiceRecord`
+  IOException at the end of the stream, as on Android. `connect()` is a non-blocking
+  connect and a wait, so `close()` from another thread cancels it. Secure sockets require
+  authentication and encryption (SO_BTH_AUTHENTICATE, SO_BTH_ENCRYPT); the hidden
+  `isEncrypted()` is true only while such a socket of the process is connected to the
+  device, since Windows reports no encryption of other links (it answers false then). `listenUsingRfcommWithServiceRecord`
   binds a channel and registers an SDP record (WSASetService).
 - **Profiles**: `getProfileProxy` gives BluetoothA2dp and BluetoothHeadset proxies listing
   the paired devices Windows has connected that offer an A2DP sink / hands-free service.
@@ -69,7 +92,7 @@ Design: [0084](decisions/0084-bluetooth-host-radio.md). Tests:
   GattServiceProvider could back it), L2CAP channels, LE Audio, HID, PAN, PBAP/MAP.
 - Pairing from the app: `createBond()` answers false; users pair in Windows' Settings.
   ACTION_REQUEST_ENABLE / REQUEST_DISCOVERABLE have no activity.
-- Reliable writes, PHY selection (1M is reported), connection priority (accepted only).
+- Reliable writes, PHY selection (declined), connection priority (accepted only).
 - In device mode each app process has its own scan watcher and GATT sessions; Windows
   shares the radio between them.
 

@@ -39,6 +39,7 @@ public final class WindowsBluetooth {
     public static final int ATTRIBUTE_SERVICE = 0;
     public static final int ATTRIBUTE_CHARACTERISTIC = 1;
     public static final int ATTRIBUTE_DESCRIPTOR = 2;
+    public static final int ATTRIBUTE_INCLUDED = 3;
 
     /** The local radio. */
     public static final class Adapter {
@@ -266,10 +267,12 @@ public final class WindowsBluetooth {
     public static native int nativeGattNotify(long gatt, int handle, int mode);
     public static native int nativeGattMtu(long gatt);
     public static native byte[] nativeGattNext(long gatt, int timeoutMs, int[] meta);
+    public static native int nativeGattPhy(long gatt, int[] phy);
     public static native void nativeGattClose(long gatt);
 
-    public static native long nativeRfcommConnect(long address, String uuid, int channel,
-            boolean secure, int[] out);
+    public static native long nativeRfcommOpen(long address, String uuid, int channel,
+            boolean secure, int[] hr);
+    public static native int nativeRfcommConnect(long socket, int[] channel);
     public static native int nativeRfcommRead(long socket, byte[] buffer, int offset, int length);
     public static native int nativeRfcommWrite(long socket, byte[] buffer, int offset, int length);
     public static native int nativeRfcommAvailable(long socket);

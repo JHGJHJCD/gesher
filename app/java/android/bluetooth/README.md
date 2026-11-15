@@ -1,6 +1,6 @@
 # The Bluetooth module's API
 
-Since the bluetooth track ([docs/bluetooth.md](../../../../docs/bluetooth.md), ADR 0084)
+Since the bluetooth track ([docs/bluetooth.md](../../../../docs/bluetooth.md), ADR 0085)
 these classes run over the host's radio (`com.gesher.server.WindowsBluetooth`): there is
 an adapter when Windows has a Bluetooth radio (or with `GESHER_BLUETOOTH_TEST=1`), and
 none otherwise (`BluetoothManager.getAdapter()` and `BluetoothAdapter.getDefaultAdapter()`

@@ -1,4 +1,4 @@
-# Bluetooth (docs/bluetooth.md, ADR 0084): the android.bluetooth classes over the host
+# Bluetooth (docs/bluetooth.md, ADR 0085): the android.bluetooth classes over the host
 # radio. Dot-sourced by run-tests.ps1, using Check, NoDrive, $Dir, $root and $failed from
 # there and RunTimed from 50-services.ps1. The runners have no radio: one run checks
 # that there is no adapter (and logs what Windows answered); the other runs every path

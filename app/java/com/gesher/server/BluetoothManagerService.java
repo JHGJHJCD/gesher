@@ -64,9 +64,58 @@ public final class BluetoothManagerService extends Binder {
         void send(Intent intent);
     }
 
+    /**
+     * Who is calling, as the Bluetooth module's service checks it: the caller's package
+     * (null for the system), its target SDK, its permissions, and the user's consent to
+     * switching the PC's radio.
+     */
+    public interface Policy {
+        /** The calling package, or null when the system calls. */
+        String callerPackage();
+
+        int targetSdk(String packageName);
+
+        boolean granted(String packageName, String permission);
+
+        /** Asks the user (Gesher's consent dialog) whether {@code packageName} may do it. */
+        boolean confirm(String packageName, String what);
+    }
+
+    /** Callers' identity and grants from the system server's services. */
+    static final class ServerPolicy implements Policy {
+        private final CallerIdentity mCallers;
+        private final PackageManagerService mPm;
+
+        ServerPolicy(CallerIdentity callers, PackageManagerService pm) {
+            mCallers = callers;
+            mPm = pm;
+        }
+
+        @Override
+        public String callerPackage() {
+            return mCallers.isSystem() ? null : mCallers.callerPackage();
+        }
+
+        @Override
+        public int targetSdk(String packageName) {
+            ApkPackage p = mPm.get(packageName);
+            return p == null ? 0 : p.parsed.getTargetSdkVersion();
+        }
+
+        @Override
+        public boolean granted(String packageName, String permission) {
+            return mPm.permissions().checkPermission(packageName, permission)
+                    == PackageManager.PERMISSION_GRANTED;
+        }
+
+        @Override
+        public boolean confirm(String packageName, String what) {
+            return PermissionRequests.confirm(packageName, what);
+        }
+    }
+
     private final Broadcaster mBroadcaster;
-    private final PackageManagerService mPm;
-    private final CallerIdentity mCallers;
+    private final Policy mPolicy;
     private final Object mLock = new Object();
     private final Object mPollLock = new Object();
     private Thread mWatch;
@@ -77,17 +126,15 @@ public final class BluetoothManagerService extends Binder {
     private long mPollMs = 2000;
 
     BluetoothManagerService(ActivityManagerService am, PackageManagerService pm) {
-        this(intent -> am.sendBroadcastFor("android", intent, null), pm,
-                am == null ? null : am.callers());
+        this(intent -> am.sendBroadcastFor("android", intent, null),
+                am == null || pm == null ? null : new ServerPolicy(am.callers(), pm));
     }
 
-    /** For tests: broadcasts go to {@code broadcaster}; no caller checks without {@code pm}. */
-    public BluetoothManagerService(Broadcaster broadcaster, PackageManagerService pm,
-            CallerIdentity callers) {
+    /** For tests: broadcasts go to {@code broadcaster}; a null policy trusts every caller. */
+    public BluetoothManagerService(Broadcaster broadcaster, Policy policy) {
         super(DESCRIPTOR);
         mBroadcaster = broadcaster;
-        mPm = pm;
-        mCallers = callers;
+        mPolicy = policy;
     }
 
     /** For tests: how often the watch looks at Windows. */
@@ -112,21 +159,20 @@ public final class BluetoothManagerService extends Binder {
                 }
                 case SET_ENABLED: {
                     boolean on = data.readBoolean();
-                    requirePermission(true);
-                    boolean ok = setEnabled(on);
+                    boolean ok = mayToggle(on) && setEnabled(on);
                     reply.writeNoException();
                     reply.writeBoolean(ok);
                     return true;
                 }
                 case START_DISCOVERY: {
-                    requirePermission(false);
+                    enforceScan();
                     boolean ok = startDiscovery();
                     reply.writeNoException();
                     reply.writeBoolean(ok);
                     return true;
                 }
                 case CANCEL_DISCOVERY: {
-                    requirePermission(false);
+                    enforceScan();
                     boolean ok = cancelDiscovery();
                     reply.writeNoException();
                     reply.writeBoolean(ok);
@@ -138,7 +184,7 @@ public final class BluetoothManagerService extends Binder {
                     return true;
                 case FETCH_UUIDS: {
                     String address = data.readString();
-                    requirePermission(true);
+                    enforceConnect();
                     boolean ok = fetchUuids(address);
                     reply.writeNoException();
                     reply.writeBoolean(ok);
@@ -153,20 +199,54 @@ public final class BluetoothManagerService extends Binder {
         }
     }
 
-    /** The caller holds some Bluetooth permission (the app side checks the exact one). */
-    private void requirePermission(boolean connect) {
-        if (mCallers == null || mPm == null || mCallers.isSystem()) return;
-        String pkg = mCallers.callerPackage();
-        String[] any = connect
-                ? new String[] {"android.permission.BLUETOOTH_CONNECT", "android.permission.BLUETOOTH_ADMIN",
-                    "android.permission.BLUETOOTH"}
-                : new String[] {"android.permission.BLUETOOTH_SCAN", "android.permission.BLUETOOTH_ADMIN"};
-        for (String permission : any) {
-            if (mPm.permissions().checkPermission(pkg, permission) == PackageManager.PERMISSION_GRANTED) {
-                return;
-            }
+    private static final String CONNECT = "android.permission.BLUETOOTH_CONNECT";
+    private static final String SCAN = "android.permission.BLUETOOTH_SCAN";
+    private static final String LEGACY = "android.permission.BLUETOOTH";
+    private static final String ADMIN = "android.permission.BLUETOOTH_ADMIN";
+
+    /** The calling package, or null for the system (and without a policy). */
+    private String caller() {
+        return mPolicy == null ? null : mPolicy.callerPackage();
+    }
+
+    private void require(String pkg, String modern, String legacy) {
+        String permission = mPolicy.targetSdk(pkg) >= 31 ? modern : legacy;
+        if (!mPolicy.granted(pkg, permission)) {
+            throw new SecurityException("Need " + permission + " permission for " + pkg);
         }
-        throw new SecurityException(pkg + " has no Bluetooth permission (" + any[0] + ")");
+    }
+
+    /** As the module's startDiscovery/cancelDiscovery: BLUETOOTH_SCAN, or BLUETOOTH_ADMIN below 31. */
+    private void enforceScan() {
+        String pkg = caller();
+        if (pkg != null) require(pkg, SCAN, ADMIN);
+    }
+
+    /** As the module's fetchUuidsWithSdp: BLUETOOTH_CONNECT, or BLUETOOTH below 31. */
+    private void enforceConnect() {
+        String pkg = caller();
+        if (pkg != null) require(pkg, CONNECT, LEGACY);
+    }
+
+    /**
+     * As the module's enable()/disable(): apps targeting API 33+ may not switch the radio
+     * (false); below, BLUETOOTH_CONNECT (31+) or BLUETOOTH_ADMIN, and since this is the
+     * PC's own radio, the user confirms (Gesher's consent dialog).
+     */
+    boolean mayToggle(boolean on) {
+        String pkg = caller();
+        if (pkg == null) return true;
+        if (mPolicy.targetSdk(pkg) >= 33) {
+            SystemServer.log("bluetooth: " + pkg + " (API 33+) may not turn the radio "
+                    + (on ? "on" : "off"));
+            return false;
+        }
+        require(pkg, CONNECT, ADMIN);
+        WindowsBluetooth.Adapter adapter = WindowsBluetooth.adapter(0);
+        if (!adapter.present || adapter.on == on) return true;  // nothing to switch
+        boolean allowed = mPolicy.confirm(pkg, on ? "Turn Windows Bluetooth on" : "Turn Windows Bluetooth off");
+        if (!allowed) SystemServer.log("bluetooth: the user did not let " + pkg + " switch the radio");
+        return allowed;
     }
 
     // --- state ---------------------------------------------------------------------------

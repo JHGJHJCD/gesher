@@ -1,4 +1,4 @@
-# 0084: Bluetooth over the host radio (bluetooth track)
+# 0085: Bluetooth over the host radio (bluetooth track)
 
 Status: accepted (see docs/bluetooth.md)
 

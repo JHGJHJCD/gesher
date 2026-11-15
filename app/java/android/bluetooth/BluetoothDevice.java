@@ -235,9 +235,14 @@ public final class BluetoothDevice implements Parcelable, Attributable {
         return BluetoothHost.known(mAddress).connected || BluetoothGatt.isConnected(mAddress);
     }
 
-    /** @hide */
+    /**
+     * @hide Encryption Gesher can vouch for: a secure RFCOMM socket of this process is
+     * connected to the device (Windows opened it requiring authentication and encryption).
+     * Windows reports no link encryption otherwise (ACL or GATT), so other links answer false.
+     */
     public boolean isEncrypted() {
-        return isConnected();
+        BluetoothHost.enforceConnect(mContext);
+        return BluetoothSocket.encryptedLink(mAddress);
     }
 
     public ParcelUuid[] getUuids() {

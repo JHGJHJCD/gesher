@@ -40,6 +40,7 @@ public final class BluetoothSocket implements Closeable {
     private final Object mLock = new Object();
     private long mNative;
     private boolean mConnected;
+    private boolean mSecureCounted;
     private boolean mClosed;
     private final InputStream mInput = new Input();
     private final OutputStream mOutput = new Output();
@@ -65,24 +66,67 @@ public final class BluetoothSocket implements Closeable {
         }
         BluetoothHost.enforceConnect(mDevice.context());
         if (!BluetoothHost.on()) throw new IOException("Bluetooth is off");
-        // A discovery in progress slows a connection down; Android apps are told to cancel it.
-        int[] out = new int[2];
-        long handle = WindowsBluetooth.nativeRfcommConnect(mDevice.value(),
-                mUuid == null ? null : mUuid.toString(), mChannel, mSecure, out);
-        if (handle == 0) {
-            Log.w(TAG, "connect " + mDevice + " " + (mUuid != null ? mUuid : "channel " + mChannel)
-                    + ": " + WindowsBluetooth.hresult(out[0]));
-            throw new IOException("read failed, socket might closed or timeout, read ret: -1 ("
-                    + WindowsBluetooth.hresult(out[0]) + ")");
-        }
+        int[] hr = new int[1];
+        long handle = WindowsBluetooth.nativeRfcommOpen(mDevice.value(),
+                mUuid == null ? null : mUuid.toString(), mChannel, mSecure, hr);
+        if (handle == 0) throw failed(hr[0]);
         synchronized (mLock) {
             if (mClosed) {
                 WindowsBluetooth.nativeRfcommClose(handle);
                 throw new IOException("socket closed");
             }
+            // close() from another thread now ends the connect below, as on Android.
             mNative = handle;
-            mChannel = out[1];
+        }
+        int[] channel = new int[] {mChannel};
+        int result = WindowsBluetooth.nativeRfcommConnect(handle, channel);
+        synchronized (mLock) {
+            if (mClosed) throw new IOException("socket closed");
+            if (result < 0) {
+                mNative = 0;
+                WindowsBluetooth.nativeRfcommClose(handle);
+                throw failed(result);
+            }
+            mChannel = channel[0];
             mConnected = true;
+            if (mSecure) {
+                secureLink(mDevice.getAddress(), 1);
+                mSecureCounted = true;
+            }
+        }
+    }
+
+    /** The link is gone (closed or broken); with mLock held. */
+    private void dropLink() {
+        mConnected = false;
+        if (mSecureCounted) {
+            mSecureCounted = false;
+            secureLink(mDevice.getAddress(), -1);
+        }
+    }
+
+    private IOException failed(int hr) {
+        Log.w(TAG, "connect " + mDevice + " " + (mUuid != null ? mUuid : "channel " + mChannel)
+                + ": " + WindowsBluetooth.hresult(hr));
+        return new IOException("read failed, socket might closed or timeout, read ret: -1 ("
+                + WindowsBluetooth.hresult(hr) + ")");
+    }
+
+    // Connected secure sockets per device: Windows opened them with authentication and
+    // encryption required (SO_BTH_AUTHENTICATE, SO_BTH_ENCRYPT), so their link is encrypted.
+    private static final java.util.Map<String, Integer> sSecureLinks = new java.util.HashMap<>();
+
+    private static void secureLink(String address, int delta) {
+        synchronized (sSecureLinks) {
+            int n = sSecureLinks.getOrDefault(address, 0) + delta;
+            if (n > 0) sSecureLinks.put(address, n); else sSecureLinks.remove(address);
+        }
+    }
+
+    /** Whether a secure socket of this process is connected to {@code address}. */
+    static boolean encryptedLink(String address) {
+        synchronized (sSecureLinks) {
+            return sSecureLinks.containsKey(address);
         }
     }
 
@@ -98,7 +142,7 @@ public final class BluetoothSocket implements Closeable {
         synchronized (mLock) {
             if (mClosed) return;
             mClosed = true;
-            mConnected = false;
+            dropLink();
             handle = mNative;
             mNative = 0;
         }
@@ -136,7 +180,7 @@ public final class BluetoothSocket implements Closeable {
 
     private long handle() throws IOException {
         synchronized (mLock) {
-            if (mClosed || mNative == 0) throw new IOException("socket closed");
+            if (mClosed || mNative == 0 || !mConnected) throw new IOException("socket closed");
             return mNative;
         }
     }
@@ -156,7 +200,7 @@ public final class BluetoothSocket implements Closeable {
             int n = WindowsBluetooth.nativeRfcommRead(handle(), b, off, len);
             if (n <= 0) {
                 synchronized (mLock) {
-                    mConnected = false;
+                    dropLink();
                 }
                 // The module throws at the end of the stream too.
                 throw new IOException("bt socket closed, read return: " + (n == 0 ? -1 : n));
@@ -188,7 +232,7 @@ public final class BluetoothSocket implements Closeable {
             int n = WindowsBluetooth.nativeRfcommWrite(handle(), b, off, len);
             if (n < 0) {
                 synchronized (mLock) {
-                    mConnected = false;
+                    dropLink();
                 }
                 throw new IOException("bt socket closed, write return: " + n);
             }

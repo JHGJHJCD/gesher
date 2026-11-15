@@ -71,7 +71,10 @@ public final class BluetoothGatt implements BluetoothProfile {
     static final int SYNTHETIC = 0x10000;
     private static final int CONNECT_TIMEOUT_MS = 30000;
 
-    private static final Set<String> sConnected = Collections.synchronizedSet(new HashSet<>());
+    /** Connected GATT clients of this process, per device (two clients may share one). */
+    private static final Map<String, Integer> sConnected = new HashMap<>();
+    private final java.util.concurrent.atomic.AtomicBoolean mCounted =
+            new java.util.concurrent.atomic.AtomicBoolean();
 
     private final BluetoothDevice mDevice;
     private final Context mContext;
@@ -116,13 +119,25 @@ public final class BluetoothGatt implements BluetoothProfile {
 
     /** Whether some GATT connection of this process to {@code address} is up. */
     static boolean isConnected(String address) {
-        return sConnected.contains(address);
+        synchronized (sConnected) {
+            return sConnected.containsKey(address);
+        }
+    }
+
+    /** This client's link counts for its device while it is up. */
+    private void counted(boolean up) {
+        if (mCounted.getAndSet(up) == up) return;
+        String address = mDevice.getAddress();
+        synchronized (sConnected) {
+            int n = sConnected.getOrDefault(address, 0) + (up ? 1 : -1);
+            if (n > 0) sConnected.put(address, n); else sConnected.remove(address);
+        }
     }
 
     static List<BluetoothDevice> connectedDevices() {
         List<BluetoothDevice> out = new ArrayList<>();
         synchronized (sConnected) {
-            for (String address : sConnected) out.add(new BluetoothDevice(address, 0));
+            for (String address : sConnected.keySet()) out.add(new BluetoothDevice(address, 0));
         }
         return out;
     }
@@ -183,7 +198,7 @@ public final class BluetoothGatt implements BluetoothProfile {
                 }
             }
             if (connected) {
-                sConnected.add(mDevice.getAddress());
+                counted(true);
                 startEvents(handle, generation);
                 post(() -> mCallback.onConnectionStateChange(this, GATT_SUCCESS, STATE_CONNECTED));
                 return;
@@ -265,7 +280,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             mBusy = false;
             mGeneration++;
         }
-        sConnected.remove(mDevice.getAddress());
+        counted(false);
         if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
         post(() -> mCallback.onConnectionStateChange(this, status, STATE_DISCONNECTED));
         if (mAutoConnect) connectAsync();
@@ -293,7 +308,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             mBusy = false;
             mGeneration++;
         }
-        sConnected.remove(mDevice.getAddress());
+        counted(false);
         if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
         if (wasUp) post(() -> mCallback.onConnectionStateChange(this, GATT_SUCCESS, STATE_DISCONNECTED));
     }
@@ -308,7 +323,7 @@ public final class BluetoothGatt implements BluetoothProfile {
             mState = STATE_DISCONNECTED;
             mGeneration++;
         }
-        sConnected.remove(mDevice.getAddress());
+        counted(false);
         if (handle != 0) WindowsBluetooth.nativeGattClose(handle);
         mWorker.shutdownNow();
         if (mOwnThread != null) mOwnThread.quitSafely();
@@ -363,6 +378,8 @@ public final class BluetoothGatt implements BluetoothProfile {
         List<BluetoothGattService> services = new ArrayList<>();
         Map<Integer, BluetoothGattCharacteristic> characteristics = new HashMap<>();
         Map<Integer, BluetoothGattDescriptor> descriptors = new HashMap<>();
+        Map<Integer, BluetoothGattService> byHandle = new HashMap<>();
+        List<int[]> includes = new ArrayList<>();  // {including service, included service}
         BluetoothGattService service = null;
         BluetoothGattCharacteristic characteristic = null;
         for (String line : lines) {
@@ -375,9 +392,14 @@ public final class BluetoothGatt implements BluetoothProfile {
             if (kind == WindowsBluetooth.ATTRIBUTE_SERVICE) {
                 addCccd(characteristic, descriptors);
                 characteristic = null;
-                service = new BluetoothGattService(mDevice, uuid, handle,
-                        BluetoothGattService.SERVICE_TYPE_PRIMARY);
+                // properties: 0 primary, 1 secondary (reached as an included service).
+                service = new BluetoothGattService(mDevice, uuid, handle, properties == 1
+                        ? BluetoothGattService.SERVICE_TYPE_SECONDARY
+                        : BluetoothGattService.SERVICE_TYPE_PRIMARY);
                 services.add(service);
+                byHandle.put(handle, service);
+            } else if (kind == WindowsBluetooth.ATTRIBUTE_INCLUDED) {
+                includes.add(new int[] {properties, handle});
             } else if (kind == WindowsBluetooth.ATTRIBUTE_CHARACTERISTIC && service != null) {
                 addCccd(characteristic, descriptors);
                 characteristic = new BluetoothGattCharacteristic(service, uuid, handle, properties, 0);
@@ -390,6 +412,11 @@ public final class BluetoothGatt implements BluetoothProfile {
             }
         }
         addCccd(characteristic, descriptors);
+        for (int[] pair : includes) {
+            BluetoothGattService including = byHandle.get(pair[0]);
+            BluetoothGattService included = byHandle.get(pair[1]);
+            if (including != null && included != null) including.addIncludedService(included);
+        }
         synchronized (mLock) {
             mServices.clear();
             mServices.addAll(services);
@@ -486,9 +513,25 @@ public final class BluetoothGatt implements BluetoothProfile {
         return false;
     }
 
-    /** @hide */
+    /**
+     * @hide Reads the first discovered characteristic of {@code uuid} whose handle is in
+     * [startHandle, endHandle]; onCharacteristicRead reports it, as in the module (which
+     * also drops results for characteristics it has not discovered). False when none is.
+     */
     public boolean readUsingCharacteristicUuid(UUID uuid, int startHandle, int endHandle) {
-        return false;
+        BluetoothHost.enforceConnect(mContext);
+        BluetoothGattCharacteristic match = null;
+        synchronized (mLock) {
+            for (Map.Entry<Integer, BluetoothGattCharacteristic> e : new java.util.TreeMap<>(mCharacteristics).entrySet()) {
+                int handle = e.getKey();
+                if (handle >= startHandle && handle <= endHandle
+                        && e.getValue().getUuid().equals(uuid)) {
+                    match = e.getValue();
+                    break;
+                }
+            }
+        }
+        return match != null && readCharacteristic(match);
     }
 
     @Deprecated
@@ -713,17 +756,41 @@ public final class BluetoothGatt implements BluetoothProfile {
         return BluetoothStatusCodes.FEATURE_NOT_SUPPORTED;
     }
 
-    /** Windows chooses the PHY: 1M is reported. */
+    /**
+     * Windows chooses the PHY and offers applications no way to ask for another: the
+     * request is declined (GATT_REQUEST_NOT_SUPPORTED, as a controller that refuses it),
+     * reporting the PHY Windows says the link uses (Windows 11), else 1M.
+     */
     public void setPreferredPhy(int txPhy, int rxPhy, int phyOptions) {
         BluetoothHost.enforceConnect(mContext);
-        post(() -> mCallback.onPhyUpdate(this, BluetoothDevice.PHY_LE_1M, BluetoothDevice.PHY_LE_1M,
-                GATT_SUCCESS));
+        reportPhy(true);
     }
 
+    /** The link's PHY as Windows 11 reports it; before that Windows does not say. */
     public void readPhy() {
         BluetoothHost.enforceConnect(mContext);
-        post(() -> mCallback.onPhyRead(this, BluetoothDevice.PHY_LE_1M, BluetoothDevice.PHY_LE_1M,
-                GATT_SUCCESS));
+        reportPhy(false);
+    }
+
+    private void reportPhy(boolean update) {
+        int[] generation = new int[1];
+        long handle = connected(generation);
+        submit(() -> {
+            int[] phy = new int[] {BluetoothDevice.PHY_LE_1M, BluetoothDevice.PHY_LE_1M};
+            int status = handle == 0 ? GATT_FAILURE : WindowsBluetooth.nativeGattPhy(handle, phy);
+            if (status != GATT_SUCCESS) {
+                phy[0] = BluetoothDevice.PHY_LE_1M;
+                phy[1] = BluetoothDevice.PHY_LE_1M;
+            }
+            final int result = update ? GATT_REQUEST_NOT_SUPPORTED : status;
+            post(() -> {
+                if (update) {
+                    mCallback.onPhyUpdate(this, phy[0], phy[1], result);
+                } else {
+                    mCallback.onPhyRead(this, phy[0], phy[1], result);
+                }
+            });
+        });
     }
 
     // --- BluetoothProfile (not supported by BluetoothGatt, as in the module) ----------------

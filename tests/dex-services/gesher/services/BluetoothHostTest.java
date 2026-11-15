@@ -28,6 +28,7 @@ import android.os.ParcelUuid;
 import android.os.Parcelable;
 import android.os.ServiceManager;
 import com.gesher.server.BluetoothManagerService;
+import com.gesher.server.PackageManagerService;
 import com.gesher.server.WindowsBluetooth;
 import java.io.IOException;
 import java.io.InputStream;
@@ -117,11 +118,13 @@ public final class BluetoothHostTest {
             return;
         }
         LinkedBlockingQueue<Intent> broadcasts = new LinkedBlockingQueue<>();
-        BluetoothManagerService service = new BluetoothManagerService(broadcasts::add, null, null);
+        BluetoothManagerService service = new BluetoothManagerService(broadcasts::add, null);
         service.setPollInterval(200);
         ServiceManager.initServiceCache(Map.of(BluetoothManagerService.NAME, service));
 
+        features(true);
         permissions();
+        servicePolicy();
         App app = new App(34, "android.permission.BLUETOOTH_CONNECT",
                 "android.permission.BLUETOOTH_SCAN", "android.permission.ACCESS_FINE_LOCATION");
         BluetoothAdapter adapter = new BluetoothManager(app).getAdapter();
@@ -141,7 +144,107 @@ public final class BluetoothHostTest {
         check(!a.present, "a CI runner has no Bluetooth radio");
         check(BluetoothAdapter.getDefaultAdapter() == null, "no default adapter without a radio");
         check(new BluetoothManager(new App(34)).getAdapter() == null, "no manager adapter without a radio");
+        features(false);
         System.out.println("BluetoothHostTest no radio passed: " + checks);
+    }
+
+    /** FEATURE_BLUETOOTH(_LE) follow the host radio (the test radio supports LE). */
+    private static void features(boolean radio) {
+        PackageManagerService pm = new PackageManagerService(List.of());
+        boolean classic = pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH, 0);
+        boolean le = pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE, 0);
+        Set<String> listed = new HashSet<>();
+        for (android.content.pm.FeatureInfo f : pm.getSystemAvailableFeatures().getList()) listed.add(f.name);
+        check(classic == radio && le == radio, "hasSystemFeature(bluetooth, bluetooth_le) = " + radio);
+        check(listed.contains(PackageManager.FEATURE_BLUETOOTH) == radio
+                && listed.contains(PackageManager.FEATURE_BLUETOOTH_LE) == radio,
+                "getSystemAvailableFeatures lists them exactly when there is a radio");
+        step("features: bluetooth " + classic + ", bluetooth_le " + le);
+    }
+
+    /** A Binder caller of gesher.bluetooth with this package, target SDK and permissions. */
+    static final class Caller implements BluetoothManagerService.Policy {
+        final int target;
+        final Set<String> granted;
+        final List<String> asked = new ArrayList<>();
+        boolean consent = true;
+
+        Caller(int target, String... granted) {
+            this.target = target;
+            this.granted = new HashSet<>(Arrays.asList(granted));
+        }
+
+        @Override public String callerPackage() { return "fixture.caller"; }
+        @Override public int targetSdk(String packageName) { return target; }
+        @Override public boolean granted(String packageName, String permission) {
+            return granted.contains(permission);
+        }
+        @Override public boolean confirm(String packageName, String what) {
+            asked.add(what);
+            return consent;
+        }
+    }
+
+    private static boolean transact(BluetoothManagerService service, int code, Object argument)
+            throws Exception {
+        android.os.Parcel data = android.os.Parcel.obtain();
+        android.os.Parcel reply = android.os.Parcel.obtain();
+        try {
+            data.writeInterfaceToken(BluetoothManagerService.DESCRIPTOR);
+            if (argument instanceof Boolean) data.writeBoolean((Boolean) argument);
+            if (argument instanceof String) data.writeString((String) argument);
+            service.transact(code, data, reply, 0);
+            reply.readException();
+            return reply.readBoolean();
+        } finally {
+            data.recycle();
+            reply.recycle();
+        }
+    }
+
+    private static void rejected(BluetoothManagerService service, int code, Object argument,
+            String permission, String what) throws Exception {
+        try {
+            transact(service, code, argument);
+            check(false, what + " without " + permission);
+        } catch (SecurityException expected) {
+            check(expected.getMessage().contains(permission), what + " needs " + permission + ": " + expected);
+        }
+    }
+
+    /** gesher.bluetooth checks Binder callers as the module's service does. */
+    private static void servicePolicy() throws Exception {
+        final int setEnabled = android.os.IBinder.FIRST_CALL_TRANSACTION + 1;
+        final int startDiscovery = android.os.IBinder.FIRST_CALL_TRANSACTION + 2;
+        final int fetchUuids = android.os.IBinder.FIRST_CALL_TRANSACTION + 5;
+        List<Intent> sent = new ArrayList<>();
+        // The normal BLUETOOTH permission does not switch the radio.
+        BluetoothManagerService legacy = new BluetoothManagerService(sent::add,
+                new Caller(30, "android.permission.BLUETOOTH"));
+        rejected(legacy, setEnabled, false, "android.permission.BLUETOOTH_ADMIN", "radio off (API 30)");
+        rejected(legacy, startDiscovery, null, "android.permission.BLUETOOTH_ADMIN", "discovery (API 30)");
+        // API 31+: BLUETOOTH_CONNECT and BLUETOOTH_SCAN.
+        BluetoothManagerService modern = new BluetoothManagerService(sent::add,
+                new Caller(32, "android.permission.BLUETOOTH_ADMIN", "android.permission.BLUETOOTH"));
+        rejected(modern, setEnabled, false, "android.permission.BLUETOOTH_CONNECT", "radio off (API 32)");
+        rejected(modern, startDiscovery, null, "android.permission.BLUETOOTH_SCAN", "discovery (API 32)");
+        rejected(modern, fetchUuids, HEADSET, "android.permission.BLUETOOTH_CONNECT", "SDP (API 32)");
+        // API 33+ apps may not switch the radio at all, whatever they hold.
+        Caller tiramisu = new Caller(34, "android.permission.BLUETOOTH_CONNECT");
+        check(!transact(new BluetoothManagerService(sent::add, tiramisu), setEnabled, false),
+                "API 33+ callers cannot turn the radio off");
+        check(tiramisu.asked.isEmpty(), "and are not even asked about");
+        // Allowed callers still need the user's consent; a refusal leaves the radio on.
+        Caller refused = new Caller(30, "android.permission.BLUETOOTH_ADMIN");
+        refused.consent = false;
+        check(!transact(new BluetoothManagerService(sent::add, refused), setEnabled, false)
+                && refused.asked.equals(List.of("Turn Windows Bluetooth off"))
+                && WindowsBluetooth.adapter(0).on, "the user declines: the radio stays on");
+        Caller scanner = new Caller(31, "android.permission.BLUETOOTH_SCAN");
+        BluetoothManagerService discovery = new BluetoothManagerService(sent::add, scanner);
+        check(transact(discovery, startDiscovery, null), "BLUETOOTH_SCAN starts a discovery");
+        check(transact(discovery, startDiscovery + 1, null), "and cancels it");
+        step("service policy: BLUETOOTH cannot switch the radio, API 31+ needs CONNECT/SCAN, API 33+ refused, consent asked");
     }
 
     private static void permissions() {
@@ -186,6 +289,8 @@ public final class BluetoothHostTest {
                 && Arrays.asList(uuids).contains(new ParcelUuid(VENDOR)), "SPP and vendor service classes");
         check((Boolean) BluetoothDevice.class.getMethod("isConnected").invoke(headset),
                 "isConnected through reflection, as apps call it");
+        check(!(Boolean) BluetoothDevice.class.getMethod("isEncrypted").invoke(headset),
+                "no encryption claimed without a secure socket");
         check(adapter.getRemoteDevice(HEADSET).equals(headset), "getRemoteDevice equals the bonded device");
         try {
             adapter.getRemoteDevice("00:11:22:33:44:5g");
@@ -315,6 +420,16 @@ public final class BluetoothHostTest {
             public void onMtuChanged(BluetoothGatt g, int mtu, int status) {
                 events.add("mtu " + mtu + " " + status);
             }
+
+            @Override
+            public void onPhyRead(BluetoothGatt g, int tx, int rx, int status) {
+                events.add("phy-read " + tx + " " + rx + " " + status);
+            }
+
+            @Override
+            public void onPhyUpdate(BluetoothGatt g, int tx, int rx, int status) {
+                events.add("phy-update " + tx + " " + rx + " " + status);
+            }
         };
         BluetoothGatt unknown = adapter.getRemoteDevice("11:22:33:44:55:66").connectGatt(app, false, callback);
         check(take(events, "a failed connection").equals("state 133 0"), "an unknown device: status 133");
@@ -328,10 +443,20 @@ public final class BluetoothHostTest {
         check(gatt.discoverServices(), "discoverServices");
         check(take(events, "services").equals("discovered 0"), "services discovered");
         List<BluetoothGattService> services = gatt.getServices();
-        check(services.size() == 3, "three services: " + services.size());
+        check(services.size() == 4, "three primary services and a secondary one: " + services.size());
+        BluetoothGattService uartService = gatt.getService(UART);
+        List<BluetoothGattService> included = uartService.getIncludedServices();
+        check(uartService.getType() == BluetoothGattService.SERVICE_TYPE_PRIMARY && included.size() == 1
+                && included.get(0).getType() == BluetoothGattService.SERVICE_TYPE_SECONDARY
+                && included.get(0).getCharacteristics().size() == 1, "UART includes a secondary service");
         BluetoothGattCharacteristic level = gatt.getService(BATTERY).getCharacteristic(LEVEL);
         check(level != null && gatt.readCharacteristic(level), "read the battery level");
         check(take(events, "the read").equals("read 0 [87]"), "battery level 87");
+        java.lang.reflect.Method byUuid = BluetoothGatt.class.getMethod("readUsingCharacteristicUuid",
+                UUID.class, int.class, int.class);
+        check(!(Boolean) byUuid.invoke(gatt, LEVEL, 20, 40), "no battery level in handles 20-40");
+        check((Boolean) byUuid.invoke(gatt, LEVEL, 1, 0xffff), "read by UUID");
+        check(take(events, "the read by UUID").equals("read 0 [87]"), "read by UUID: 87");
         check(gatt.setCharacteristicNotification(level, true), "registered for notifications");
         BluetoothGattDescriptor cccd = level.getDescriptor(CCCD);
         check(cccd != null && gatt.writeDescriptor(cccd, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
@@ -356,11 +481,27 @@ public final class BluetoothHostTest {
         check(got.contains("write 0") && got.contains("changed " + TX + " hello"), "RX echoed on TX: " + got);
         check(gatt.requestMtu(517), "requestMtu");
         check(take(events, "the MTU").equals("mtu 247 0"), "MTU 247");
+        gatt.readPhy();
+        check(take(events, "the PHY").equals("phy-read 2 2 0"), "readPhy: what Windows reports (2M)");
+        gatt.setPreferredPhy(BluetoothDevice.PHY_LE_CODED_MASK, BluetoothDevice.PHY_LE_CODED_MASK, 0);
+        check(take(events, "the PHY update").equals("phy-update 2 2 " + BluetoothGatt.GATT_REQUEST_NOT_SUPPORTED),
+                "setPreferredPhy is declined, the PHY unchanged");
+        LinkedBlockingQueue<String> second = new LinkedBlockingQueue<>();
+        BluetoothGatt other = device.connectGatt(app, false, new BluetoothGattCallback() {
+            @Override
+            public void onConnectionStateChange(BluetoothGatt g, int status, int state) {
+                second.add("state " + status + " " + state);
+            }
+        });
+        check(take(second, "the second client").equals("state 0 2"), "a second client to the same device");
+        other.close();
+        check(manager.getConnectedDevices(BluetoothProfile.GATT).contains(device),
+                "closing one client keeps the device connected for the other");
         gatt.disconnect();
         check(take(events, "disconnected").equals("state 0 0"), "disconnected");
         check(!manager.getConnectedDevices(BluetoothProfile.GATT).contains(device), "no longer connected");
         gatt.close();
-        step("GATT: connect, discover 3 services, read 87, notifications through the CCCD, write/echo, MTU 247, disconnect");
+        step("GATT: connect, discover 3 services and an included secondary one, read 87 (by UUID too), notifications through the CCCD, write/echo, MTU 247, PHY, two clients, disconnect");
     }
 
     private static void rfcomm(BluetoothAdapter adapter) throws Exception {
@@ -381,7 +522,29 @@ public final class BluetoothHostTest {
         int n = 0;
         while (n < back.length) n += in.read(back, n, back.length - n);
         check(Arrays.equals(back, packet), "the vendor service echoes a packet");
+        java.lang.reflect.Method encrypted = BluetoothDevice.class.getMethod("isEncrypted");
+        check((Boolean) encrypted.invoke(headset), "a secure socket's link is encrypted");
         socket.close();
+        check(!(Boolean) encrypted.invoke(headset), "no longer once it is closed");
+        BluetoothSocket slow = (BluetoothSocket) BluetoothDevice.class
+                .getMethod("createInsecureRfcommSocket", int.class).invoke(headset, 3);
+        Thread closer = new Thread(() -> {
+            try {
+                Thread.sleep(300);
+                slow.close();
+            } catch (Exception ignored) {
+                // the check below fails
+            }
+        });
+        closer.start();
+        long start = System.currentTimeMillis();
+        try {
+            slow.connect();
+            check(false, "a connect that never answers returned");
+        } catch (IOException expected) {
+            check(System.currentTimeMillis() - start < 5000, "close() cancels a blocked connect");
+        }
+        closer.join();
         try {
             in.read();
             check(false, "read after close");
