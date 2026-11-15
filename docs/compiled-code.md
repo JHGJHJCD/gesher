@@ -51,6 +51,8 @@ TEB. This brings the three faster execution modes to Windows. The design is
 - `GESHER_TRACE_SIGNALS=1` — log the first 200 faults and what became of each.
 - `GESHER_TRACE_MMAP=1` — log every `mmap` call, and for file mappings whether
   they became a view (`an executable view of ...`) or a copy.
+- `GESHER_TRACE_DL=1` — log every `dlopen` an app's native library makes and
+  its outcome, and every `dlsym` that finds nothing (`gesher dl: ...`).
 - `GESHER_MMAP_NO_PLACEHOLDERS=1` — plain allocations and views, oat code
   copied, no dual-mapped JIT cache (the configuration before ADR 0036).
 - `GESHER_LOG_EXECUTION=1` also logs, for an app, the oat file its dex file

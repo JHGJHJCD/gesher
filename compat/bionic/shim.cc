@@ -874,7 +874,23 @@ std::string DirOf(const std::string& path) {
   size_t slash = path.find_last_of('/');
   return slash == std::string::npos ? std::string() : path.substr(0, slash == 0 ? 1 : slash);
 }
+// GESHER_TRACE_DL: each dlopen and its outcome, and each dlsym that finds
+// nothing, on stderr (an app's log): what a library looked for and lacked.
+bool TraceDl() {
+  static const bool on = std::getenv("GESHER_TRACE_DL") != nullptr;
+  return on;
+}
+void* DlOpenImpl(const char* filename);
 void* BIONIC_SYSV DlOpen(const char* filename, int /*flags*/) {
+  void* handle = DlOpenImpl(filename);
+  if (TraceDl()) {
+    std::fprintf(stderr, "gesher dl: dlopen(\"%s\") = %s%s%s
+", filename ? filename : "(null)",
+                 handle ? "ok" : "null", handle ? "" : ": ", handle ? "" : t_dlerror.c_str());
+  }
+  return handle;
+}
+void* DlOpenImpl(const char* filename) {
   if (filename == nullptr) return reinterpret_cast<void*>(-2);  // the "main program"
   if (void* platform = PlatformLibraryHandle(filename)) return platform;
   const char* slash = std::strrchr(filename, '/');
@@ -933,6 +949,8 @@ void* BIONIC_SYSV DlSym(void* handle, const char* symbol) {
   if (p == nullptr) {
     t_dlerror = std::string("undefined symbol: ") + symbol;
     t_has_dlerror = true;
+    if (TraceDl()) std::fprintf(stderr, "gesher dl: dlsym(%p, \"%s\") = null
+", handle, symbol);
   }
   return p;
 }
