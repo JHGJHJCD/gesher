@@ -17,6 +17,7 @@
 
 #define WIN32_LEAN_AND_MEAN 1
 #include <windows.h>
+#include "../../locale/preferred_languages.h"
 
 namespace {
 
@@ -47,21 +48,18 @@ jstring JNICALL WindowsFonts_nativeFontsDirectory(JNIEnv* env, jclass) {
 }
 
 jobjectArray JNICALL SystemLocale_nativePreferredUiLanguages(JNIEnv* env, jclass) {
-  ULONG count = 0;
-  ULONG size = 0;
-  if (!GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, nullptr, &size) || size == 0) {
-    return nullptr;
-  }
-  std::vector<wchar_t> buf(size);
-  if (!GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, buf.data(), &size)) {
-    return nullptr;
-  }
-  // A list of NUL-terminated names, ended by an empty one.
   std::vector<std::wstring> names;
-  for (const wchar_t* p = buf.data(); p < buf.data() + buf.size() && *p != L'\0';) {
-    std::wstring name(p);
-    p += name.size() + 1;
-    names.push_back(name);
+
+  wchar_t* preferred = GesherPreferredLanguages();
+  if (preferred != nullptr) {
+    for (const wchar_t* name = preferred; *name != L'\0'; name += wcslen(name) + 1) {
+      names.emplace_back(name);
+    }
+    HeapFree(GetProcessHeap(), 0, preferred);
+  }
+
+  if (names.empty()) {
+    return nullptr;
   }
   jclass string_class = env->FindClass("java/lang/String");
   if (string_class == nullptr) return nullptr;

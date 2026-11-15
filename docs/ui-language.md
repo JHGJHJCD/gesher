@@ -1,10 +1,19 @@
 # Gesher's interface language
 
-Gesher's own interface supports Hebrew and English. It follows Windows' display
-language preferences automatically, in order, matching the language portion of
-BCP 47 tags (`he-IL`, `he`, and the legacy `iw` alias all select Hebrew).
-If none of the preferred languages is supported, English is used. Regional number
-and date settings do not override the display language.
+Gesher's own interface supports Hebrew and English. It follows Windows'
+language preferences automatically, in order (the user's preferred languages
+for apps and websites in Windows Settings, followed by Windows display language
+preferences), matching the language portion of BCP 47 tags (`he-IL`, `he`, and
+the legacy `iw` alias all select Hebrew). If none of the preferred languages is
+supported, English is used. Regional number and date settings do not override
+the language preference.
+
+Native callers share `compat/locale/preferred_languages.h`. It reads the profile's
+`Languages` value as either `REG_MULTI_SZ` or `REG_SZ`, then appends display
+languages without case-insensitive duplicates. Lists stop at their first empty
+entry and are sized from the Windows replies, so a long preference list is not
+truncated. A malformed, unavailable or changed source falls back to the other
+source. The PowerShell helper applies the same ordering and parsing rules.
 
 The launcher splash, native permission/account consent dialogs and account chooser, command-line
 launcher messages, microG addon setup, WebView file filters, Start menu descriptions,
@@ -49,6 +58,12 @@ catalog. To add a language, add its `languages` entry (and `rtl` flag), translat
 all keys, regenerate, and add its bundled Inno language to `gesher.iss`. The
 Java/PowerShell/native selectors all use the same preference and fallback rules.
 
-On Windows, run `tests/windows/shell/UiLocalizationChecks.ps1` using Windows
-PowerShell 5.1. `tests/i18n/ui_locale_test.c` tests the native selector, including
-environment overrides, without modifying Windows' settings.
+On Windows, run `tests/windows/shell/UiLocalizationChecks.ps1` and
+`tests/windows/shell/PreferredLanguagesChecks.ps1` using Windows PowerShell 5.1.
+The latter also runs on PowerShell on other platforms, checking the production
+managed merge without reading or changing the user's settings.
+`python tools/test_preferred_languages.py --sanitize` exercises the actual native
+headers with modeled Win32 replies: preference order, long lists, terminators,
+duplicates, changed registry metadata, allocation failures and environment
+overrides. CI runs both deterministic suites. `tests/i18n/ui_locale_test.c`
+also checks the selector against real Windows APIs without modifying settings.

@@ -15,20 +15,82 @@ function Get-GesherUiLanguage([string] $Tags) {
 if (-not ('Gesher.UiLanguages' -as [type])) {
   Add-Type -TypeDefinition @'
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using Microsoft.Win32;
 namespace Gesher {
   public static class UiLanguages {
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
     private static extern bool GetUserPreferredUILanguages(uint flags, out uint count, IntPtr buffer, ref uint size);
-    public static string Read() {
-      uint count, size = 0;
-      if (!GetUserPreferredUILanguages(8, out count, IntPtr.Zero, ref size) || size < 2) return "en";
-      IntPtr buffer = Marshal.AllocHGlobal(checked((int)size * 2));
-      try {
-        if (!GetUserPreferredUILanguages(8, out count, buffer, ref size)) return "en";
-        return Marshal.PtrToStringUni(buffer, (int)size).TrimEnd('\0').Replace('\0', ',');
-      } finally { Marshal.FreeHGlobal(buffer); }
+    private static void AddLanguage(List<string> list, HashSet<string> seen, string name) {
+      if (name == null) return;
+      name = name.Trim(' ', '\t', '\r', '\n');
+      if (name.Length == 0 || !((name[0] >= 'A' && name[0] <= 'Z') ||
+                                (name[0] >= 'a' && name[0] <= 'z'))) return;
+      bool separator = false;
+      foreach (char c in name) {
+        if (c == '-' || c == '_') {
+          if (separator) return;
+          separator = true;
+        } else {
+          if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9'))) return;
+          separator = false;
+        }
+      }
+      if (!separator && seen.Add(name)) list.Add(name);
     }
+
+    // Pure merge shared by Read and deterministic tests; no host settings change.
+    public static string Merge(object profileLanguages, string displayLanguages) {
+      var list = new List<string>();
+      var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      string[] multiple = profileLanguages as string[];
+      string single = profileLanguages as string;
+      if (multiple != null) {
+        foreach (string name in multiple) {
+          if (string.IsNullOrEmpty(name)) break;
+          AddLanguage(list, seen, name);
+        }
+      } else if (single != null) {
+        AddLanguage(list, seen, single.Split('\0')[0]);
+      }
+      if (displayLanguages != null) {
+        foreach (string name in displayLanguages.Split('\0')) {
+          if (name.Length == 0) break;
+          AddLanguage(list, seen, name);
+        }
+      }
+      return list.Count > 0 ? string.Join(",", list) : "en";
+    }
+
+    public static string Read() {
+      object profile = null;
+      try {
+        using (var key = Registry.CurrentUser.OpenSubKey(@"Control Panel\International\User Profile")) {
+          if (key != null) {
+            RegistryValueKind kind = key.GetValueKind("Languages");
+            if (kind == RegistryValueKind.String || kind == RegistryValueKind.MultiString) {
+              profile = key.GetValue("Languages", null, RegistryValueOptions.DoNotExpandEnvironmentNames);
+            }
+          }
+        }
+      } catch {}
+      string display = null;
+      uint count, size = 0;
+      if (GetUserPreferredUILanguages(8, out count, IntPtr.Zero, ref size) &&
+          size > 0 && size <= (int.MaxValue / 2) - 2) {
+        uint capacity = size;
+        IntPtr buffer = Marshal.AllocHGlobal(checked(((int)capacity + 2) * 2));
+        try {
+          if (GetUserPreferredUILanguages(8, out count, buffer, ref size) && size <= capacity) {
+            display = Marshal.PtrToStringUni(buffer, (int)size);
+          }
+        } finally { Marshal.FreeHGlobal(buffer); }
+      }
+      return Merge(profile, display);
+    }
+
   }
 }
 '@

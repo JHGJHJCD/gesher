@@ -19,7 +19,8 @@ Tests: `tests/windows/tracks/49-locale.ps1`, `tests/apps/localeapp`.
 ## Behavior
 
 - **What an app sees**: `LocaleList.getDefault()` and its resources'
-  configuration: the device's list (Windows' display languages, the regional
+  configuration: the device's list (Windows' preferred languages from the user
+  profile and display languages, the regional
   format's region, regional preferences as `-u-` extensions), or its own
   locales in front of it. `LocaleManager.getSystemLocales()` is the device's,
   `getApplicationLocales()` the app's (empty: none). `LocaleConfig(context)`

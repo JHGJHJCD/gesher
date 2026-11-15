@@ -104,16 +104,74 @@ function WindowsLocaleNow {
   $script = Join-Path $env:RUNNER_TEMP 'rtl-windows-locale.ps1'
   Set-Content $script @'
 Add-Type -TypeDefinition @"
-using System; using System.Runtime.InteropServices; using System.Text;
+using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
 public static class Mui {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
   static extern bool GetUserPreferredUILanguages(uint flags, out uint count, char[] buf, ref uint size);
+    private static void AddLanguage(List<string> list, HashSet<string> seen, string name) {
+      if (name == null) return;
+      name = name.Trim(' ', '\t', '\r', '\n');
+      if (name.Length == 0 || !((name[0] >= 'A' && name[0] <= 'Z') ||
+                                (name[0] >= 'a' && name[0] <= 'z'))) return;
+      bool separator = false;
+      foreach (char c in name) {
+        if (c == '-' || c == '_') {
+          if (separator) return;
+          separator = true;
+        } else {
+          if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                (c >= '0' && c <= '9'))) return;
+          separator = false;
+        }
+      }
+      if (!separator && seen.Add(name)) list.Add(name);
+    }
+
+    // Pure merge shared by Read and deterministic tests; no host settings change.
+    public static string Merge(object profileLanguages, string displayLanguages) {
+      var list = new List<string>();
+      var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+      string[] multiple = profileLanguages as string[];
+      string single = profileLanguages as string;
+      if (multiple != null) {
+        foreach (string name in multiple) {
+          if (string.IsNullOrEmpty(name)) break;
+          AddLanguage(list, seen, name);
+        }
+      } else if (single != null) {
+        AddLanguage(list, seen, single.Split('\0')[0]);
+      }
+      if (displayLanguages != null) {
+        foreach (string name in displayLanguages.Split('\0')) {
+          if (name.Length == 0) break;
+          AddLanguage(list, seen, name);
+        }
+      }
+      return list.Count > 0 ? string.Join(",", list) : "en-US";
+    }
+
   public static string Languages() {
+    object profile = null;
+    try {
+      using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(@"Control Panel\International\User Profile")) {
+        if (key != null) {
+          var kind = key.GetValueKind("Languages");
+          if (kind == Microsoft.Win32.RegistryValueKind.String || kind == Microsoft.Win32.RegistryValueKind.MultiString) {
+            profile = key.GetValue("Languages", null, Microsoft.Win32.RegistryValueOptions.DoNotExpandEnvironmentNames);
+          }
+        }
+      }
+    } catch {}
+    string display = null;
     uint count, size = 0;
-    GetUserPreferredUILanguages(8, out count, null, ref size);
-    var buf = new char[size];
-    GetUserPreferredUILanguages(8, out count, buf, ref size);
-    return string.Join(",", new string(buf).Split(new[] { '\0' }, StringSplitOptions.RemoveEmptyEntries));
+    if (GetUserPreferredUILanguages(8, out count, null, ref size) && size > 0 && size <= int.MaxValue - 2) {
+      uint capacity = size;
+      var buf = new char[(int)capacity + 2];
+      if (GetUserPreferredUILanguages(8, out count, buf, ref size) && size <= capacity) {
+        display = new string(buf, 0, (int)size);
+      }
+    }
+    return Merge(profile, display);
   }
 }
 "@

@@ -46,6 +46,7 @@ jobs:
         shell: powershell
         run: |
           tests/windows/shell/UiLocalizationChecks.ps1
+          tests/windows/shell/PreferredLanguagesChecks.ps1
           tests/windows/shell/MicrogDefaultsChecks.ps1
           tests/windows/shell/ControlPanelRefreshChecks.ps1
           tests/windows/shell/UpdateChecks.ps1
@@ -233,6 +234,7 @@ jobs:
       - name: Validate user interface translations
         run: |
           python3 tools/i18n/check.py --check
+          python3 tools/test_preferred_languages.py --sanitize
 
   build-framework-assets:
     needs: [artifact-preflight, source-identity]
@@ -669,6 +671,7 @@ jobs:
         shell: powershell
         run: |
           tests/windows/shell/UiLocalizationChecks.ps1
+          tests/windows/shell/PreferredLanguagesChecks.ps1
           tests/windows/shell/MicrogDefaultsChecks.ps1
           tests/windows/shell/ControlPanelRefreshChecks.ps1
           tests/windows/shell/UpdateChecks.ps1

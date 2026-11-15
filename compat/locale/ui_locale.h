@@ -2,6 +2,7 @@
 #pragma once
 #include <windows.h>
 #include "ui_messages.h"
+#include "preferred_languages.h"
 
 // Same preference order as SystemLocale, including its explicit test/launch override.
 // Read at presentation time so a later Windows language change is picked up.
@@ -23,19 +24,15 @@ static inline enum GesherUiLanguage GesherUiCurrentLanguage(void) {
       HeapFree(GetProcessHeap(), 0, tags);
     }
   }
-  ULONG count = 0, length = 0;
-  if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, NULL, &length) && length > 1) {
-    wchar_t* tags = (wchar_t*)HeapAlloc(GetProcessHeap(), 0, length * sizeof(wchar_t));
-    if (tags != NULL) {
-      if (GetUserPreferredUILanguages(MUI_LANGUAGE_NAME, &count, tags, &length)) {
-        // Convert MULTI_SZ to the comma-separated form used by all other consumers.
-        for (ULONG i = 0; i + 1 < length; ++i) if (tags[i] == L'\0') tags[i] = L',';
-        enum GesherUiLanguage lang = GesherUiMatch(tags);
-        HeapFree(GetProcessHeap(), 0, tags);
-        return lang;
-      }
-      HeapFree(GetProcessHeap(), 0, tags);
-    }
+
+  wchar_t* tags = GesherPreferredLanguages();
+  if (tags == NULL) return GESHER_UI_EN;
+  // Flatten the owned list in place for the existing comma-separated selector.
+  for (wchar_t* end = tags; *end != L'\0';) {
+    end += wcslen(end);
+    if (end[1] != L'\0') *end++ = L',';
   }
-  return GESHER_UI_EN;
+  enum GesherUiLanguage language = GesherUiMatch(tags);
+  HeapFree(GetProcessHeap(), 0, tags);
+  return language;
 }
