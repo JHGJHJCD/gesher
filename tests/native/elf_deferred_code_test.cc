@@ -158,6 +158,28 @@ void TestRunTimeCode() {
   Check("run time: memory of no object is executable at once",
         other != nullptr && elf::ProtectLoadedMemory(other, kPage, PROT_READ | PROT_EXEC) == 0 &&
             Executable(other));
+  // ...unless a raw system call asks (UPX 5 maps its decompressor from a
+  // memfd): that code waits for its first execution and is rewritten then.
+  void* raw = elf::MapLoadedMemory(nullptr, kPage, PROT_READ | PROT_WRITE,
+                                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, true);
+  Check("raw mmap: read-write memory is mapped as asked", raw != MAP_FAILED);
+  if (raw == MAP_FAILED) return;
+  code = SyscallCode(39);
+  std::memcpy(raw, code.data(), code.size());
+  Check("raw mprotect: executable memory outside every object waits",
+        elf::ProtectLoadedMemory(raw, kPage, PROT_READ | PROT_EXEC, true) == 0 && !Executable(raw));
+  Check("raw mprotect: its raw syscall is emulated when it runs",
+        reinterpret_cast<Fn>(raw)(4) == 39004 && Executable(raw));
+  Check("raw mmap: unmapped", elf::UnmapLoadedMemory(raw, kPage) == 0);
+  void* raw_exec = elf::MapLoadedMemory(nullptr, kPage, PROT_READ | PROT_WRITE | PROT_EXEC,
+                                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0, true);
+  Check("raw mmap: read-write-execute memory waits", raw_exec != MAP_FAILED && !Executable(raw_exec));
+  if (raw_exec != MAP_FAILED) {
+    std::memcpy(raw_exec, code.data(), code.size());
+    Check("raw mmap: its raw syscall is emulated when it runs",
+          reinterpret_cast<Fn>(raw_exec)(6) == 39006);
+    elf::UnmapLoadedMemory(raw_exec, kPage);
+  }
 }
 
 void TestSelfUnpacking() {

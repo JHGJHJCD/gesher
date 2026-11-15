@@ -78,6 +78,18 @@ made writable or unmapped forgets what was rewritten in it.
 Decoding from execution is what makes this safe for packed code: compressed
 data is never decoded, because nothing executes it.
 
+**Code a raw system call maps elsewhere waits too.** UPX 5's stub writes its
+decompressor into a memfd and maps it `PROT_READ|PROT_EXEC` outside the
+library, then runs it; it makes raw system calls of its own. Executable
+memory that a raw `mmap`/`mprotect` (not libc's: a JIT's stays as asked)
+creates outside every loaded object becomes an object of its own, without
+unwind information, rewritten as it runs, and forgotten when unmapped.
+
+**`/proc/self/auxv` exists.** UPX 5 reads `AT_PAGESZ` from it with raw
+`openat`/`read`, and its system call helper stops on `int3` when any call
+fails (`cmp $-0x1000,%rax; jb; int3`): gesher-base now serves the auxiliary
+vector getauxval reports.
+
 ## Consequences
 - The UPX stub of `libexec_x86.so` unpacks itself; its `munmap` stub, reached
   only by `ret` but the first code to run in its page, is rewritten then.

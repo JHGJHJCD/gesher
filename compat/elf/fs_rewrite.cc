@@ -605,6 +605,7 @@ struct LazyObject {
   uintptr_t lo = 0, hi = 0;    // the reservation
   std::vector<Region> fdes;    // code ranges from .eh_frame_hdr (vaddrs)
   bool unpacking = false;      // self-unpacking: its file bytes are not its code
+  bool anonymous = false;      // code a raw system call mapped outside every object
   uint64_t eh_frame_hdr = 0;   // vaddr of PT_GNU_EH_FRAME, if any
   bool eh_frame_hdr_read = false;  // read from memory after unpacking
   std::vector<StubArena> arenas;         // read-write-execute stubs of deferred rewrites
@@ -1399,16 +1400,32 @@ uintptr_t PageEnd(uintptr_t addr, size_t len) {
   return end < addr ? UINTPTR_MAX & ~(kPage - 1) : PageOf(end + kPage - 1);
 }
 
+// Code a raw system call maps or makes executable outside every loaded
+// object (UPX 5 maps its decompressor from a memfd): an object of its own,
+// with no unwind information, rewritten as it runs. Forgotten when unmapped.
+LazyObject* NewCodeObjectLocked(uintptr_t lo, uintptr_t hi) {
+  auto* o = new LazyObject();
+  o->name = "[code mapped by a raw system call]";
+  o->lo = lo;
+  o->hi = hi;
+  o->anonymous = true;
+  Objects().push_back(o);
+  return o;
+}
+
 }  // namespace
 
-int ProtectLoadedMemory(void* addr, size_t len, int prot) {
+int ProtectLoadedMemory(void* addr, size_t len, int prot, bool raw_syscall) {
   const auto start = reinterpret_cast<uintptr_t>(addr);
   if (len == 0 || (start & (kPage - 1)) != 0) return mprotect(addr, len, prot);
   const uintptr_t end = PageEnd(start, len);
   AcquireSRWLockExclusive(&g_lazy_lock);
   if (!OverlapsObjectLocked(start, end)) {
-    ReleaseSRWLockExclusive(&g_lazy_lock);
-    return mprotect(addr, len, prot);
+    if (!raw_syscall || (prot & PROT_EXEC) == 0) {
+      ReleaseSRWLockExclusive(&g_lazy_lock);
+      return mprotect(addr, len, prot);
+    }
+    NewCodeObjectLocked(start, end);
   }
   int saved_errno = 0;
   bool ok = ForEachObjectRun(start, end,
@@ -1432,31 +1449,35 @@ int ProtectLoadedMemory(void* addr, size_t len, int prot) {
   return ok ? 0 : -1;
 }
 
-void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64_t offset) {
+void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64_t offset,
+                      bool raw_syscall) {
   const auto hint = reinterpret_cast<uintptr_t>(addr);
   const bool fixed = (flags & MAP_FIXED) != 0;
+  const bool exec = (prot & PROT_EXEC) != 0;
   AcquireSRWLockExclusive(&g_lazy_lock);
   const bool into_object = fixed && len != 0 && OverlapsObjectLocked(hint, PageEnd(hint, len));
-  if (!into_object) {
+  if (!into_object && !(raw_syscall && exec && len != 0)) {
     ReleaseSRWLockExclusive(&g_lazy_lock);
     return mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
   }
-  // MAP_FIXED into a loaded object (an unpacker mapping its image): code is
-  // pending until it runs.
-  const int host = (prot & PROT_EXEC) ? PendingProt(prot) : prot;
-  void* p = mmap(addr, len, host, flags, fd, static_cast<off_t>(offset));
+  // Mapped as asked (a file view keeps its right to execute), then code
+  // waits non-executable until it runs.
+  void* p = mmap(addr, len, prot, flags, fd, static_cast<off_t>(offset));
   if (p != MAP_FAILED) {
     const auto start = reinterpret_cast<uintptr_t>(p);
-    ForEachObjectRun(start, PageEnd(start, len),
+    const uintptr_t end = PageEnd(start, len);
+    if (!OverlapsObjectLocked(start, end)) NewCodeObjectLocked(start, end);
+    ForEachObjectRun(start, end,
         [&](uintptr_t lo, uintptr_t hi, LazyObject* o) {
-          if (prot & PROT_EXEC) DeferPagesLocked(o, lo, hi, prot);
-          else ForgetPagesLocked(o, lo, hi);
+          if (exec) {
+            mprotect(reinterpret_cast<void*>(lo), hi - lo, PendingProt(prot));
+            DeferPagesLocked(o, lo, hi, prot);
+          } else {
+            ForgetPagesLocked(o, lo, hi);
+          }
           return true;
         },
-        [&](uintptr_t lo, uintptr_t hi) {
-          // Outside the object: as asked.
-          return host == prot || mprotect(reinterpret_cast<void*>(lo), hi - lo, prot) == 0;
-        });
+        [](uintptr_t, uintptr_t) { return true; });  // outside: as asked
   }
   ReleaseSRWLockExclusive(&g_lazy_lock);
   return p;
@@ -1476,6 +1497,13 @@ int UnmapLoadedMemory(void* addr, size_t len) {
             return true;
           },
           [](uintptr_t, uintptr_t) { return true; });
+      // Code objects of raw system calls go with their whole mapping.
+      auto& objects = Objects();
+      objects.erase(std::remove_if(objects.begin(), objects.end(),
+                                   [&](const LazyObject* o) {
+                                     return o->anonymous && o->lo >= start && o->hi <= end;
+                                   }),
+                    objects.end());
     }
     ReleaseSRWLockExclusive(&g_lazy_lock);
     errno = saved_errno;

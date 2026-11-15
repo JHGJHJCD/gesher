@@ -158,8 +158,13 @@ void SetRawSyscallHandler(RawSyscallHandler handler);
 // kept non-executable until their first execution, when the loader rewrites
 // the code then in them (%fs accesses, raw system calls) and gives them the
 // requested protection. Same results and errno as mprotect/mmap/munmap.
-int ProtectLoadedMemory(void* addr, size_t len, int prot);
-void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64_t offset);
+// `raw_syscall`: the call is a raw system call of loaded code (a packer's
+// unpacker); executable memory it maps or protects outside every loaded
+// object waits for its first execution too (UPX 5 maps its decompressor from
+// a memfd). libc's mmap/mprotect (a JIT's) leave such memory as asked.
+int ProtectLoadedMemory(void* addr, size_t len, int prot, bool raw_syscall = false);
+void* MapLoadedMemory(void* addr, size_t len, int prot, int flags, int fd, int64_t offset,
+                      bool raw_syscall = false);
 int UnmapLoadedMemory(void* addr, size_t len);
 
 // __tls_get_addr's worker: the address of loaded module `module_id`'s TLS

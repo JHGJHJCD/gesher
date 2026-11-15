@@ -148,6 +148,17 @@ int gesher_selftest(void) {
     errno = 0;
     check("syscall(2) failure sets errno", syscall(SYS_close, 12345) == -1 && errno == EBADF);
 
+    // /proc/self/auxv, which UPX's unpacker reads through raw openat/read.
+    long auxv = raw3(SYS_openat, -100, (long)"/proc/self/auxv", 0);
+    unsigned long pairs[64][2];
+    long got = auxv >= 0 ? raw3(SYS_read, auxv, (long)pairs, sizeof(pairs)) : -1;
+    unsigned long pagesz = 0;
+    for (long i = 0; got > 0 && i < got / 16 && pairs[i][0] != 0; ++i) {
+        if (pairs[i][0] == 6) pagesz = pairs[i][1];
+    }
+    if (auxv >= 0) raw3(SYS_close, auxv, 0, 0);
+    check("raw openat/read of /proc/self/auxv gives AT_PAGESZ", pagesz == 4096);
+
     check("ptrace(PTRACE_TRACEME) succeeds once", ptrace(PTRACE_TRACEME, 0, 0, 0) == 0);
     errno = 0;
     check("ptrace(PTRACE_TRACEME) again is EPERM",

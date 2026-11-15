@@ -24,6 +24,7 @@
 #include "shim_internal.h"
 
 #include <gesher/bionic_shim.h>
+#include <gesher/elf_loader.h>
 
 #include <errno.h>
 #include <string.h>
@@ -315,6 +316,24 @@ void BIONIC_SYSV Regfree(BionicRegex* preg) {
 
 int64_t RawSyscallX64(int64_t nr, const int64_t a[6]) {
   if (nr == 13) return RtSigaction(a);  // rt_sigaction: the kernel's layout
+  // mmap/mprotect: code they make executable anywhere waits for its first
+  // execution, when the loader rewrites it (an unpacker's own code).
+  if (nr == 9) {
+    errno = 0;
+    void* p = gesher::elf::MapLoadedMemory(reinterpret_cast<void*>(a[0]), static_cast<size_t>(a[1]),
+                                           static_cast<int>(a[2]), static_cast<int>(a[3]),
+                                           static_cast<int>(a[4]), a[5], true);
+    return p == reinterpret_cast<void*>(-1) ? -(errno != 0 ? errno : kEINVAL)
+                                            : reinterpret_cast<int64_t>(p);
+  }
+  if (nr == 10) {
+    errno = 0;
+    return gesher::elf::ProtectLoadedMemory(reinterpret_cast<void*>(a[0]),
+                                            static_cast<size_t>(a[1]), static_cast<int>(a[2]),
+                                            true) == 0
+               ? 0
+               : -(errno != 0 ? errno : kEINVAL);
+  }
   if (nr == 202) {                      // futex: syscall(2)'s own case
     using SyscallFn = int64_t (BIONIC_SYSV*)(int64_t, int64_t, int64_t, int64_t, int64_t,
                                              int64_t, int64_t);
