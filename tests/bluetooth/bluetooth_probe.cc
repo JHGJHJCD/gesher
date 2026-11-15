@@ -116,8 +116,64 @@ void HwDevice(const char* what, const bt::Device& d) {
          d.connected ? 1 : 0, uuids.c_str());
 }
 
+// Soundcore's RFCOMM framing (as observed and documented by OpenSCQ30; written here from
+// that description): a 5-byte direction marker (08 ee 00 00 00 to the device), a 2-byte
+// command, the packet's total length (little endian, 2 bytes), the body, and a checksum
+// byte (the sum of every byte before it).
+std::vector<uint8_t> SoundcorePacket(uint8_t c0, uint8_t c1, const std::vector<uint8_t>& body) {
+  std::vector<uint8_t> p = {0x08, 0xee, 0x00, 0x00, 0x00, c0, c1, 0, 0};
+  p.insert(p.end(), body.begin(), body.end());
+  size_t length = p.size() + 1;
+  p[7] = static_cast<uint8_t>(length & 0xff);
+  p[8] = static_cast<uint8_t>(length >> 8);
+  uint8_t sum = 0;
+  for (uint8_t b : p) sum = static_cast<uint8_t>(sum + b);
+  p.push_back(sum);
+  return p;
+}
+
+std::string Hex(const uint8_t* data, size_t n) {
+  std::string out;
+  for (size_t i = 0; i < n; ++i) {
+    char h[4];
+    snprintf(h, sizeof(h), "%02x", data[i]);
+    out += h;
+  }
+  return out;
+}
+
+// Splits what came back into Soundcore frames and prints them; a state update (01 01)
+// also with its first fields (connected earbuds, battery) and its text.
+void DecodeSoundcore(const std::vector<uint8_t>& in) {
+  size_t at = 0;
+  while (at + 10 <= in.size()) {
+    size_t length = in[at + 7] | in[at + 8] << 8;
+    if (length < 10 || at + length > in.size()) {
+      printf("bluetooth-probe: hw reply: %zu byte(s) not a whole frame at %zu\n", in.size() - at, at);
+      return;
+    }
+    const uint8_t* f = &in[at];
+    uint8_t sum = 0;
+    for (size_t i = 0; i + 1 < length; ++i) sum = static_cast<uint8_t>(sum + f[i]);
+    const uint8_t* body = f + 9;
+    size_t n = length - 10;
+    printf("bluetooth-probe: hw frame: direction %s command %02x%02x length %zu checksum %s body %s\n",
+           Hex(f, 5).c_str(), f[5], f[6], length, sum == f[length - 1] ? "ok" : "BAD",
+           Hex(body, n).c_str());
+    if (f[5] == 0x01 && f[6] == 0x01 && n >= 6) {
+      printf("bluetooth-probe: hw state: host earbud %s, both earbuds connected %d, battery left %u "
+             "right %u, charging left %u right %u\n", body[0] == 0 ? "left" : "right", body[1],
+             body[2], body[3], body[4], body[5]);
+      std::string text;
+      for (size_t i = 6; i < n; ++i) text += body[i] >= 0x20 && body[i] < 0x7f ? static_cast<char>(body[i]) : '.';
+      printf("bluetooth-probe: hw state text: %s\n", text.c_str());
+    }
+    at += length;
+  }
+}
+
 // A real radio, read-only (see the usage above). Other devices are counted, never named.
-void HwCheck(bt::Backend& backend, const std::string& want) {
+void HwCheck(bt::Backend& backend, const std::string& want, bool queryState) {
   bt::Adapter a = backend.GetAdapter();
   printf("bluetooth-probe: hw adapter present %d on %d classic %d le %d central %d peripheral %d "
          "ext-adv %d le2m %d coded %d max-adv %d hr 0x%08lX\n",
@@ -228,6 +284,32 @@ void HwCheck(bt::Backend& backend, const std::string& want) {
     }
     printf("bluetooth-probe: hw RFCOMM read %d byte(s) in 2 s unasked%s%s\n", total,
            total > 0 ? ": " : "", first.c_str());
+    if (queryState && strcmp(kind, "vendor") == 0) {
+      // One query, "request state" (command 01 01, no body): the device answers with its
+      // state; it changes nothing.
+      std::vector<uint8_t> request = SoundcorePacket(0x01, 0x01, {});
+      int written = socket->Write(request.data(), static_cast<int>(request.size()));
+      printf("bluetooth-probe: hw sent request state %s: %d byte(s)\n",
+             Hex(request.data(), request.size()).c_str(), written);
+      std::vector<uint8_t> reply;
+      ULONGLONG until = GetTickCount64() + 3000;
+      while (written > 0 && GetTickCount64() < until) {
+        int available = socket->Available();
+        if (available <= 0) {
+          Sleep(20);
+          continue;
+        }
+        uint8_t buffer[1024];
+        int n = socket->Read(buffer, available < 1024 ? available : 1024);
+        if (n <= 0) break;
+        reply.insert(reply.end(), buffer, buffer + n);
+        // A whole frame came: stop waiting.
+        if (reply.size() >= 9 && reply.size() >= static_cast<size_t>(reply[7] | reply[8] << 8)) break;
+      }
+      printf("bluetooth-probe: hw reply: %zu byte(s): %s\n", reply.size(),
+             Hex(reply.data(), reply.size()).c_str());
+      DecodeSoundcore(reply);
+    }
   }
   if (socket) socket->Close();
   printf("bluetooth-probe: hw RFCOMM closed\n");
@@ -403,14 +485,16 @@ int main(int argc, char** argv) {
   setvbuf(stdout, nullptr, _IONBF, 0);
   bool inquiry = false, check = false;
   const char* hw = nullptr;
+  bool queryState = false;
   for (int i = 1; i < argc; ++i) {
     if (strcmp(argv[i], "--inquiry") == 0) inquiry = true;
     if (strcmp(argv[i], "--check") == 0) check = true;
     if (strcmp(argv[i], "--hw") == 0) hw = i + 1 < argc ? argv[i + 1] : "Liberty 4 Pro";
+    if (strcmp(argv[i], "--query-state") == 0) queryState = true;
   }
   bt::Backend& backend = bt::Get();
   if (hw != nullptr) {
-    HwCheck(backend, hw);
+    HwCheck(backend, hw, queryState);
     printf("bluetooth-probe: done\n");
     return 0;
   }
