@@ -3,6 +3,8 @@ package gesher.services;
 
 import android.app.ActivityThread;
 import android.content.Context;
+import android.content.pm.IPackageManager;
+import android.content.pm.SystemFeaturesCache;
 import android.content.res.AssetManager;
 import android.os.Binder;
 import android.os.IBinder;
@@ -70,6 +72,10 @@ public final class TextServicesContractTest {
         @SuppressWarnings("unchecked") Map<String, IBinder> cache =
                 (Map<String, IBinder>) cacheField.get(null);
         cache.putAll(created);
+        // ActivityThread.bindApplication normally supplies this cache before
+        // SystemServiceRegistry checks device features during manager lookup.
+        SystemFeaturesCache.setInstance(new SystemFeaturesCache(IPackageManager.Stub
+                .asInterface(created.get("package")).getSystemAvailableFeatures().getList()));
         Constructor<ActivityThread> constructor = ActivityThread.class.getDeclaredConstructor();
         constructor.setAccessible(true);
         Context context = constructor.newInstance().getSystemContext();

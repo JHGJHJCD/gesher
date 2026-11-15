@@ -217,7 +217,10 @@ public final class MediaCallbackContractTest {
     }
     public static void main(String[] args) throws Exception {
         System.loadLibrary("android_runtime");
+        MediaTestBootstrap.initialize("media-callback-contract");
         extractor(false); extractor(true); retriever(); reentrantOperations(); player(); releaseRace(false); releaseRace(true);
         System.out.println("MediaCallbackContractTest all passed: " + checks + " checks");
+        // In-process services own workers; this isolated fixture has no event loop.
+        System.exit(0);
     }
 }
