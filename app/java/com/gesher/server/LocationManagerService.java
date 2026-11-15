@@ -41,6 +41,7 @@ import java.util.Objects;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -88,6 +89,20 @@ public final class LocationManagerService extends ILocationManager.Default {
                 t.setDaemon(true);
                 return t;
             });
+    // Native location polling may block for seconds. Request lifetime timers must
+    // still retire listeners even when no fix arrives from that worker.
+    private final ScheduledExecutorService mExpirationExecutor = newExpirationExecutor();
+
+    private static ScheduledExecutorService newExpirationExecutor() {
+        ScheduledThreadPoolExecutor executor = new ScheduledThreadPoolExecutor(1, r -> {
+            Thread t = new Thread(r, "location-expiration");
+            t.setDaemon(true);
+            return t;
+        });
+        executor.setRemoveOnCancelPolicy(true);
+        return executor;
+    }
+
     private ScheduledFuture<?> mPoll;
     private long mPollInterval;
     /** The enabled state each provider last reported to the registrations. */
@@ -417,10 +432,20 @@ public final class LocationManagerService extends ILocationManager.Default {
             String listenerId) {
         int level = enforceLocationPermission(packageName);
         checkProvider(provider);
+        Objects.requireNonNull(request, "request");
+        Objects.requireNonNull(callback, "callback");
+        IBinder client = Objects.requireNonNull(callback.asBinder(), "callback binder");
         ICancellationSignal transport = CancellationSignal.createTransport();
         CancellationSignal cancel = CancellationSignal.fromTransport(transport);
+        Registration r = new Registration(provider, request, packageName, level);
+        r.current = callback;
+        r.clientBinder = client;
+        r.maxUpdates = 1;
+        r.expiresAt = Math.min(r.expiresAt, SystemClock.elapsedRealtime() + 30_000);
+        cancel.setOnCancelListener(() -> remove(r));
+        if (!add(r)) return transport;
         if (!isEnabled(provider)) {
-            deliverCurrent(callback, null);
+            r.providerEnabledChanged(false);
             return transport;
         }
         Location last;
@@ -428,28 +453,16 @@ public final class LocationManagerService extends ILocationManager.Default {
             last = mLast.get(provider);
         }
         if (last != null && ageMillis(last) <= CURRENT_MAX_AGE_MS) {
-            deliverCurrent(callback, forPermission(last, level));
-            return transport;
+            r.deliver(last);
         }
-        // The next location of the provider, within the request's duration.
-        long duration = Math.min(request.getDurationMillis(), 30_000);
-        Registration r = new Registration(provider, request, packageName, level);
-        r.current = callback;
-        r.maxUpdates = 1;
-        r.expiresAt = SystemClock.elapsedRealtime() + duration;
-        add(r);
-        cancel.setOnCancelListener(() -> remove(r));
-        mExecutor.schedule(() -> {
-            if (remove(r)) deliverCurrent(callback, null);
-        }, duration, TimeUnit.MILLISECONDS);
         return transport;
     }
 
     private static void deliverCurrent(ILocationCallback callback, Location location) {
         try {
             callback.onLocation(location);
-        } catch (RemoteException e) {
-            // gone
+        } catch (RemoteException | RuntimeException e) {
+            log("current location delivery failed: " + e);
         }
     }
 
@@ -465,6 +478,7 @@ public final class LocationManagerService extends ILocationManager.Default {
         final LocationRequest request;
         final String packageName;
         final int level;
+        final boolean systemCaller;
         ILocationListener listener;
         PendingIntent pendingIntent;
         ILocationCallback current;
@@ -473,21 +487,23 @@ public final class LocationManagerService extends ILocationManager.Default {
         volatile boolean retired;
         /** Protected by mLock; unlinking itself happens outside the registry lock. */
         boolean deathLinked;
+        ScheduledFuture<?> expirationTask;
+        // Delivery admission and its count/last fix are protected by mLock.
         int maxUpdates;
         int updates;
         long expiresAt = Long.MAX_VALUE;
         Location lastDelivered;
+        Boolean lastProviderEnabled;
 
         Registration(String provider, LocationRequest request, String packageName, int level) {
             this.provider = provider;
             this.request = request;
             this.packageName = packageName;
             this.level = level;
+            this.systemCaller = (mAm != null ? mAm.callers()
+                    : new CallerIdentity(mPm, null)).isSystem();
             this.maxUpdates = request.getMaxUpdates();
-            long duration = request.getDurationMillis();
-            if (duration != Long.MAX_VALUE) {
-                expiresAt = SystemClock.elapsedRealtime() + duration;
-            }
+            expiresAt = request.getExpirationRealtimeMs(SystemClock.elapsedRealtime());
         }
 
         boolean replaces(Registration other) {
@@ -501,29 +517,47 @@ public final class LocationManagerService extends ILocationManager.Default {
             remove(this);
         }
 
-        /** Delivers {@code location} if the request wants it now; false once it is done. */
-        boolean deliver(Location location) {
-            if (retired) return false;
-            int granted = grantedLocationLevel(packageName, false);
-            if (granted == PERMISSION_NONE) return false;
-            long now = SystemClock.elapsedRealtime();
-            if (now > expiresAt) return false;
-            if (lastDelivered != null) {
-                long minInterval = request.getMinUpdateIntervalMillis();
-                long since = (location.getElapsedRealtimeNanos()
-                        - lastDelivered.getElapsedRealtimeNanos()) / 1_000_000L;
-                if (since < minInterval - Math.min(minInterval / 10, 30_000)) return true;
-                if (lastDelivered.distanceTo(location) < request.getMinUpdateDistanceMeters()) {
-                    return true;
+        /** Reserve a delivery before calling client code, including its terminal claim. */
+        void deliver(Location location) {
+            int granted = grantedLocationLevel(packageName, systemCaller);
+            Location l = null;
+            boolean finished = false;
+            synchronized (mLock) {
+                if (retired) return;
+                if (granted == PERMISSION_NONE || SystemClock.elapsedRealtime() >= expiresAt) {
+                    // An expired current request still owes one null result, even
+                    // if a late fix gets here before the timer executes.
+                    retireLocked(this);
+                    finished = true;
+                } else {
+                    if (lastDelivered != null) {
+                        long minInterval = request.getMinUpdateIntervalMillis();
+                        long since = (location.getElapsedRealtimeNanos()
+                                - lastDelivered.getElapsedRealtimeNanos()) / 1_000_000L;
+                        if (since < minInterval - Math.min(minInterval / 10, 30_000)) return;
+                        if (lastDelivered.distanceTo(location) < request.getMinUpdateDistanceMeters()) {
+                            return;
+                        }
+                    }
+                    l = forPermission(location, Math.min(level, granted));
+                    if (!provider.equals(l.getProvider())) l.setProvider(provider);
+                    lastDelivered = new Location(location);
+                    updates++;
+                    if (updates >= maxUpdates) {
+                        retireLocked(this);
+                        finished = true;
+                    }
                 }
             }
-            Location l = forPermission(location, Math.min(level, granted));
-            if (!provider.equals(l.getProvider())) l.setProvider(provider);
-            lastDelivered = location;
-            updates++;
+            if (finished) {
+                unlink(this);
+                updatePolling();
+            }
             try {
                 if (current != null) {
                     current.onLocation(l);
+                } else if (l == null) {
+                    return;
                 } else if (listener != null) {
                     listener.onLocationChanged(List.of(l), null);
                 } else if (pendingIntent != null) {
@@ -534,13 +568,23 @@ public final class LocationManagerService extends ILocationManager.Default {
                 }
             } catch (RemoteException | RuntimeException e) {
                 log("delivering to " + packageName + " failed: " + e);
-                return false;
+                remove(this);
             }
-            return updates < maxUpdates;
         }
 
         void providerEnabledChanged(boolean enabled) {
-            if (retired) return;
+            if (current != null) {
+                if (!enabled && remove(this)) deliverCurrent(current, null);
+                return;
+            }
+            synchronized (mLock) {
+                if (retired || (lastProviderEnabled != null && lastProviderEnabled == enabled)) {
+                    return;
+                }
+                // Registration and the asynchronous provider check may observe
+                // the same initial disabled state. Claim each change once.
+                lastProviderEnabled = enabled;
+            }
             try {
                 if (listener != null) {
                     listener.onProviderEnabledChanged(provider, enabled);
@@ -561,7 +605,8 @@ public final class LocationManagerService extends ILocationManager.Default {
     }
 
     private boolean add(Registration r) {
-        if (r.listener != null) {
+        boolean linksDeath = r.listener != null || r.current != null;
+        if (linksDeath) {
             try {
                 r.clientBinder.linkToDeath(r, 0);
             } catch (RemoteException e) {
@@ -572,7 +617,7 @@ public final class LocationManagerService extends ILocationManager.Default {
         List<Registration> replaced = new ArrayList<>();
         boolean published;
         synchronized (mLock) {
-            r.deathLinked = r.listener != null;
+            r.deathLinked = linksDeath;
             published = !r.retired;
             if (published) {
                 for (Iterator<Registration> it = mRegistrations.iterator(); it.hasNext();) {
@@ -584,6 +629,7 @@ public final class LocationManagerService extends ILocationManager.Default {
                     }
                 }
                 mRegistrations.add(r);
+                scheduleExpirationLocked(r);
             }
         }
         if (!published) unlink(r);
@@ -592,12 +638,17 @@ public final class LocationManagerService extends ILocationManager.Default {
         return published;
     }
 
+    /** Release record-owned timer/death registrations outside the registry lock. */
     private void unlink(Registration r) {
         boolean linked;
+        ScheduledFuture<?> expiration;
         synchronized (mLock) {
             linked = r.deathLinked;
             r.deathLinked = false;
+            expiration = r.expirationTask;
+            r.expirationTask = null;
         }
+        if (expiration != null) expiration.cancel(false);
         if (linked) {
             try {
                 r.clientBinder.unlinkToDeath(r, 0);
@@ -610,14 +661,41 @@ public final class LocationManagerService extends ILocationManager.Default {
     private boolean remove(Registration r) {
         boolean removed;
         synchronized (mLock) {
-            r.retired = true;
-            removed = mRegistrations.remove(r);
+            removed = retireLocked(r);
         }
         unlink(r);
         if (removed) {
             updatePolling();
         }
         return removed;
+    }
+
+    /** mLock serializes terminal success, expiry, replacement, cancellation and death. */
+    private boolean retireLocked(Registration r) {
+        r.retired = true;
+        return mRegistrations.remove(r);
+    }
+
+    private void scheduleExpirationLocked(Registration r) {
+        if (r.expiresAt == Long.MAX_VALUE) return;
+        long delay = Math.max(0, r.expiresAt - SystemClock.elapsedRealtime());
+        r.expirationTask = mExpirationExecutor.schedule(() -> expire(r), delay,
+                TimeUnit.MILLISECONDS);
+    }
+
+    private void expire(Registration r) {
+        synchronized (mLock) {
+            if (r.retired) return;
+            // A scheduler wakeup may precede the elapsed-realtime deadline.
+            if (SystemClock.elapsedRealtime() < r.expiresAt) {
+                scheduleExpirationLocked(r);
+                return;
+            }
+            retireLocked(r);
+        }
+        unlink(r);
+        updatePolling();
+        if (r.current != null) deliverCurrent(r.current, null);
     }
 
     @Override
@@ -738,9 +816,7 @@ public final class LocationManagerService extends ILocationManager.Default {
                 }
             }
         }
-        for (Registration r : targets) {
-            if (!r.deliver(location)) remove(r);
-        }
+        for (Registration r : targets) r.deliver(location);
     }
 
     /** Polls Windows for the registrations on its providers, at their shortest interval. */
@@ -927,7 +1003,9 @@ public final class LocationManagerService extends ILocationManager.Default {
             synchronized (mLock) {
                 before = mReportedEnabled.put(p, enabled);
             }
-            if (before == null || before == enabled) continue;
+            // A first disabled observation must also complete requests admitted
+            // before the asynchronous initial provider check.
+            if (before == null ? enabled : before == enabled) continue;
             log("provider " + p + (enabled ? " enabled" : " disabled"));
             List<Registration> targets = new ArrayList<>();
             synchronized (mLock) {
@@ -936,6 +1014,9 @@ public final class LocationManagerService extends ILocationManager.Default {
                 }
             }
             for (Registration r : targets) r.providerEnabledChanged(enabled);
+            // A first observation initializes provider state; it is not a
+            // provider transition to broadcast to unrelated receivers.
+            if (before == null) continue;
             Intent changed = new Intent(LocationManager.PROVIDERS_CHANGED_ACTION);
             changed.putExtra(LocationManager.EXTRA_PROVIDER_NAME, p);
             changed.putExtra(LocationManager.EXTRA_PROVIDER_ENABLED, enabled);
@@ -988,7 +1069,9 @@ public final class LocationManagerService extends ILocationManager.Default {
                     if (r.provider.equals(provider)) gone.add(r);
                 }
             }
-            for (Registration r : gone) remove(r);
+            for (Registration r : gone) {
+                if (remove(r) && r.current != null) deliverCurrent(r.current, null);
+            }
         }
         updatePolling();
         checkEnabledChanges();

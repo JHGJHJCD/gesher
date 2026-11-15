@@ -934,17 +934,22 @@ int Player::GetDuration(int* msec) {
 
 int Player::Reset() {
   std::shared_ptr<Playback> pb;
+  std::shared_ptr<DataSource> source;
   {
     std::lock_guard<std::mutex> lock(mu_);
     loop_ = false;
     prepare_sync_ = false;
     pb = std::move(playback_);
-    source_.reset();
+    source = std::move(source_);
     state_ = kIdle;
     current_position_ = seek_position_ = -1;
   }
   prepared_cv_.notify_all();
   if (pb != nullptr) pb->Shutdown();
+  // MediaDataSource.close may query/release the player. Both owners retire
+  // outside mu_, after publishing the idle state and stopping the worker.
+  pb.reset();
+  source.reset();
   return kPlayerOk;
 }
 

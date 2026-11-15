@@ -192,7 +192,7 @@ void JNICALL MMR_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject data_s
     jniThrow(env, "java/lang/IllegalStateException", "No retriever available");
     return;
   }
-  auto source = JavaDataSource::Create(env, data_source);
+  auto source = OpenJavaDataSource(env, data_source);
   if (source == nullptr) return;
   SetFromSource(env, thiz, std::move(source), "MediaDataSource");
 }

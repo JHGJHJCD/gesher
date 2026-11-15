@@ -55,6 +55,7 @@ struct WindowEvent {
     kVisibility = 16,
     kOutside = 17,
     kActivated = 18,  // top-level activation, independent of keyboard-focus transitions
+    kMouseCancel = 19,  // mouse capture was lost before all buttons were released
     // windows3 track (docs/windows3.md): the part of the client area the
     // Windows touch keyboard (IFrameworkInputPane) covers: rows button (top)
     // to modifiers (bottom) of the client area; button -1 when it covers

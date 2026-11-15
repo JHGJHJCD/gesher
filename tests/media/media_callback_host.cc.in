@@ -98,7 +98,7 @@ void JNICALL Source(JNIEnv* env, jobject thiz, jboolean extractor, jobject callb
   else MMR_setDataSourceCallback(env, thiz, callback);
 }
 jbyteArray JNICALL Read(JNIEnv* env, jclass, jobject callback, jlong offset, jint size) {
-  auto source = JavaDataSource::Create(env, callback);
+  auto source = OpenJavaDataSource(env, callback);
   if (source == nullptr) return nullptr;
   std::vector<uint8_t> bytes(static_cast<size_t>(std::max(size, 0)) + 16, 0x6b);
   ssize_t count = source->ReadAt(offset, bytes.data() + 8, static_cast<size_t>(size));
@@ -114,7 +114,7 @@ jbyteArray JNICALL Read(JNIEnv* env, jclass, jobject callback, jlong offset, jin
   return result;
 }
 jlong JNICALL Probe(JNIEnv* env, jclass, jobject callback, jint mode) {
-  auto source = JavaDataSource::Create(env, callback);
+  auto source = OpenJavaDataSource(env, callback);
   if (source == nullptr) return -99;
   if (mode == 0) {
     source->Size(); return source->Size();

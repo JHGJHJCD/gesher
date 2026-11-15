@@ -123,7 +123,10 @@ int BIONIC_SYSV SemWait(void* s) { return SemWaitUntil(s, nullptr, 0); }
 int BIONIC_SYSV SemTimedwait(void* s, const LinuxTimespec* abs) { return SemWaitUntil(s, abs, 0); }
 int BIONIC_SYSV SemTimedwaitMonotonic(void* s, const LinuxTimespec* abs) { return SemWaitUntil(s, abs, 1); }
 int BIONIC_SYSV SemClockwait(void* s, int clock, const LinuxTimespec* abs) {
-  return SemWaitUntil(s, abs, clock == 0 ? 0 : 1);
+  // Android's clock-selection failure returns the error number directly,
+  // unlike a valid-clock semaphore wait's -1/errno convention.
+  if (clock != 0 && clock != 1) return kEINVAL;
+  return SemWaitUntil(s, abs, clock);
 }
 int BIONIC_SYSV SemGetvalue(void* s, int* v) {
   *v = static_cast<int>(Word(s)->load());
@@ -243,53 +246,6 @@ int BIONIC_SYSV PthreadRwlockattrDestroy(int64_t*) { return 0; }
 int BIONIC_SYSV PthreadRwlockattrGetkind(const int64_t*, int* v) {
   *v = 0;
   return 0;
-}
-
-// The timed forms the core lacks: retry the try form until the deadline.
-using TryFn = int(BIONIC_SYSV*)(void*);
-int TimedRetry(const char* try_name, void* obj, const LinuxTimespec* abs, int clock) {
-  TryFn try_fn = Shim<TryFn>(try_name);
-  if (try_fn == nullptr) return kENOSYS;
-  if (abs != nullptr && (abs->tv_nsec < 0 || abs->tv_nsec >= 1000000000)) return kEINVAL;
-  for (int spins = 0;; ++spins) {
-    int r = try_fn(obj);
-    if (r != kEBUSY) return r;
-    if (abs != nullptr && MsUntil(abs, clock) < 0) return kETIMEDOUT;
-    if (spins < 64) {
-      SwitchToThread();
-    } else {
-      Sleep(1);
-    }
-  }
-}
-int BIONIC_SYSV RwlockTimedrd(void* rw, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_rwlock_tryrdlock", rw, abs, 0);
-}
-int BIONIC_SYSV RwlockTimedwr(void* rw, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_rwlock_trywrlock", rw, abs, 0);
-}
-int BIONIC_SYSV RwlockTimedrdMono(void* rw, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_rwlock_tryrdlock", rw, abs, 1);
-}
-int BIONIC_SYSV RwlockTimedwrMono(void* rw, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_rwlock_trywrlock", rw, abs, 1);
-}
-int BIONIC_SYSV RwlockClockrd(void* rw, int clock, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_rwlock_tryrdlock", rw, abs, clock == 0 ? 0 : 1);
-}
-int BIONIC_SYSV RwlockClockwr(void* rw, int clock, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_rwlock_trywrlock", rw, abs, clock == 0 ? 0 : 1);
-}
-int BIONIC_SYSV MutexTimedlockMono(void* m, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_mutex_trylock", m, abs, 1);
-}
-int BIONIC_SYSV MutexClocklock(void* m, int clock, const LinuxTimespec* abs) {
-  return TimedRetry("pthread_mutex_trylock", m, abs, clock == 0 ? 0 : 1);
-}
-int BIONIC_SYSV CondClockwait(void* c, void* m, int clock, const LinuxTimespec* abs) {
-  using Timed = int(BIONIC_SYSV*)(void*, void*, const LinuxTimespec*);
-  Timed fn = Shim<Timed>(clock == 0 ? "pthread_cond_timedwait" : "pthread_cond_timedwait_monotonic_np");
-  return fn != nullptr ? fn(c, m, abs) : kENOSYS;
 }
 
 // Spinlocks (8 bytes): word 0 is 1 while held.
@@ -1036,15 +992,6 @@ void RegisterExtraSys(SymbolTable& t) {
   E("pthread_rwlockattr_setpshared", PthreadAttrPsharedSet);
   E("pthread_rwlockattr_getkind_np", PthreadRwlockattrGetkind);
   E("pthread_rwlockattr_setkind_np", PthreadAttrPsharedSet);
-  E("pthread_rwlock_timedrdlock", RwlockTimedrd);
-  E("pthread_rwlock_timedwrlock", RwlockTimedwr);
-  E("pthread_rwlock_timedrdlock_monotonic_np", RwlockTimedrdMono);
-  E("pthread_rwlock_timedwrlock_monotonic_np", RwlockTimedwrMono);
-  E("pthread_rwlock_clockrdlock", RwlockClockrd);
-  E("pthread_rwlock_clockwrlock", RwlockClockwr);
-  E("pthread_mutex_timedlock_monotonic_np", MutexTimedlockMono);
-  E("pthread_mutex_clocklock", MutexClocklock);
-  E("pthread_cond_clockwait", CondClockwait);
   E("pthread_spin_init", SpinInit);
   E("pthread_spin_destroy", SpinDestroy);
   E("pthread_spin_lock", SpinLock);

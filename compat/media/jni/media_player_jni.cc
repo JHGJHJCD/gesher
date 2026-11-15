@@ -182,7 +182,7 @@ void JNICALL MP_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject dataSou
     jniThrow(env, "java/lang/IllegalArgumentException", nullptr);
     return;
   }
-  std::shared_ptr<DataSource> source = JavaDataSource::Create(env, dataSource);
+  std::shared_ptr<DataSource> source = OpenJavaDataSource(env, dataSource);
   if (source == nullptr) return;
   const int status = mp->SetDataSource(source);
   // Close a rejected candidate before the public error mapper invokes JNI.

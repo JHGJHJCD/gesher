@@ -67,7 +67,7 @@ def main():
             header.write_text(text.replace("if (receiver_->operation_active)", "if (false)"))
         command = shlex.split(args.cxx) + ["-std=c++20", "-O1", "-g", "-Wall", "-Wextra", "-Werror", "-fno-exceptions", "-pthread",
                     "-shared", "-fPIC", "-fsanitize=undefined", "-fno-sanitize-recover=undefined",
-                    "-I", str(folder), "-I", str(ROOT), "-I", str(java / "include"), "-I", str(java / "include/linux"), str(cpp), "-o", str(library)]
+                    "-I", str(folder), "-I", str(ROOT), "-I", str(java / "include"), "-I", str(java / "include/linux"), str(cpp), str(ROOT / "compat/media/jni/java_data_source.cc"), "-o", str(library)]
         subprocess.run(command, check=True, timeout=120)
         subprocess.run([str(java / "bin/javac"), "-d", str(folder), str(ROOT / "tests/media/MediaCallbackHostTest.java")], check=True, timeout=60)
         cases = ("retriever",) if args.negative_control in ("stale-art", "album-art-key") else (("extractor",) if args.negative_control == "unavailable-callback" else (("reentrant",) if args.negative_control else ("adapter", "retriever", "extractor", "release", "reentrant")))

@@ -244,7 +244,7 @@ void JNICALL ME_setDataSourceFD(JNIEnv* env, jobject thiz, jobject fileDescripto
 
 void JNICALL ME_setDataSourceCallback(JNIEnv* env, jobject thiz, jobject data_source) {
   if (Get(env, thiz) == nullptr) return;
-  auto source = JavaDataSource::Create(env, data_source);
+  auto source = OpenJavaDataSource(env, data_source);
   if (source == nullptr) return;
   Open(env, thiz, std::move(source), "MediaDataSource");
 }

@@ -52,6 +52,10 @@ unsupported, or qualify every Android audio effect implementation.
 MediaPlayer, MediaExtractor and MediaMetadataRetriever now share the same
 `JavaDataSource` adapter. The latter two now register their actual MediaDataSource
 native overloads; their former void-success stand-ins never consumed callbacks.
+Integration with the concurrent callback audit keeps this adapter in the shared
+`java_data_source.cc` translation unit, reached through `OpenJavaDataSource` by
+all three consumers. Both independent checked-JNI suites remain mandatory:
+`test_media_callback_contracts.py` and `test_media_callback_adapter.py`.
 The adapter checks Java allocations/method lookups, bounds each callback to a
 64 KiB buffer, serializes callbacks sharing that buffer, converts Java EOF to
 native EOF, checks callback return counts and offset arithmetic, and latches
