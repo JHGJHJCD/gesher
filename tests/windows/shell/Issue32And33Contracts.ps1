@@ -44,6 +44,7 @@ function Show-ModernConfirmDialog {
     return $script:ApproveDialog
 }
 $literalLabel = 'Probe & <tag> "{1}"'
+$literalMessage = '{literal} & <tag> "{1}"' + [char]13 + [char]10 + 'second' + [char]9 + 'tabbed' + [char]10 + 'third'
 $iconMarker = [object]::new()
 foreach ($language in 'en', 'he') {
     $script:GesherUiLanguage = $language
@@ -69,6 +70,69 @@ foreach ($language in 'en', 'he') {
     }
 }
 Write-Host "PASS: $script:DialogChecks production dialog wrapper checks"
+
+# Run the actual XAML preparation and post-load text assignments. Only WPF
+# construction is modeled, using controls named by the production XAML itself.
+function Test-PreparedDialogText([string] $FunctionName, [bool] $OptionalText) {
+    $definition = $panelAst.Find({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $FunctionName
+    }, $false)
+    $statements = @($definition.Body.EndBlock.Statements)
+    $readerAt = -1; $loadAt = -1; $ownerAt = -1
+    for ($index = 0; $index -lt $statements.Count; $index++) {
+        if ($statements[$index] -is [Management.Automation.Language.AssignmentStatementAst]) {
+            switch ($statements[$index].Left.Extent.Text) {
+                '$reader' { $readerAt = $index }
+                '$dialog' { $loadAt = $index }
+                '$dialog.Owner' { $ownerAt = $index }
+            }
+        }
+    }
+    Assert-Dialog ($readerAt -gt 0 -and $loadAt -eq $readerAt + 1 -and $ownerAt -gt $loadAt + 1) 'Production text setup is between XAML loading and owner assignment'
+    $Title = $literalMessage; $Message = $literalMessage
+    $Detail = if ($OptionalText) { $literalMessage } else { $null }
+    $SubTitle = if ($OptionalText) { $literalMessage } else { $null }
+    $ConfirmText = $literalMessage; $CancelText = $literalMessage
+    $IsDanger = $true; $IsWarning = $false; $IsError = $OptionalText
+    $flowDirection = if ($script:GesherUiLanguage -eq 'he') { 'RightToLeft' } else { 'LeftToRight' }
+    . ([scriptblock]::Create(($statements[0..($readerAt - 1)] | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine))
+    $controls = @{}
+    foreach ($element in $dialogXaml.SelectNodes('//*[@Name]')) {
+        $controls[$element.GetAttribute('Name')] = [pscustomobject]@{
+            Text = $element.GetAttribute('Text')
+            Content = $element.GetAttribute('Content')
+            Visibility = $element.GetAttribute('Visibility')
+        }
+    }
+    $dialog = [pscustomobject]@{ Title = $dialogXaml.DocumentElement.GetAttribute('Title'); Controls = $controls }
+    $dialog | Add-Member -MemberType ScriptMethod -Name FindName -Value { param($name) $this.Controls[$name] }
+    . ([scriptblock]::Create(($statements[($loadAt + 1)..($ownerAt - 1)] | ForEach-Object { $_.Extent.Text }) -join [Environment]::NewLine))
+    Assert-Dialog ($dialog.Title -ceq $Title) 'Dialog title retains literal braces, XML characters and all whitespace'
+    Assert-Dialog ($dialog.FindName('DialogMessage').Text -ceq $Message) 'Dialog message retains CRLF, LF, tab and literal markup'
+    if ($FunctionName -eq 'Show-ModernConfirmDialog') {
+        Assert-Dialog ($dialog.FindName('DialogTitle').Text -ceq $Title) 'Confirmation heading retains literal text'
+        Assert-Dialog ($dialog.FindName('BtnConfirm').Content -ceq $ConfirmText -and $dialog.FindName('BtnCancel').Content -ceq $CancelText) 'Both action labels retain literal text'
+        foreach ($name in 'DialogSubTitle', 'DialogDetail') {
+            $control = $dialog.FindName($name)
+            if ($OptionalText) {
+                Assert-Dialog ($control.Text -ceq $literalMessage -and $control.Visibility -eq 'Visible') 'Optional dialog text is exact and visible'
+            } else {
+                Assert-Dialog ($control.Text -eq '' -and $control.Visibility -eq 'Collapsed') 'Missing optional dialog text stays collapsed'
+            }
+        }
+    } else {
+        Assert-Dialog ($dialog.FindName('BtnOk').Content -ceq (Get-GesherText 'cp_dialog_ok')) 'Message action retains the actual localized label'
+    }
+}
+$beforeTextChecks = $script:DialogChecks
+foreach ($language in 'en', 'he') {
+    $script:GesherUiLanguage = $language
+    foreach ($optional in $true, $false) {
+        Test-PreparedDialogText 'Show-ModernConfirmDialog' $optional
+        Test-PreparedDialogText 'Show-ModernMessageDialog' $optional
+    }
+}
+Write-Host "PASS: $($script:DialogChecks - $beforeTextChecks) production dialog text preparation checks"
 
 if ($env:OS -ne 'Windows_NT') {
     Write-Host 'SKIP: actual WPF interactions require Windows; the Windows CI gates run them.'
@@ -146,7 +210,7 @@ try {
             Invoke-WpfDialogCase @fixture -Show { Confirm-PanelUpdateInstallation }
         }
         foreach ($isError in $true, $false) {
-            Invoke-WpfDialogCase -Action Ok -MessageDialog -ExpectedTitle $literalLabel -ExpectedText $literalLabel -Show { Show-ModernMessageDialog -Title $literalLabel -Message $literalLabel -IsError $isError }
+            Invoke-WpfDialogCase -Action Ok -MessageDialog -ExpectedTitle $literalMessage -ExpectedText $literalMessage -Show { Show-ModernMessageDialog -Title $literalMessage -Message $literalMessage -IsError $isError }
         }
     }
 } finally {

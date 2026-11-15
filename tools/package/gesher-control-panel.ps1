@@ -844,17 +844,10 @@ function Show-ModernConfirmDialog {
     $badgeBg = if ($IsDanger) { '#FEE4E2' } elseif ($IsWarning) { '#FEF0C7' } else { '#F2F4F7' }
     $badgeFg = if ($IsDanger) { '#D92D20' } elseif ($IsWarning) { '#DC6803' } else { '#344054' }
     $btnStyle = if ($IsDanger) { 'DangerActionButton' } else { 'PrimaryButton' }
-    $escapedTitle = [System.Security.SecurityElement]::Escape($Title)
-    $escapedMessage = [System.Security.SecurityElement]::Escape($Message)
-    $escapedDetail = if ($Detail) { [System.Security.SecurityElement]::Escape($Detail) } else { '' }
-    $escapedSubTitle = if ($SubTitle) { [System.Security.SecurityElement]::Escape($SubTitle) } else { '' }
-    $escapedConfirm = [System.Security.SecurityElement]::Escape($ConfirmText)
-    $escapedCancel = [System.Security.SecurityElement]::Escape($CancelText)
 
     [xml]$dialogXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="$escapedTitle"
         Width="460" SizeToContent="Height"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
@@ -933,20 +926,20 @@ function Show-ModernConfirmDialog {
                     <Image Name="AppIconImage" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
                 </Border>
                 <StackPanel Grid.Column="2" VerticalAlignment="Center">
-                    <TextBlock Text="$escapedTitle" FontSize="16" FontWeight="Bold" Foreground="#101828"/>
-                    $(if ($SubTitle) { "<TextBlock Text=""$escapedSubTitle"" FontSize=""12"" Foreground=""#667085"" Margin=""0,2,0,0""/>" })
+                    <TextBlock Name="DialogTitle" FontSize="16" FontWeight="Bold" Foreground="#101828"/>
+                    <TextBlock Name="DialogSubTitle" FontSize="12" Foreground="#667085" Margin="0,2,0,0" Visibility="Collapsed"/>
                 </StackPanel>
             </Grid>
 
             <StackPanel Grid.Row="1">
-                <TextBlock Text="$escapedMessage" FontSize="13" FontWeight="SemiBold" Foreground="#344054" TextWrapping="Wrap" Margin="0,0,0,6"/>
-                $(if ($Detail) { "<TextBlock Text=""$escapedDetail"" FontSize=""12"" Foreground=""#667085"" TextWrapping=""Wrap""/>" })
+                <TextBlock Name="DialogMessage" FontSize="13" FontWeight="SemiBold" Foreground="#344054" TextWrapping="Wrap" Margin="0,0,0,6"/>
+                <TextBlock Name="DialogDetail" FontSize="12" Foreground="#667085" TextWrapping="Wrap" Visibility="Collapsed"/>
             </StackPanel>
 
             <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Name="BtnCancel" Content="$escapedCancel" IsCancel="True" MinWidth="85"/>
+                <Button Name="BtnCancel" IsCancel="True" MinWidth="85"/>
                 <Border Width="10"/>
-                <Button Name="BtnConfirm" Style="{StaticResource $btnStyle}" Content="$escapedConfirm" IsDefault="True" MinWidth="85"/>
+                <Button Name="BtnConfirm" Style="{StaticResource $btnStyle}" IsDefault="True" MinWidth="85"/>
             </StackPanel>
         </Grid>
     </Border>
@@ -954,6 +947,21 @@ function Show-ModernConfirmDialog {
 "@
     $reader = [System.Xml.XmlNodeReader]::new($dialogXaml)
     $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+    # Set literal strings after XAML loading: XML attributes normalize newlines
+    # and tabs, and XAML can interpret a leading brace as a markup extension.
+    $dialog.Title = $Title
+    $dialog.FindName('DialogTitle').Text = $Title
+    $dialog.FindName('DialogMessage').Text = $Message
+    $dialog.FindName('BtnConfirm').Content = $ConfirmText
+    $dialog.FindName('BtnCancel').Content = $CancelText
+    if ($SubTitle) {
+        $dialog.FindName('DialogSubTitle').Text = $SubTitle
+        $dialog.FindName('DialogSubTitle').Visibility = 'Visible'
+    }
+    if ($Detail) {
+        $dialog.FindName('DialogDetail').Text = $Detail
+        $dialog.FindName('DialogDetail').Visibility = 'Visible'
+    }
     $dialog.Owner = $window
     if ($window.Icon) { $dialog.Icon = $window.Icon }
 
@@ -1004,16 +1012,12 @@ function Show-ModernMessageDialog {
         [bool] $IsError = $false
     )
 
-    $okText = [System.Security.SecurityElement]::Escape((Get-GesherText 'cp_dialog_ok'))
-    $escapedTitle = [System.Security.SecurityElement]::Escape($Title)
-    $escapedMessage = [System.Security.SecurityElement]::Escape($Message)
     $badgeBg = if ($IsError) { '#FEE4E2' } else { '#E0F2FE' }
     $badgeFg = if ($IsError) { '#D92D20' } else { '#0284C7' }
 
     [xml]$dialogXaml = @"
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="$escapedTitle"
         Width="440" SizeToContent="Height"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
@@ -1067,10 +1071,10 @@ function Show-ModernMessageDialog {
                 <Border Grid.Column="0" Width="40" Height="40" CornerRadius="20" Background="$badgeBg" VerticalAlignment="Top">
                     <TextBlock Text="$(if ($IsError) { '!' } else { 'i' })" FontWeight="Bold" FontSize="18" Foreground="$badgeFg" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Border>
-                <TextBlock Grid.Column="2" Text="$escapedMessage" FontSize="13" Foreground="#344054" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                <TextBlock Name="DialogMessage" Grid.Column="2" FontSize="13" Foreground="#344054" TextWrapping="Wrap" VerticalAlignment="Center"/>
             </Grid>
             <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Name="BtnOk" Content="$okText" IsDefault="True" IsCancel="True" MinWidth="85"/>
+                <Button Name="BtnOk" IsDefault="True" IsCancel="True" MinWidth="85"/>
             </StackPanel>
         </Grid>
     </Border>
@@ -1078,6 +1082,9 @@ function Show-ModernMessageDialog {
 "@
     $reader = [System.Xml.XmlNodeReader]::new($dialogXaml)
     $dialog = [System.Windows.Markup.XamlReader]::Load($reader)
+    $dialog.Title = $Title
+    $dialog.FindName('DialogMessage').Text = $Message
+    $dialog.FindName('BtnOk').Content = Get-GesherText 'cp_dialog_ok'
     $dialog.Owner = $window
     if ($window.Icon) { $dialog.Icon = $window.Icon }
     $btnOk = $dialog.FindName('BtnOk')
