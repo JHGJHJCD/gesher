@@ -28,6 +28,18 @@ jobs:
       policy_ref: ${{ github.repository }}/.github/workflows/ci.yml@${{ github.sha }}
     steps:
       - run: echo "SOURCE_IDENTITY source=${{ github.sha }}"
+  automerge-script:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/scripts
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: automerge rules (label, push, CI-not-run, pending/failed checks)
+        run: node --test .github/scripts/automerge.test.js
   update-contracts:
     needs: [source-identity]
     strategy:
