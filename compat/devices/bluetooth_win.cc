@@ -20,6 +20,7 @@
 
 #include <map>
 #include <mutex>
+#include <type_traits>
 
 #include "bluetooth_queue.h"
 #include "winrt.h"
@@ -1561,12 +1562,53 @@ class WinGatt final : public Gatt {
   std::map<uint16_t, EventRegistrationToken> notifyTokens_;
 };
 
-// --- RFCOMM over Winsock ----------------------------------------------------------------------
+// --- RFCOMM over Winsock ---------------------------------------------------------------------
+
+// Winsock's functions named like POSIX ones, looked up in ws2_32.dll: their import
+// library members also define `socket`, `connect`... which collide with gesher-base's
+// at link time (ADR 0009). The others (WSA*, closesocket, ioctlsocket) are imported.
+struct WinsockApi {
+  SOCKET(WSAAPI* socket)(int, int, int) = nullptr;
+  int(WSAAPI* connect)(SOCKET, const sockaddr*, int) = nullptr;
+  int(WSAAPI* bind)(SOCKET, const sockaddr*, int) = nullptr;
+  int(WSAAPI* listen)(SOCKET, int) = nullptr;
+  SOCKET(WSAAPI* accept)(SOCKET, sockaddr*, int*) = nullptr;
+  int(WSAAPI* getpeername)(SOCKET, sockaddr*, int*) = nullptr;
+  int(WSAAPI* getsockname)(SOCKET, sockaddr*, int*) = nullptr;
+  int(WSAAPI* getsockopt)(SOCKET, int, int, char*, int*) = nullptr;
+  int(WSAAPI* setsockopt)(SOCKET, int, int, const char*, int) = nullptr;
+  int(WSAAPI* shutdown)(SOCKET, int) = nullptr;
+  int(WSAAPI* recv)(SOCKET, char*, int, int) = nullptr;
+  int(WSAAPI* send)(SOCKET, const char*, int, int) = nullptr;
+  int(WSAAPI* select)(int, fd_set*, fd_set*, fd_set*, const timeval*) = nullptr;
+  bool ok = false;
+};
+
+const WinsockApi& Ws() {
+  static WinsockApi api;
+  static std::once_flag once;
+  std::call_once(once, [] {
+    HMODULE dll = LoadLibraryExW(L"ws2_32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (dll == nullptr) return;
+    auto find = [dll](auto& f, const char* name) {
+      f = reinterpret_cast<std::remove_reference_t<decltype(f)>>(
+          reinterpret_cast<void*>(GetProcAddress(dll, name)));
+      return f != nullptr;
+    };
+    api.ok = find(api.socket, "socket") && find(api.connect, "connect") &&
+             find(api.bind, "bind") && find(api.listen, "listen") &&
+             find(api.accept, "accept") && find(api.getpeername, "getpeername") &&
+             find(api.getsockname, "getsockname") && find(api.getsockopt, "getsockopt") &&
+             find(api.setsockopt, "setsockopt") && find(api.shutdown, "shutdown") &&
+             find(api.recv, "recv") && find(api.send, "send") && find(api.select, "select");
+  });
+  return api;
+}
 
 bool StartWinsock() {
   static bool ok = [] {
     WSADATA data;
-    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+    return Ws().ok && WSAStartup(MAKEWORD(2, 2), &data) == 0;
   }();
   return ok;
 }
@@ -1584,13 +1626,13 @@ int WaitReady(SOCKET s, bool write, const std::atomic<bool>& closed, int timeout
     FD_ZERO(&errors);
     FD_SET(s, &errors);
     timeval step = {0, 200 * 1000};
-    int n = select(0, write ? nullptr : &set, write ? &set : nullptr, &errors, &step);
+    int n = Ws().select(0, write ? nullptr : &set, write ? &set : nullptr, &errors, &step);
     if (n == SOCKET_ERROR) return -WSAGetLastError();
     if (n > 0) {
       if (FD_ISSET(s, &errors)) {
         int error = 0;
         int size = sizeof(error);
-        getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size);
+        Ws().getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &size);
         return -(error != 0 ? error : WSAECONNRESET);
       }
       return 1;
@@ -1619,7 +1661,7 @@ class WinSocket final : public Socket {
     if (closed_.load()) return E_ABORT;
     u_long nonBlocking = 1;
     bool waitable = ioctlsocket(s_, FIONBIO, &nonBlocking) == 0;
-    int result = connect(s_, reinterpret_cast<const SOCKADDR*>(&target_), sizeof(target_));
+    int result = Ws().connect(s_, reinterpret_cast<const SOCKADDR*>(&target_), sizeof(target_));
     if (result == SOCKET_ERROR) {
       int error = WSAGetLastError();
       if (!waitable || (error != WSAEWOULDBLOCK && error != WSAEINPROGRESS)) {
@@ -1630,7 +1672,7 @@ class WinSocket final : public Socket {
       if (ready < 0) return HRESULT_FROM_WIN32(-ready);
       int soError = 0;
       int size = sizeof(soError);
-      getsockopt(s_, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &size);
+      Ws().getsockopt(s_, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&soError), &size);
       if (soError != 0) return HRESULT_FROM_WIN32(soError);
     }
     if (waitable) {
@@ -1639,7 +1681,7 @@ class WinSocket final : public Socket {
     }
     SOCKADDR_BTH peer = {};
     int size = sizeof(peer);
-    if (getpeername(s_, reinterpret_cast<SOCKADDR*>(&peer), &size) == 0) {
+    if (Ws().getpeername(s_, reinterpret_cast<SOCKADDR*>(&peer), &size) == 0) {
       channel_ = static_cast<int>(peer.port);
     }
     pending_ = false;
@@ -1649,7 +1691,7 @@ class WinSocket final : public Socket {
   int Read(uint8_t* buffer, int length) override {
     int ready = WaitReady(s_, false, closed_);
     if (ready <= 0) return ready == 0 ? 0 : ready;
-    int n = recv(s_, reinterpret_cast<char*>(buffer), length, 0);
+    int n = Ws().recv(s_, reinterpret_cast<char*>(buffer), length, 0);
     if (n == SOCKET_ERROR) {
       int error = WSAGetLastError();
       return closed_.load() ? 0 : -error;
@@ -1662,7 +1704,7 @@ class WinSocket final : public Socket {
     while (done < length) {
       int ready = WaitReady(s_, true, closed_);
       if (ready <= 0) return ready == 0 ? -WSAENOTCONN : ready;
-      int n = send(s_, reinterpret_cast<const char*>(buffer) + done, length - done, 0);
+      int n = Ws().send(s_, reinterpret_cast<const char*>(buffer) + done, length - done, 0);
       if (n == SOCKET_ERROR) return -WSAGetLastError();
       done += n;
     }
@@ -1679,7 +1721,7 @@ class WinSocket final : public Socket {
   uint64_t Remote() override { return remote_; }
 
   void Close() override {
-    if (!closed_.exchange(true)) shutdown(s_, SD_BOTH);
+    if (!closed_.exchange(true)) Ws().shutdown(s_, SD_BOTH);
   }
 
  private:
@@ -1725,7 +1767,7 @@ class WinServer final : public Server {
     }
     SOCKADDR_BTH remote = {};
     int size = sizeof(remote);
-    SOCKET c = accept(s_, reinterpret_cast<SOCKADDR*>(&remote), &size);
+    SOCKET c = Ws().accept(s_, reinterpret_cast<SOCKADDR*>(&remote), &size);
     if (c == INVALID_SOCKET) {
       *hr = HRESULT_FROM_WIN32(WSAGetLastError());
       return nullptr;
@@ -1739,7 +1781,7 @@ class WinServer final : public Server {
   void Close() override {
     if (closed_.exchange(true)) return;
     if (registered_) Register(false);
-    shutdown(s_, SD_BOTH);
+    Ws().shutdown(s_, SD_BOTH);
   }
 
   bool registered_ = false;
@@ -2043,7 +2085,7 @@ class Windows final : public Backend {
       *hr = E_NOTIMPL;
       return nullptr;
     }
-    SOCKET s = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
+    SOCKET s = Ws().socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
     if (s == INVALID_SOCKET) {
       *hr = HRESULT_FROM_WIN32(WSAGetLastError());
       return nullptr;
@@ -2051,8 +2093,8 @@ class Windows final : public Backend {
     if (secure) {
       // Android's secure sockets: an authenticated and encrypted link.
       ULONG on = TRUE;
-      setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, reinterpret_cast<char*>(&on), sizeof(on));
-      setsockopt(s, SOL_RFCOMM, SO_BTH_ENCRYPT, reinterpret_cast<char*>(&on), sizeof(on));
+      Ws().setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, reinterpret_cast<char*>(&on), sizeof(on));
+      Ws().setsockopt(s, SOL_RFCOMM, SO_BTH_ENCRYPT, reinterpret_cast<char*>(&on), sizeof(on));
     }
     SOCKADDR_BTH remote = {};
     remote.addressFamily = AF_BTH;
@@ -2072,22 +2114,22 @@ class Windows final : public Backend {
       *hr = E_NOTIMPL;
       return nullptr;
     }
-    SOCKET s = socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
+    SOCKET s = Ws().socket(AF_BTH, SOCK_STREAM, BTHPROTO_RFCOMM);
     if (s == INVALID_SOCKET) {
       *hr = HRESULT_FROM_WIN32(WSAGetLastError());
       return nullptr;
     }
     if (secure) {
       ULONG on = TRUE;
-      setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, reinterpret_cast<char*>(&on), sizeof(on));
+      Ws().setsockopt(s, SOL_RFCOMM, SO_BTH_AUTHENTICATE, reinterpret_cast<char*>(&on), sizeof(on));
     }
     SOCKADDR_BTH local = {};
     local.addressFamily = AF_BTH;
     local.port = BT_PORT_ANY;
     int size = sizeof(local);
-    if (bind(s, reinterpret_cast<SOCKADDR*>(&local), sizeof(local)) == SOCKET_ERROR ||
-        listen(s, 4) == SOCKET_ERROR ||
-        getsockname(s, reinterpret_cast<SOCKADDR*>(&local), &size) == SOCKET_ERROR) {
+    if (Ws().bind(s, reinterpret_cast<SOCKADDR*>(&local), sizeof(local)) == SOCKET_ERROR ||
+        Ws().listen(s, 4) == SOCKET_ERROR ||
+        Ws().getsockname(s, reinterpret_cast<SOCKADDR*>(&local), &size) == SOCKET_ERROR) {
       *hr = HRESULT_FROM_WIN32(WSAGetLastError());
       closesocket(s);
       return nullptr;
