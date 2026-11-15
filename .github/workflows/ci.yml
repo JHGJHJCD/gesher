@@ -52,8 +52,11 @@ jobs:
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1
-          tests/windows/shell/Issue32And33Contracts.ps1
           tests/windows/shell/RuntimeFileChecks.ps1
+      - name: Production modal dialogs on Windows PowerShell 5.1
+        timeout-minutes: 2
+        shell: powershell
+        run: tests/windows/shell/Issue32And33Contracts.ps1
   reader-ownership:
     needs: [source-identity]
     strategy:
@@ -674,8 +677,12 @@ jobs:
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1
-          tests/windows/shell/Issue32And33Contracts.ps1
           tests/windows/shell/RuntimeFileChecks.ps1
+
+      - name: Production modal dialogs on Windows PowerShell 5.1
+        timeout-minutes: 2
+        shell: powershell
+        run: tests/windows/shell/Issue32And33Contracts.ps1
 
       - name: Verify and assemble windows-x64 artifact
         shell: pwsh
