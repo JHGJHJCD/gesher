@@ -20,6 +20,50 @@ on a phone. Design: [ADR 0037](decisions/0037-net-networking.md). Branch:
 
 ## Sockets and DNS
 
+### Android HttpEngine
+
+`android.net.http` is supplied by gesher-app.jar, including `HttpEngine.Builder`,
+`UrlRequest`, response/header values, upload providers and the platform option
+builders. Its asynchronous adapter uses the existing `HttpURLConnection` transport
+and therefore the same proxy selector, network binding, TLS verification and trust
+anchors as other Java HTTP clients. Bidirectional HTTP/2 streams use the AOSP
+OkHttp framed transport already in core-libart.jar, with independent reads and
+writes, flush, END_STREAM and gRPC trailers. HTTPS negotiates `h2` using ALPN,
+verifies the peer hostname, and tunnels through the selected HTTP CONNECT proxy.
+HTTP/2 response metadata retains `:status`, which Cronet's gRPC clients consume
+directly. Bounded read-ahead delivers final gRPC trailers without requiring an
+extra application read, and terminal callbacks wait for pending data callbacks.
+Unresolved addresses from Android's proxy selector are resolved for the proxy;
+origin DNS remains at that proxy. This is needed by recent Cronet clients such
+as Play Store 54.1.11, which selects the platform HttpEngine provider.
+
+Requests support HTTP(S), explicit redirect callbacks, direct-buffer reads,
+fixed-length/chunked uploads, upload rewinds on preserved-method redirects,
+cancellation and one terminal callback. Application callbacks are serialized on
+the supplied executor; callback failures become `CallbackException`. Headers and
+URL chains are immutable snapshots. Redirects across origins remove explicit
+Authorization, Cookie and Host headers. HTTP error status codes remain responses.
+
+The transport does not implement QUIC, Brotli or engine-private disk caches.
+Protocol/DNS/cache tuning is advisory and does not install process-global settings;
+additional public-key pins fail explicitly rather than pretending to provide those
+guarantees. Received-byte counts currently measure response body bytes, excluding
+wire headers. Traffic
+statistics setters are retained as request metadata, like Gesher's TrafficStats
+adapter; they do not account per-request Windows traffic. The native Android
+Cronet module is not shipped.
+
+`tools/test_http_engine.py --java-home <JDK>` tests the production adapter over
+real local HTTP sockets in CI. `tests/net/HttpEngineDeviceSmoke.java` and
+`Http2DeviceSmoke.java` also run on Gesher ART in Windows track 94, with an
+independent local HTTP/2 wire peer. `GESHER_HTTP_ENGINE_TRACE=1` logs numeric
+HTTP/gRPC status codes and failure types/code locations, never request URLs,
+headers, credentials or bodies. Any installed update must replace both
+gesher-app.jar and its matching boot image extension; source-only changes are not
+enough for an already-installed runtime. The measured Play 54.1.11 startup and
+catalog verification is recorded in
+[the validation note](research/httpengine-play-store-2026-11-16.md).
+
 Java's sockets (`Socket`, `ServerSocket`, `DatagramSocket`, NIO channels and
 selectors) and name lookups (`InetAddress`) are libcore's, over its Linux
 natives (`Linux.cpp`, `NetworkUtilities`, OpenJDK's `Net.c`, `EPoll.c`), which
