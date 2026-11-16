@@ -84,10 +84,12 @@ The decision record is [0030](decisions/0030-angle-hwui-skiagl.md).
   `eglBeginFrame` does nothing; `EGL_KHR_swap_buffers_with_damage` (which
   EglManager requires) falls back to `eglSwapBuffers` when ANGLE lacks it.
 - **Choosing it**: windowed app processes automatically try SkiaGL on
-  verified D3D11 hardware (including Intel integrated graphics). Services and
-  headless processes keep SkiaCpu without a GPU probe. WARP, Microsoft Basic
-  Render Driver, missing ANGLE or other software/unknown devices fall back to
-  SkiaCpu. `GESHER_HWUI_RENDERER=skiacpu|skiagl|auto` and
+  verified D3D11 hardware (including Intel integrated graphics). Qualification
+  requires a real GrDirectContexts::MakeGL to succeed, not merely an assembled
+  GrGLInterface. A failed probe falls back to SkiaCpu *before* HWUI starts.
+  Services and headless processes keep SkiaCpu without a GPU probe. WARP,
+  Microsoft Basic Render Driver, missing ANGLE or other software/unknown
+  devices fall back to SkiaCpu. `GESHER_HWUI_RENDERER=skiacpu|skiagl|auto` and
   `debug.hwui.renderer` (unless overridden by the environment)
   retain explicit choices; `skiagl` can use WARP for diagnosis.
   See [automatic GPU selection](hwui-auto-gpu.md) for details and limitations.

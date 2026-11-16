@@ -33,6 +33,10 @@ void Say(const std::string& text) {
 }  // namespace
 
 RenderPipelineType gesher_hwui_choose_pipeline() {
+  // A second explicit choice must not retain stale diagnostics from a prior
+  // invocation (registration normally selects once per process).
+  g_name = "skiacpu";
+  *g_detail = "the default";
   std::string want;
   std::string from;
   if (const char* env = std::getenv("GESHER_HWUI_RENDERER"); env != nullptr && *env != '\0') {
@@ -68,7 +72,7 @@ RenderPipelineType gesher_hwui_choose_pipeline() {
     }
   }
   std::string detail;
-  if (!gesher_hwui_gl_usable(&detail)) {
+  if (!gesher_hwui_gl_usable(&detail, automatic)) {
     *g_detail = from + "=" + want + ": " + detail;
     Say(from + "=" + want + ", but OpenGL ES over ANGLE is not usable (" + detail +
         "); using the CPU pipeline (SkiaCpu)");

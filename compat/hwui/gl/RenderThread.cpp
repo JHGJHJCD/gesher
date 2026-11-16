@@ -34,6 +34,7 @@
 
 #include "DeviceInfo.h"
 #include "Properties.h"
+#include "gr_context_options.h"
 #include "Readback.h"
 #include "renderstate/RenderState.h"
 #include "renderthread/EglManager.h"
@@ -110,13 +111,7 @@ void RenderThread::requireGlContext() {
 void RenderThread::requireVkContext() {}
 
 void RenderThread::initGrContextOptions(GrContextOptions& options) {
-    options.fPreferExternalImagesOverES3 = true;
-    options.fDisableDistanceFieldPaths = true;
-    if (android::base::GetBoolProperty(PROPERTY_REDUCE_OPS_TASK_SPLITTING, true)) {
-        options.fReduceOpsTaskSplitting = GrContextOptions::Enable::kYes;
-    } else {
-        options.fReduceOpsTaskSplitting = GrContextOptions::Enable::kNo;
-    }
+    gesher::hwui::InitGaneshContextOptions(options);
 }
 
 void RenderThread::destroyRenderingContext() {

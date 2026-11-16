@@ -6,7 +6,7 @@
 static int g_probes = 0;
 static bool g_probe_ok = true;
 static const char* g_renderer = nullptr;
-bool gesher_hwui_gl_usable(std::string* detail) {
+bool gesher_hwui_gl_usable(std::string* detail, bool) {
   ++g_probes;
   *detail = g_renderer ? g_renderer : "ANGLE device unavailable";
   return g_probe_ok;

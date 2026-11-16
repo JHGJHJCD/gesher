@@ -1,57 +1,89 @@
-# Automatic D3D11 hardware GPU rendering for Windows apps
+# ANGLE/D3D11 hardware rendering: automatic GPU selection and safety gates
 
-This change makes windowed Android applications prefer the **existing**
-SkiaGL → ANGLE → Direct3D 11 HWUI pipeline on supported hardware, including
-Intel UHD/Iris Xe/Arc graphics. It does **not** add a new renderer, reimplement
-Android graphics, or copy closed-source Microsoft WSA code.
+Gesher already contains the SkiaGL -> ANGLE -> D3D11 renderer. This PR makes
+windowed Android application processes select it automatically on recognized
+hardware, including Intel UHD/Iris Xe/Arc. No WSA proprietary code is copied.
 
-## Renderer selection
+## Selection
 
-- Default, graphical process (GESHER_APP_WINDOW=window or hidden): probe ANGLE.
-  Use SkiaGL only if an EGL context and Skia GL interface initialize and
-  GL_RENDERER identifies supported D3D11 hardware.
-- Default, headless/CLI/system service: stay on SkiaCpu without ANGLE probing.
-- GESHER_HWUI_RENDERER=skiacpu: always request the CPU pipeline.
-- GESHER_HWUI_RENDERER=skiagl: explicitly request GL, including WARP for tests.
-- GESHER_HWUI_RENDERER=auto: probe hardware, falling back to SkiaCpu.
-- debug.hwui.renderer has the same options unless overridden by the environment.
-- GESHER_EGL_DEVICE=warp forces ANGLE's software renderer; auto selection
-  uses SkiaCpu instead of treating WARP as a hardware GPU.
+- Default, GESHER_APP_WINDOW=window or hidden: probe the current ANGLE
+  renderer and request SkiaGL only after a complete GPU qualification succeeds.
+- Default, headless/services/CLI: stay on SkiaCpu with **zero GPU probes**.
+- GESHER_HWUI_RENDERER=skiacpu: always SkiaCpu, even if an iGPU is present.
+- GESHER_HWUI_RENDERER=skiagl: explicit GL, including D3D11 WARP for tests.
+- GESHER_HWUI_RENDERER=auto: qualify hardware, otherwise fallback to SkiaCpu.
+- debug.hwui.renderer accepts the same choices if the environment did not
+  override them. The EGL software override GESHER_EGL_DEVICE=warp forces CPU
+  in auto mode (explicit skiagl can still be used to test WARP).
 
-A successful GPU probe may still be backed by Microsoft Basic Render Driver,
-so auto mode rejects that and other known software backends using the actual
-GL_RENDERER. A conservative vendor check recognizes Intel, AMD/ATI, NVIDIA,
-Qualcomm, ARM and Imagination hardware; other devices can opt in using skiagl.
-The current ANGLE build targets Direct3D 11, not Vulkan or DirectX 12.
+The adapter whitelist accepts D3D11 hardware renderer strings from Intel,
+AMD/ATI, NVIDIA, Qualcomm, ARM and Imagination, rejecting Microsoft Basic Render
+Driver, SwiftShader, llvmpipe and WARP. Unknown devices default to CPU unless
+the user explicitly requests skiagl. Hardware selection is conservative.
 
-The renderer is selected once per process, before framework graphics natives
-initialize. Existing JNI, Skia, Window/Surface and EGL interfaces are unchanged.
+## Full Ganesh qualification (review P1 fix)
 
-## Validation and caveats
+Prior to this change, Gesher considered GL usable after assembling and
+validating GrGLInterface. That was insufficient: RenderThread later calls
+GrDirectContexts::MakeGL, whose failure is fatal.
 
-The host test runs with python3 tools/test_hwui_renderer_policy.py and compiles
-both the policy and the *real* pipeline_select.cc with small test stubs.
-The Windows graphics track additionally checks that auto mode on WARP stays
-on SkiaCpu. Neither test substitutes for a physical Intel GPU benchmark.
+The qualification now creates a real temporary **GrDirectContext** on a
+small EGL pbuffer, using the same context options as RenderThread:
+fPreferExternalImagesOverES3, fDisableDistanceFieldPaths, and the
+PROPERTY_REDUCE_OPS_TASK_SPLITTING system property. Both callers obtain
+their options from a single header. If MakeGL returns null, the selector
+chooses SkiaCpu *before* the render pipeline is fixed.
 
-Run Windows CI and test at least Intel integrated graphics, discrete GPUs, and
-WARP/basic-driver machines. Compare first frame, scroll frame-time p50/p95,
-frame drops, GPU/CPU usage, driver resets, power use and peak memory with
-GESHER_HWUI_RENDERER=skiacpu and automatic/explicit skiagl.
+The probe releases the temporary Ganesh context **while its EGL context is
+current**, restores the previously bound EGL draw/read surfaces, display and
+context, and destroys the probe surface/context. Missing ANGLE, failed EGL
+setup, invalid GL interface, rejected software GPU, and failed MakeGL all
+return an explicit diagnostic and use CPU. An auto mode run on WARP rejects
+the adapter before allocating a Ganesh context; explicit skiagl still tests
+WARP. EGL initialization is process-scoped and is deliberately not terminated.
 
-Known limitations:
-- SkiaGL has less coverage than SkiaCpu, including some TextureView/
-  HardwareBitmap paths; broad application compatibility is not yet proven.
-- Translucent popups and child EGL surfaces may still use glReadPixels to
-  transfer frames to CPU memory; this change does not remove those copies.
-- Switching rendering pipelines dynamically after device loss is unsupported.
-- GPU use does not prove a speedup on all integrated drivers or apps.
-- Testing on a machine with a real Intel GPU is still required before merge.
+This prevents the specific reproduced startup failure described in PR #55.
+It is not a guarantee of recovery from a **later GPU device loss**: the
+pipeline cannot safely change after HWUI windows and surfaces are created.
 
-## WSA comparison
+## Regression evidence
 
-WSA had high-performance, power-saving and specific-GPU preferences, as
-documented by Microsoft, but its GitHub WSA repository does not provide an
-open-source graphics runtime. Gesher already uses open-source ANGLE and supports
-hardware or WARP D3D11 devices. Implementing DXGI adapter selection and per-GPU
-power preferences should be a separate change once device tests justify it.
+Run `python3 tools/test_hwui_renderer_policy.py --sanitize` on a host with
+C++20, ASan and UBSan. Tests include:
+
+1. Production hardware/vendor matching, CPU override and headless mode.
+2. Production selector and exact production ANGLE qualification function
+   extracted from angle_gl.cc with deterministic EGL/Ganesh adapters.
+3. Successful Intel qualification; failed GrDirectContexts::MakeGL; invalid
+   GL interface; failed EGL display, config, context, pbuffer or make-current.
+4. No leaks or stale current context: every test asserts exact destroyed
+   EGL object counts, Ganesh resource release and preservation of an existing
+   EGL context with *different draw and read surfaces*.
+5. Software WARP auto skip; WARP explicit override; shared context options
+   with renderthread.skia.reduceopstasksplitting both enabled and disabled.
+
+These isolated controls do not test actual Intel drivers. Windows track 31
+also exercises SkiaGL over WARP, the software auto/CPU fallback, window
+composition and GLES rendering. Full AOSP/ART/Windows CI is mandatory before
+merge, and both canonical build suppliers must be verified.
+
+## Physical acceptance needed before default use
+
+On physical Windows machines with Intel UHD and Iris Xe, a discrete GPU,
+and Basic Render Driver/WARP:
+
+- Run the same diverse APKs with auto, skiacpu and explicit skiagl. Confirm
+  first frame correctness, startup time and correct adapter selection.
+- Test resize, DPI changes, translucent popups, TextureView/SurfaceView/
+  ImageReader, device loss, repeated open/close and concurrent rendering.
+- Report warm p50/p95 frame time, dropped/late frames, CPU/GPU utilization,
+  private committed/resident memory, peak GPU memory and memory after
+  trimming/closing (the host RenderThread currently lacks full cache trims).
+- Compare boot-to-first-frame and per-app startup cost; the preflight creates
+  and tears down a short-lived Ganesh context and may cost startup latency.
+- Do not merge based only on successful host tests or declare an FPS speedup
+  without this evidence.
+
+Limitations: some TextureView/HardwareBitmap paths are still stand-ins;
+translucent popups and child surfaces may perform glReadPixels; and
+recovering from device loss is a separate architectural task.
