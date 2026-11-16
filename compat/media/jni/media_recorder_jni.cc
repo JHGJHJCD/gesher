@@ -17,6 +17,7 @@
 #include "../record/recorder.h"
 #include "jni_util.h"
 #include "media_jni.h"
+#include "receiver_lease.h"
 
 namespace gesher::media {
 namespace {
@@ -29,15 +30,30 @@ struct {
 
 std::mutex gLock;
 
-struct JniRecorder {
+struct JniRecorder : ReceiverState {
   std::shared_ptr<GlobalRef> weak_this;
   std::unique_ptr<Recorder> recorder;
   std::unique_ptr<GlobalRef> surface;  // getSurface's Surface, the same each time
+
+  JniRecorder(JNIEnv* env, jobject weak) : weak_this(std::make_shared<GlobalRef>(env, weak)) {
+    if (env->ExceptionCheck()) return;
+    std::weak_ptr<GlobalRef> callback = weak_this;
+    recorder.reset(new (std::nothrow) Recorder([callback](int what, int extra) {
+      auto w = callback.lock();
+      if (w == nullptr) return;
+      JNIEnv* e = AttachedEnv("gesher-recorder");
+      if (e == nullptr) return;
+      e->CallStaticVoidMethod(gF.clazz, gF.post_event, w->get(), what, extra, 0, nullptr);
+      CheckException(e, "MediaRecorder.postEventFromNative");
+    }));
+    if (recorder == nullptr) jniThrow(env, "java/lang/OutOfMemoryError", "media recorder");
+  }
 };
 
-JniRecorder* Get(JNIEnv* env, jobject thiz) {
-  auto* r = reinterpret_cast<JniRecorder*>(env->GetLongField(thiz, gF.context));
-  if (r == nullptr) jniThrow(env, "java/lang/IllegalStateException", "the recorder was released");
+ReceiverLease<JniRecorder> Get(JNIEnv* env, jobject thiz) {
+  auto r = ReceiverLease<JniRecorder>::Acquire(env, thiz, gF.context, gLock);
+  if (r == nullptr) jniThrow(env, "java/lang/IllegalStateException",
+                           "the recorder was released or its operation was reentered");
   return r;
 }
 
@@ -62,43 +78,25 @@ void JNICALL MR_init(JNIEnv* env, jclass) {
 }
 
 void JNICALL MR_setup(JNIEnv* env, jobject thiz, jobject weak_this, jstring, jobject) {
-  auto* r = new JniRecorder();
-  r->weak_this = std::make_shared<GlobalRef>(env, weak_this);
-  std::weak_ptr<GlobalRef> weak = r->weak_this;
-  r->recorder = std::make_unique<Recorder>([weak](int what, int extra) {
-    auto w = weak.lock();
-    if (w == nullptr) return;
-    JNIEnv* e = AttachedEnv("gesher-recorder");
-    if (e == nullptr) return;
-    e->CallStaticVoidMethod(gF.clazz, gF.post_event, w->get(), what, extra, 0, nullptr);
-    CheckException(e, "MediaRecorder.postEventFromNative");
-  });
-  std::lock_guard<std::mutex> lock(gLock);
-  env->SetLongField(thiz, gF.context, reinterpret_cast<jlong>(r));
+  ReceiverLease<JniRecorder>::Setup(env, thiz, gF.context, gLock, env, weak_this);
 }
 
 void Release(JNIEnv* env, jobject thiz) {
-  JniRecorder* r;
-  {
-    std::lock_guard<std::mutex> lock(gLock);
-    r = reinterpret_cast<JniRecorder*>(env->GetLongField(thiz, gF.context));
-    env->SetLongField(thiz, gF.context, 0);
-  }
-  delete r;
+  ReceiverLease<JniRecorder>::Release(env, thiz, gF.context, gLock);
 }
 
 void JNICALL MR_release(JNIEnv* env, jobject thiz) { Release(env, thiz); }
 void JNICALL MR_finalize(JNIEnv* env, jobject thiz) { Release(env, thiz); }
 
 void JNICALL MR_reset(JNIEnv* env, jobject thiz) {
-  if (JniRecorder* r = Get(env, thiz)) {
+  if (auto r = Get(env, thiz)) {
     r->surface.reset();
     r->recorder->Reset();
   }
 }
 
 void JNICALL MR_setAudioSource(JNIEnv* env, jobject thiz, jint source) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return;
   if (source < 0 || source > 10) {
     jniThrow(env, "java/lang/IllegalArgumentException", "Invalid audio source");
@@ -113,7 +111,7 @@ void JNICALL MR_setAudioSource(JNIEnv* env, jobject thiz, jint source) {
 }
 
 void JNICALL MR_setVideoSource(JNIEnv* env, jobject thiz, jint source) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return;
   if (source < 0 || source > 2) {
     jniThrow(env, "java/lang/IllegalArgumentException", "Invalid video source");
@@ -124,7 +122,7 @@ void JNICALL MR_setVideoSource(JNIEnv* env, jobject thiz, jint source) {
 
 #define INT_SETTER(Name, field)                                   \
   void JNICALL Name(JNIEnv* env, jobject thiz, jint v) {          \
-    if (JniRecorder* r = Get(env, thiz)) r->recorder->config().field = v; \
+    if (auto r = Get(env, thiz)) r->recorder->config().field = v; \
   }
 INT_SETTER(MR_setOutputFormat, output_format)
 INT_SETTER(MR_setAudioEncoder, audio_encoder)
@@ -134,7 +132,7 @@ INT_SETTER(MR_setMaxDuration, max_duration_ms)
 #undef INT_SETTER
 
 void JNICALL MR_setVideoSize(JNIEnv* env, jobject thiz, jint w, jint h) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return;
   if (w <= 0 || h <= 0) {
     jniThrow(env, "java/lang/IllegalArgumentException", "Invalid video size");
@@ -145,11 +143,11 @@ void JNICALL MR_setVideoSize(JNIEnv* env, jobject thiz, jint w, jint h) {
 }
 
 void JNICALL MR_setMaxFileSize(JNIEnv* env, jobject thiz, jlong size) {
-  if (JniRecorder* r = Get(env, thiz)) r->recorder->config().max_file_size = size;
+  if (auto r = Get(env, thiz)) r->recorder->config().max_file_size = size;
 }
 
 void JNICALL MR_setOutputFile(JNIEnv* env, jobject thiz, jobject fd) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return;
   int f = FdOf(env, fd);
   int copy = f >= 0 ? dup(f) : -1;
@@ -163,7 +161,7 @@ void JNICALL MR_setOutputFile(JNIEnv* env, jobject thiz, jobject fd) {
 }
 
 void JNICALL MR_setParameter(JNIEnv* env, jobject thiz, jstring pair) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr || pair == nullptr) return;
   std::string s = Utf8(env, pair);
   size_t eq = s.find('=');
@@ -181,7 +179,7 @@ void JNICALL MR_setParameter(JNIEnv* env, jobject thiz, jstring pair) {
 }
 
 void JNICALL MR_prepare(JNIEnv* env, jobject thiz) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return;
   std::string error;
   if (!r->recorder->Prepare(&error)) {
@@ -191,7 +189,7 @@ void JNICALL MR_prepare(JNIEnv* env, jobject thiz) {
 }
 
 jobject JNICALL MR_getSurface(JNIEnv* env, jobject thiz) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return nullptr;
   if (r->recorder->input_surface() == nullptr) {
     jniThrow(env, "java/lang/IllegalStateException",
@@ -208,7 +206,7 @@ jobject JNICALL MR_getSurface(JNIEnv* env, jobject thiz) {
 }
 
 void JNICALL MR_start(JNIEnv* env, jobject thiz) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return;
   std::string error;
   if (!r->recorder->Start(&error)) {
@@ -218,7 +216,7 @@ void JNICALL MR_start(JNIEnv* env, jobject thiz) {
 }
 
 void JNICALL MR_stop(JNIEnv* env, jobject thiz) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   if (r == nullptr) return;
   std::string error;
   bool ok = r->recorder->Stop(&error);
@@ -230,15 +228,15 @@ void JNICALL MR_stop(JNIEnv* env, jobject thiz) {
 }
 
 void JNICALL MR_pause(JNIEnv* env, jobject thiz) {
-  if (JniRecorder* r = Get(env, thiz)) r->recorder->Pause();
+  if (auto r = Get(env, thiz)) r->recorder->Pause();
 }
 
 void JNICALL MR_resume(JNIEnv* env, jobject thiz) {
-  if (JniRecorder* r = Get(env, thiz)) r->recorder->Resume();
+  if (auto r = Get(env, thiz)) r->recorder->Resume();
 }
 
 jint JNICALL MR_getMaxAmplitude(JNIEnv* env, jobject thiz) {
-  JniRecorder* r = Get(env, thiz);
+  auto r = Get(env, thiz);
   return r != nullptr ? r->recorder->MaxAmplitude() : 0;
 }
 
