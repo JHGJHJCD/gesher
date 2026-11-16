@@ -626,19 +626,22 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 result = start(caller, member, resolvedTypes == null ? null : resolvedTypes[i],
                         callingPackage, i == 0 ? resultTo : null, null, -1, taskId,
                         sharedIdentity, created);
+            } catch (RuntimeException | Error failure) {
+                // A later member can throw for a revoked caller, permission denial or
+                // malformed Parcelable. Do not leave an earlier member running.
+                // Restore the caller's ThreadLocal before any lifecycle callbacks.
+                if (previous == null) mStackLaunch.remove();
+                else mStackLaunch.set(previous);
+                rollbackBatch(started, failure);
+                throw failure;
             } finally {
                 if (previous == null) mStackLaunch.remove();
                 else mStackLaunch.set(previous);
             }
-            if (result != ActivityManager.START_SUCCESS
-                    && result != ActivityManager.START_DELIVERED_TO_TOP
+            if ((result != ActivityManager.START_SUCCESS
+                    && result != ActivityManager.START_DELIVERED_TO_TOP)
                     || created[0] == null) {
-                // Do not tear down pre-existing activities delivered to by singleTop.
-                for (int j = started.size() - 1; j >= 0; j--) {
-                    ActivityRecord record = started.get(j);
-                    if (record.batchCreated) finish(record, "batch-start-failed",
-                            android.app.Activity.RESULT_CANCELED, null);
-                }
+                rollbackBatch(started, null);
                 return result == ActivityManager.START_SUCCESS
                         ? ActivityManager.START_CANCELED : result;
             }
@@ -651,16 +654,43 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         // activityResumed below. The same parent is never paused twice.
         for (int i = 0; i + 1 < started.size(); i++) {
             ActivityRecord before = started.get(i), after = started.get(i + 1);
-            boolean pauseNow;
+            boolean pauseNow = false, launchNow = false;
             synchronized (this) {
-                pauseNow = after.waitingFor == before && before.state == State.RESUMED
-                        && before.app != null && before.app.ready && !before.finishing;
+                if (after.waitingFor == before && !after.finishing
+                        && after.state == State.INITIALIZING && !before.finishing) {
+                    if (before.state == State.RESUMED && before.app != null && before.app.ready) {
+                        pauseNow = true;
+                    } else if (before.state == State.PAUSED || before.state == State.STOPPED
+                            || before.state == State.STOPPING || before.state == State.STARTED) {
+                        // A synchronous/reentrant callback may have paused the parent
+                        // before this child was published. No further pause ack will
+                        // arrive, so release the dependency without losing the launch.
+                        after.waitingFor = null;
+                        launchNow = after.app != null && after.app.ready;
+                    }
+                }
             }
             if (pauseNow) pause(before, false);
+            if (launchNow) realStartActivity(after);
         }
         SystemServer.log("startActivities: published " + started.size()
                 + " activities in task " + taskId);
         return ActivityManager.START_SUCCESS;
+    }
+
+    /** Cleanup is limited to this invocation's newly allocated records. */
+    private void rollbackBatch(List<ActivityRecord> started, Throwable cause) {
+        for (int i = started.size() - 1; i >= 0; i--) {
+            ActivityRecord record = started.get(i);
+            if (!record.batchCreated) continue; // singleTop: borrowed prior task record
+            try {
+                finish(record, "batch-start-failed", android.app.Activity.RESULT_CANCELED, null);
+            } catch (RuntimeException | Error cleanup) {
+                if (cause == null) SystemServer.log("Failed to retire batch activity "
+                        + record.name() + ": " + cleanup);
+                else cause.addSuppressed(cleanup);
+            }
+        }
     }
 
     /** Scoped only to this exact member Intent: reentrant starts cannot inherit the batch. */
