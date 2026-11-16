@@ -443,18 +443,31 @@ int BIONIC_SYSV ClockNanosleep(int clock, int flags, const LinuxTimespec* req, L
     return NowMonotonicNs();
   };
   const __int128 requested = static_cast<__int128>(req->tv_sec) * 1000000000 + req->tv_nsec;
-  const __int128 deadline = absolute ? requested : now() + requested;
+  __int128 deadline = absolute ? requested : now() + requested;
+  // Linux hrtimers saturate both converted timespecs and relative-deadline
+  // addition at signed nanosecond KTIME_MAX, even for a wider time_t input.
+  if (deadline > INT64_MAX) deadline = INT64_MAX;
   for (;;) {
     __int128 left = deadline - now();
-    if (left <= 0) return 0;
+    if (left <= 0) {
+      // Preserve signal delivery even when no host wait is necessary. The
+      // errno restorer also covers a handler run at this completion boundary.
+      DeliverPendingSignals();
+      return 0;
+    }
     __int128 milliseconds = (left + 999999) / 1000000;
     if (milliseconds > 0x7ffffffe) milliseconds = 0x7ffffffe;
     // Recheck wall-clock adjustments and BOOTTIME after system resume instead
     // of leaving a long relative Windows wait unaware of the new clock value.
     if ((realtime_absolute || clock == 7) && milliseconds > 1000) milliseconds = 1000;
-    if (InterruptibleSleep(static_cast<uint32_t>(milliseconds), nullptr)) {
+    int64_t interrupted_at = 0;
+    auto observe = [](void* value) { *static_cast<int64_t*>(value) = NowMonotonicNs(); };
+    if (InterruptibleSleepObserved(static_cast<uint32_t>(milliseconds), observe,
+                                  &interrupted_at)) {
       if (!absolute && rem != nullptr) {
-        left = deadline - now();
+        // Relative waits report the interval left when the signal interrupted
+        // them, before its handler runs. Absolute waits never write rem.
+        left = deadline - interrupted_at;
         if (left < 0) left = 0;
         *rem = {static_cast<int64_t>(left / 1000000000),
                 static_cast<int64_t>(left % 1000000000)};

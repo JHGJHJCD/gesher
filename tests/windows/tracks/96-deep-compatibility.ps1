@@ -19,7 +19,7 @@ $deepSurfaceCode = $LASTEXITCODE
 Check 'graphics: actual QueueSurface and Win32Surface geometry and damage contracts' {
   $global:LASTEXITCODE = $deepSurfaceCode
   $deepSurfaceOut
-} @('surface geometry contracts:', 'checks, 0 failures')
+} @('surface geometry contracts:', 'native window dispatch contracts:', 'checks, 0 failures')
 
 $deepAudioEnvironment = @{}
 foreach ($name in 'ANDROID_DATA', 'GESHER_AUDIO') {

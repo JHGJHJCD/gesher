@@ -17,17 +17,24 @@
 /* Local provider-unavailable policy and adaptations: Copyright (C) 2026 Gesher Authors. */
 package android.provider;
 
+import android.app.AppOpsManager;
 import android.app.PendingIntent;
 import android.content.ClipData;
+import android.content.ContentProvider;
+import android.content.ContentProviderClient;
 import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.ContentValues;
+import android.content.UriPermission;
+import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.ImageDecoder;
 import android.os.Bundle;
 import android.os.CancellationSignal;
+import android.os.RemoteException;
+import android.os.UserHandle;
 import android.text.TextUtils;
 import android.util.ArrayMap;
 import android.util.Log;
@@ -45,6 +52,7 @@ import android.os.ParcelFileDescriptor;
 import android.util.Size;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
@@ -132,6 +140,8 @@ public final class MediaStore {
     public static final String EXTRA_VIDEO_QUALITY = "android.intent.extra.videoQuality";
     public static final String EXTRA_PICK_IMAGES_MAX = "android.provider.extra.PICK_IMAGES_MAX";
     public static final String UNKNOWN_STRING = "<unknown>";
+
+    private static final int MY_USER_ID = UserHandle.myUserId();
 
     public MediaStore() {
     }
@@ -290,6 +300,109 @@ public final class MediaStore {
         extras.putString("android.provider.extra.MEDIA_COLLECTION_ID", currentMediaCollectionId);
         if (!callForCloudProvider(resolver, "notify_cloud_media_changed_event", authority, extras)) {
             throw new SecurityException("Failed to notify cloud media changed event");
+        }
+    }
+
+    /** Resolves through MediaProvider using the caller's existing persisted grants. */
+    public static Uri getDocumentUri(Context context, Uri mediaUri) {
+        return getEquivalentUri(context, mediaUri, "get_document_uri");
+    }
+
+    /** Resolves through MediaProvider; the provider owns any resulting access grant. */
+    public static Uri getMediaUri(Context context, Uri documentUri) {
+        return getEquivalentUri(context, documentUri, "get_media_uri");
+    }
+
+    private static Uri getEquivalentUri(Context context, Uri uri, String method) {
+        final ContentResolver resolver = context.getContentResolver();
+        final List<UriPermission> permissions = resolver.getPersistedUriPermissions();
+        try (ContentProviderClient client = resolver.acquireContentProviderClient(AUTHORITY)) {
+            final Bundle in = new Bundle();
+            in.putParcelable("uri", uri);
+            in.putParcelableArrayList("uriPermissions", new ArrayList<>(permissions));
+            final Bundle out = client.call(method, null, in);
+            return out.getParcelable("uri");
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
+    }
+
+    /** Requests an EXIF-redacted URI from its owning provider. */
+    public static Uri getRedactedUri(ContentResolver resolver, Uri uri) {
+        final String authority = uri.getAuthority();
+        try (ContentProviderClient client = resolver.acquireContentProviderClient(authority)) {
+            final String userId = uri.getUserInfo();
+            final Bundle in = new Bundle();
+            in.putParcelable("uri", maybeRemoveUserId(uri));
+            final Bundle out = client.call("get_redacted_media_uri", null, in);
+            return maybeAddUserId(out.getParcelable("uri"), userId);
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
+    }
+
+    /** Preserves order and the single-user constraint of the MediaProvider batch protocol. */
+    public static List<Uri> getRedactedUri(ContentResolver resolver, List<Uri> uris) {
+        final int userId = getUserIdFromUri(uris.get(0));
+        for (Uri uri : uris) {
+            if (userId != getUserIdFromUri(uri)) {
+                throw new IllegalArgumentException("All the uris should belong to a single user-id");
+            }
+        }
+        final String authority = uris.get(0).getAuthority();
+        try (ContentProviderClient client = resolver.acquireContentProviderClient(authority)) {
+            final String user = uris.get(0).getUserInfo();
+            final ArrayList<Uri> stripped = new ArrayList<>();
+            for (Uri uri : uris) stripped.add(maybeRemoveUserId(uri));
+            final Bundle in = new Bundle();
+            in.putParcelableArrayList("uri_list", stripped);
+            final Bundle out = client.call("get_redacted_media_uri_list", null, in);
+            final List<Uri> result = out.getParcelableArrayList("uri_list");
+            if (user == null) return result;
+            final List<Uri> qualified = new ArrayList<>();
+            for (Uri uri : result) qualified.add(maybeAddUserId(uri, user));
+            return qualified;
+        } catch (RemoteException e) {
+            throw e.rethrowAsRuntimeException();
+        }
+    }
+
+    private static Uri maybeRemoveUserId(Uri uri) {
+        return uri.getUserInfo() == null ? uri
+                : uri.buildUpon().authority(uri.getHost()).build();
+    }
+
+    private static int getUserIdFromUri(Uri uri) {
+        final String userId = uri.getUserInfo();
+        return userId == null ? MY_USER_ID : Integer.parseInt(userId);
+    }
+
+    private static Uri maybeAddUserId(Uri uri, String userId) {
+        return userId == null ? uri
+                : ContentProvider.createContentUriForUser(uri, UserHandle.of(Integer.parseInt(userId)));
+    }
+
+    /** Checks the platform's app-op policy, falling back to the permission only for MODE_DEFAULT. */
+    public static boolean canManageMedia(Context context) {
+        Objects.requireNonNull(context);
+        final String packageName = context.getOpPackageName();
+        final int uid = context.getApplicationInfo().uid;
+        final String permission = android.Manifest.permission.MANAGE_MEDIA;
+        final AppOpsManager appOps = context.getSystemService(AppOpsManager.class);
+        final int mode = appOps.unsafeCheckOpNoThrow(AppOpsManager.permissionToOp(permission),
+                uid, packageName);
+        switch (mode) {
+            case AppOpsManager.MODE_DEFAULT:
+                return context.checkPermission(permission, android.os.Process.myPid(), uid)
+                        == PackageManager.PERMISSION_GRANTED;
+            case AppOpsManager.MODE_ALLOWED:
+                return true;
+            case AppOpsManager.MODE_ERRORED:
+            case AppOpsManager.MODE_IGNORED:
+                return false;
+            default:
+                Log.w(TAG, "Unknown AppOpsManager mode " + mode);
+                return false;
         }
     }
 
