@@ -92,8 +92,14 @@ int BIONIC_SYSV Setsockopt(int fd, int level, int name, const void* value, uint3
     BionicTimeval in;
     std::memcpy(&in, value, sizeof(in));
     timeval tv;
-    tv.tv_sec = static_cast<long>(in.tv_sec > 0x7fffffff ? 0x7fffffff : in.tv_sec);
-    tv.tv_usec = static_cast<long>(in.tv_usec);
+    // Preserve invalid LP64 values as invalid before narrowing to Windows'
+    // 32-bit long. Otherwise (for example) 2^32 microseconds becomes zero
+    // and silently disables the timeout. Let the host validate the socket
+    // first, preserving EBADF/ENOTSOCK ahead of its timeout-domain error.
+    tv.tv_sec = in.tv_sec < 0 ? -1
+                            : static_cast<long>(in.tv_sec > 0x7fffffff ? 0x7fffffff : in.tv_sec);
+    tv.tv_usec = in.tv_usec >= 0 && in.tv_usec < 1000000
+                     ? static_cast<long>(in.tv_usec) : -1;
     return setsockopt(fd, level, name, &tv, sizeof(tv));
   }
   return setsockopt(fd, level, name, value, len);
