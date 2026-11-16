@@ -575,15 +575,23 @@ public final class ApkPackage {
         return null;
     }
 
-    /** The Activity to launch: {@code requested}, or the first MAIN/LAUNCHER one. */
+    /** The Activity to launch: {@code requested}, or the first enabled MAIN/LAUNCHER one. */
     public ActivityInfo launcherActivity(String requested) {
-        String name = requested != null ? qualify(requested)
-                : !mLauncherActivities.isEmpty() ? mLauncherActivities.get(0)
-                : null;
-        if (name == null) {
-            throw new IllegalStateException(apkPath + " has no MAIN/LAUNCHER activity;"
+        if (requested == null) {
+            // A disabled launcher/alias can precede the app's active icon. Use one
+            // installed-state metadata snapshot and preserve manifest launcher order.
+            ActivityInfo[] activities = packageInfo(PackageManager.GET_ACTIVITIES).activities;
+            if (activities != null) {
+                for (String name : mLauncherActivities) {
+                    for (ActivityInfo activity : activities) {
+                        if (name.equals(activity.name)) return activity;
+                    }
+                }
+            }
+            throw new IllegalStateException(apkPath + " has no enabled MAIN/LAUNCHER activity;"
                     + " name one with --activity");
         }
+        String name = qualify(requested);
         ActivityInfo a = activityInfo(name, 0);
         if (a == null) {
             throw new IllegalStateException(apkPath + " declares no activity " + name);

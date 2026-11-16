@@ -23,6 +23,7 @@ def main() -> None:
     parser.add_argument("--apksig", required=True, type=Path)
     parser.add_argument("--java-home", required=True, type=Path)
     parser.add_argument("--source-ref", help="Compile PMS at this ref as a negative control")
+    parser.add_argument("--apk-source-ref", help="Compile ApkPackage at this ref as a launcher negative control")
     args = parser.parse_args()
     cc = shutil.which("cc")
     if not cc:
@@ -45,7 +46,14 @@ def main() -> None:
             before = subprocess.run(["git", "show", args.source_ref + ":" + relative],
                                     cwd=ROOT, capture_output=True, check=True)
             service.write_bytes(before.stdout)
-        sources = [str(service), str(ROOT / "app/java/com/gesher/server/ActivityOptionsResolver.java"),
+        apk_relative = "app/java/com/gesher/server/ApkPackage.java"
+        apk = ROOT / apk_relative
+        if args.apk_source_ref:
+            apk = work / "ApkPackage.java"
+            before = subprocess.run(["git", "show", args.apk_source_ref + ":" + apk_relative],
+                                    cwd=ROOT, capture_output=True, check=True)
+            apk.write_bytes(before.stdout)
+        sources = [str(service), str(apk), str(ROOT / "app/java/com/gesher/server/ActivityOptionsResolver.java"),
                    str(ROOT / "tests/dex-services/gesher/services/ActivityOptionsContractTest.java"),
                    str(ROOT / "tests/package/ActivityOptionsHost.java")]
         subprocess.run([str(args.java_home / "bin/javac"), "-encoding", "UTF-8", "-cp", classpath,
