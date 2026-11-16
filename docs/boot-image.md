@@ -97,3 +97,36 @@ Not done yet:
   the oat files' code is mapped as views of the files, shared between
   processes (placeholder mappings, ADR 0036).
 - An app image for the app's own classes.
+
+## Comparing image storage formats and memory use
+
+`compile.ps1 -ImageFormat lz4|lz4hc|uncompressed` selects the ART image
+storage format for all three compilation stages. The default remains `lz4`.
+It does not change compiler filters, profiles, JIT, or relocation.
+
+For a comparison, build twice with the same jars, profiles, and compiler
+filters, changing only `ImageFormat`. Run each output in a separate runtime
+copy and profile (`LOCALAPPDATA`, without microG), alternating the order
+between rounds. Do not replace a running device's images or the personal
+installation's files.
+
+```powershell
+python tools/process_memory.py $serverPid --images "$runtime/framework/x86_64" --output snapshot.json
+python tools/test_process_memory.py
+powershell -NoProfile -File tests/windows/shell/BootImageFormatChecks.ps1
+```
+
+The tool requires 64-bit Python on Windows. It distinguishes private commit,
+resident pages, and private resident pages, and identifies ART 118 images by
+matching headers and checksums against the supplied files. Other anonymous
+allocations are not automatically classified as Java or native heaps.
+A live process snapshot is not atomic. Capture does not request GC or trim
+the working set.
+
+In four alternating rounds on the same machine, median private residency was
+33.81 MiB with `lz4` and 33.38 MiB with `uncompressed`, while ART files on disk
+grew from 7.7 to 21.2 MiB. Median elapsed time for the complete startup command
+(including PowerShell, file synchronization, and Launcher) was 846 and 857 ms,
+respectively; this is not a first-frame measurement. All OAT machine-code
+sections and VDEX files were identical. These results do not justify changing
+the default or claiming a performance improvement.

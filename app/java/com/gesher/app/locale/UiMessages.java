@@ -38,6 +38,11 @@ public final class UiMessages {
             case "run_app": value = lang.equals("he") ? "{0} (\u05d9\u05d9\u05e9\u05d5\u05dd Android, \u05d2\u05e9\u05e8)" : "{0} (Android app, Gesher)"; break;
             case "url_protocol": value = lang.equals("he") ? "URL:{0} ({1}, \u05d2\u05e9\u05e8)" : "URL:{0} ({1}, Gesher)"; break;
             case "permission_title": value = lang.equals("he") ? "\u05d2\u05e9\u05e8 \u2014 \u05d1\u05e7\u05e9\u05ea \u05d4\u05e8\u05e9\u05d0\u05d4" : "Gesher permission request"; break;
+            case "permission_heading": value = lang.equals("he") ? "\u05dc\u05d0\u05e4\u05e9\u05e8 \u05d2\u05d9\u05e9\u05d4 \u05dc\u05d9\u05d9\u05e9\u05d5\u05dd?" : "Allow app access?"; break;
+            case "permission_app": value = lang.equals("he") ? "\u05d9\u05d9\u05e9\u05d5\u05dd Android" : "Android application"; break;
+            case "permission_requested": value = lang.equals("he") ? "\u05d4\u05d9\u05d9\u05e9\u05d5\u05dd \u05de\u05d1\u05e7\u05e9 \u05d0\u05ea \u05d4\u05d4\u05e8\u05e9\u05d0\u05d5\u05ea \u05d4\u05d1\u05d0\u05d5\u05ea:" : "This app is requesting the following permissions:"; break;
+            case "permission_allow": value = lang.equals("he") ? "\u05dc\u05d0\u05e4\u05e9\u05e8" : "Allow"; break;
+            case "permission_deny": value = lang.equals("he") ? "\u05dc\u05d0 \u05dc\u05d0\u05e4\u05e9\u05e8" : "Don't allow"; break;
             case "permission_prefix": value = lang.equals("he") ? "\u05dc\u05d0\u05e4\u05e9\u05e8 \u05dc\u05d9\u05d9\u05e9\u05d5\u05dd Android \u200f" : "Allow the Android application "; break;
             case "permission_middle": value = lang.equals("he") ? " \u05dc\u05d4\u05e9\u05ea\u05de\u05e9 \u05d1\u05d4\u05e8\u05e9\u05d0\u05d5\u05ea \u05d4\u05d1\u05d0\u05d5\u05ea?\n\n" : " to use these permissions?\n\n"; break;
             case "account_title": value = lang.equals("he") ? "\u05d2\u05e9\u05e8 \u2014 \u05d2\u05d9\u05e9\u05d4 \u05dc\u05d7\u05e9\u05d1\u05d5\u05df" : "Gesher account access"; break;

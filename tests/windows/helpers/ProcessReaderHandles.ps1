@@ -11,6 +11,9 @@ public static class GtestProcessNativeHandles {
   const int ErrorNotSameObject = 1656;
   const uint DuplicateSameAccess = 2;
   [ThreadStatic] static string lastDiagnostic;
+  // CI controls can retain an independent native witness before cleanup. The
+  // observer never supplies the production close verdict and is normally null.
+  [ThreadStatic] public static Action<SafeFileHandle> BeforeCloseObserver;
   public static string LastDiagnostic { get { return lastDiagnostic ?? "no close observation"; } }
 
   [DllImport("kernel32.dll")]
@@ -37,6 +40,8 @@ public static class GtestProcessNativeHandles {
       sameOwner = file != null && owned != null && Object.ReferenceEquals(file.SafeFileHandle, owned);
       sourceOpen = sameOwner && !owned.IsClosed && !owned.IsInvalid;
       if (sourceOpen) {
+        var observer = BeforeCloseObserver;
+        if (observer != null) observer(owned);
         value = owned.DangerousGetHandle();
         // The SafeFileHandle argument pins the live source during duplication.
         // Keep the witness private: it names the exact kernel object even if

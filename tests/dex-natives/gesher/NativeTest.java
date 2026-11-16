@@ -9,6 +9,10 @@ import android.text.AndroidCharacter;
 import android.util.EventLog;
 import android.util.Log;
 
+import java.io.ByteArrayOutputStream;
+import java.io.FileInputStream;
+import java.nio.charset.StandardCharsets;
+
 /**
  * Calls into libandroid_runtime's registered natives (step 2 of
  * docs/framework-natives.md). The framework classes here are stand-ins with
@@ -24,6 +28,43 @@ public final class NativeTest {
       System.out.println("FAIL: " + what);
       fails++;
     }
+  }
+
+  private static String readProc(String path) throws Exception {
+    try (FileInputStream input = new FileInputStream(path)) {
+      ByteArrayOutputStream output = new ByteArrayOutputStream();
+      byte[] buffer = new byte[128];
+      int count;
+      while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+      return new String(output.toByteArray(), StandardCharsets.UTF_8);
+    }
+  }
+
+  private static void checkProcessName(String name, String comm) throws Exception {
+    check((name + "\0").equals(readProc("/proc/self/cmdline")),
+        "process cmdline: " + name);
+    check((comm + "\n").equals(readProc("/proc/self/comm")),
+        "process comm: " + name);
+    check((comm + "\n").equals(readProc("/proc/self/task/" + Process.myTid() + "/comm")),
+        "calling thread comm: " + name);
+  }
+
+  private static void checkProcessNames() throws Exception {
+    String[][] names = {
+      {"short", "short"},
+      {"123456789012345", "123456789012345"},
+      {"gesher-native-test", "gesher-native-t"},
+      {"com.example.longprocess", "ple.longprocess"},
+      {"com.example.app:service", "ple.app:service"},
+      {"worker@com.example.longprocess", "worker@com.exam"},
+    };
+    for (String[] pair : names) {
+      Process.setArgV0(pair[0]);
+      checkProcessName(pair[0], pair[1]);
+      Process.setArgV0(null);
+      checkProcessName(pair[0], pair[1]);
+    }
+    Process.setArgV0("gesher-native-test");
   }
 
   public static void main(String[] args) throws Exception {
@@ -101,7 +142,7 @@ public final class NativeTest {
     // Process and Activity: the Gesher-owned stubs.
     Process.setThreadPriority(0);
     Process.setThreadPriority(0, 0);
-    Process.setArgV0("gesher-native-test");
+    checkProcessNames();
     check(Process.getThreadPriority(0) == 0, "getThreadPriority");
     check(Process.getElapsedCpuTime() >= 0, "getElapsedCpuTime");
     Process.setThreadGroup(0, Process.THREAD_GROUP_DEFAULT);

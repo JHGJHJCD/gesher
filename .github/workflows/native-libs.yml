@@ -163,6 +163,9 @@ jobs:
           # memfd final-page contracts (bytes past EOF in the last mapped page
           # survive a later mapping; st_size and pread do not see them).
           "$cc" -shared -fPIC -O2 -fno-stack-protector -Wall -Wextra -Werror             -Wl,-soname,libmemfd_tail_test.so             -o dist-native/memfd_tail_test.so tests/native/memfd_tail_test.c
+          # ADR 0086: what a packer's shell does to the stand-in libart.so
+          # (art_shim_test.exe loads it).
+          "$cc" -shared -fPIC -O2 -fno-stack-protector -Wall -Wextra -Werror             -Wl,-soname,libart_hook_test.so             -o dist-native/art_hook_test.so tests/native/art_hook_test.c
 
       - name: Cache d8
         id: r8

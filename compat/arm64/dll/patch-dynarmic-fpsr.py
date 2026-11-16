@@ -367,6 +367,27 @@ VAddr ExclusiveMonitor::GetProcessorReservation(size_t processor_id) {
 """
 MONITOR_REPLACEMENTS = [(MONITOR_SCAN_OLD, MONITOR_SCAN_NEW)]
 
+# MRS CNTVCT_EL0, the virtual count, is what Linux user space reads (the vDSO,
+# libc++'s steady_clock without one, SQLCipher's entropy): with CNTVOFF_EL2 at
+# zero, as Linux keeps it, it equals CNTPCT_EL0. The pinned dynarmic decodes
+# only CNTPCT_EL0 and leaves this one undefined (SIGILL in libsqlcipher.so).
+SYSTEM = "src/dynarmic/frontend/A64/translate/impl/system.cpp"
+SYSTEM_SHA256 = "3eec52107b17f6e598ea91730582b910ff6393920b775ba99518c5e51945e32d"
+SYSTEM_MARKER = "Gesher: CNTVCT_EL0 reads the physical count."
+SYSTEM_ENUM_OLD = """    CNTPCT_EL0 = 0b11'1110'011'001'0000,
+"""
+SYSTEM_ENUM_NEW = """    CNTPCT_EL0 = 0b11'1110'011'001'0000,
+    // Gesher: CNTVCT_EL0 reads the physical count. Counter-timer Virtual Count
+    // register, equal to CNTPCT_EL0 with Linux's zero CNTVOFF_EL2.
+    CNTVCT_EL0 = 0b11'1110'011'010'0000,
+"""
+SYSTEM_MRS_OLD = """    case SystemRegisterEncoding::CNTPCT_EL0:
+        // HACK"""
+SYSTEM_MRS_NEW = """    case SystemRegisterEncoding::CNTPCT_EL0:
+    case SystemRegisterEncoding::CNTVCT_EL0:
+        // HACK"""
+SYSTEM_REPLACEMENTS = [(SYSTEM_ENUM_OLD, SYSTEM_ENUM_NEW), (SYSTEM_MRS_OLD, SYSTEM_MRS_NEW)]
+
 
 def digest(data):
     return hashlib.sha256(data).hexdigest()
@@ -387,6 +408,8 @@ def transform(data, relative=RELATIVE):
         marker, original_sha, replacements = MONITOR_H_MARKER, MONITOR_H_SHA256, MONITOR_H_REPLACEMENTS
     elif relative == MONITOR:
         marker, original_sha, replacements = MONITOR_MARKER, MONITOR_SHA256, MONITOR_REPLACEMENTS
+    elif relative == SYSTEM:
+        marker, original_sha, replacements = SYSTEM_MARKER, SYSTEM_SHA256, SYSTEM_REPLACEMENTS
     else:
         raise ValueError("unknown pinned source")
     text = data.decode("utf-8")
@@ -429,7 +452,7 @@ def main():
     for relative, original_sha in [(RELATIVE, ORIGINAL_SHA256), (EMITTER, EMITTER_SHA256),
                                    (DISPATCH, DISPATCH_SHA256), (CODE, CODE_SHA256),
                                    (EMIT, EMIT_SHA256), (MONITOR_H, MONITOR_H_SHA256),
-                                   (MONITOR, MONITOR_SHA256)]:
+                                   (MONITOR, MONITOR_SHA256), (SYSTEM, SYSTEM_SHA256)]:
         path = Path(args.source_root) / relative
         data = path.read_bytes()
         patched = transform(data, relative)

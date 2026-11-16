@@ -346,6 +346,15 @@ function Aot2Len([string] $File) { (Aot2Read $File).Length }
 $null = Aot2Run "$Dir/dalvikvm.exe" ($aotLauncher + 'shutdown') @{} 120
 $devEnv = @{ GESHER_LOG_EXECUTION = '1'; GESHER_APP_WINDOW = 'headless' }
 $r = Aot2Run "$Dir/dalvikvm.exe" ($aotLauncher + 'uninstall', $pkg) $devEnv 400
+# The single-process phase above wrote profiles without installing the package.
+# On an isolated compilation runner, uninstall has no registry entry to remove,
+# so it cannot clean those fixtures. Start this first-install scenario without
+# either profile; otherwise install correctly chooses speed-profile, not verify.
+foreach ($profileFixture in $curProfile, $refProfile) {
+  if (Test-Path -LiteralPath $profileFixture) {
+    Remove-Item -LiteralPath $profileFixture -Force
+  }
+}
 $serverFrom = Aot2Len $serverLog
 $r = Aot2Run "$Dir/dalvikvm.exe" ($aotLauncher + 'install', (NoDrive "$Dir/lifecycle.apk")) $devEnv 400
 $server = Aot2Tail $serverLog $serverFrom

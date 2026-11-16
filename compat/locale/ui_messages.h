@@ -40,6 +40,11 @@ static inline const wchar_t* GesherUiText(enum GesherUiLanguage lang, const char
   if (strcmp(key, "run_app") == 0) return lang == GESHER_UI_HE ? L"{0} (\u05d9\u05d9\u05e9\u05d5\u05dd Android, \u05d2\u05e9\u05e8)" : L"{0} (Android app, Gesher)";
   if (strcmp(key, "url_protocol") == 0) return lang == GESHER_UI_HE ? L"URL:{0} ({1}, \u05d2\u05e9\u05e8)" : L"URL:{0} ({1}, Gesher)";
   if (strcmp(key, "permission_title") == 0) return lang == GESHER_UI_HE ? L"\u05d2\u05e9\u05e8 \u2014 \u05d1\u05e7\u05e9\u05ea \u05d4\u05e8\u05e9\u05d0\u05d4" : L"Gesher permission request";
+  if (strcmp(key, "permission_heading") == 0) return lang == GESHER_UI_HE ? L"\u05dc\u05d0\u05e4\u05e9\u05e8 \u05d2\u05d9\u05e9\u05d4 \u05dc\u05d9\u05d9\u05e9\u05d5\u05dd?" : L"Allow app access?";
+  if (strcmp(key, "permission_app") == 0) return lang == GESHER_UI_HE ? L"\u05d9\u05d9\u05e9\u05d5\u05dd Android" : L"Android application";
+  if (strcmp(key, "permission_requested") == 0) return lang == GESHER_UI_HE ? L"\u05d4\u05d9\u05d9\u05e9\u05d5\u05dd \u05de\u05d1\u05e7\u05e9 \u05d0\u05ea \u05d4\u05d4\u05e8\u05e9\u05d0\u05d5\u05ea \u05d4\u05d1\u05d0\u05d5\u05ea:" : L"This app is requesting the following permissions:";
+  if (strcmp(key, "permission_allow") == 0) return lang == GESHER_UI_HE ? L"\u05dc\u05d0\u05e4\u05e9\u05e8" : L"Allow";
+  if (strcmp(key, "permission_deny") == 0) return lang == GESHER_UI_HE ? L"\u05dc\u05d0 \u05dc\u05d0\u05e4\u05e9\u05e8" : L"Don't allow";
   if (strcmp(key, "permission_prefix") == 0) return lang == GESHER_UI_HE ? L"\u05dc\u05d0\u05e4\u05e9\u05e8 \u05dc\u05d9\u05d9\u05e9\u05d5\u05dd Android \u200f" : L"Allow the Android application ";
   if (strcmp(key, "permission_middle") == 0) return lang == GESHER_UI_HE ? L" \u05dc\u05d4\u05e9\u05ea\u05de\u05e9 \u05d1\u05d4\u05e8\u05e9\u05d0\u05d5\u05ea \u05d4\u05d1\u05d0\u05d5\u05ea?\n\n" : L" to use these permissions?\n\n";
   if (strcmp(key, "account_title") == 0) return lang == GESHER_UI_HE ? L"\u05d2\u05e9\u05e8 \u2014 \u05d2\u05d9\u05e9\u05d4 \u05dc\u05d7\u05e9\u05d1\u05d5\u05df" : L"Gesher account access";

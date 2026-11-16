@@ -153,4 +153,5 @@ Android section header table past EOF, which Android's linker rejects).
   returning without calling its superclass's). The shell's dlopen/dlsym
   calls all succeed except probes for libraries a phone lacks too
   (`GESHER_TRACE_DL=1`, docs/compiled-code.md); what it expects of ART at
-  that point is outside this decision.
+  that point is outside this decision; [0086](0086-packer-art-hooks.md) is
+  that (a stand-in libart.so whose ClassLinker::LoadClass it hooks).
