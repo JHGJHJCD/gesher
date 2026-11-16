@@ -12,6 +12,7 @@ import hashlib
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import tempfile
 
@@ -29,6 +30,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-ref", help="Exercise an older revision with the same valid samples")
     parser.add_argument("--sanitize", action="store_true")
+    parser.add_argument("--measure-only", action="store_true", help="Report baseline copy counts without enforcing the optimized bound")
     parser.add_argument("--cxx", default=os.environ.get("CXX", "c++"))
     args = parser.parse_args()
 
@@ -41,7 +43,7 @@ def main() -> int:
     parts = {
         "@API@": section(read("compat/media/audio/capture.h"), "class CaptureSource {", "// WASAPI shared mode"),
         "@PACING@": section(source, "class PacedSource :", "class SilentSource :"),
-        "@FILE@": section(source, "// A WAV file (", "// The source this machine has"),
+        "@FILE@": section(source, "// A WAV file (", "// The source this machine has").replace("memcpy(", "FileSourceCopy("),
     }
     fixture = (ROOT / "tests/media/audio_file_source_host.cc.in").read_text(encoding="utf-8")
     for marker, body in parts.items():
@@ -58,12 +60,17 @@ def main() -> int:
             command += ["-static"]
         if args.sanitize:
             command += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"]
+            if os.name == "nt":
+                for name in ("libclang_rt.asan_dynamic-x86_64.dll", "libc++.dll", "libunwind.dll"):
+                    runtime = Path(command[0]).parent / name
+                    if runtime.is_file():
+                        shutil.copyfile(runtime, work / name)
         runtime = os.environ.copy()
         compiler = Path(command[0])
         if os.name == "nt" and compiler.is_absolute():
             runtime["PATH"] = str(compiler.parent) + os.pathsep + runtime.get("PATH", "")
         subprocess.run(command, check=True, timeout=120)
-        return subprocess.run([str(binary)], cwd=work, env=runtime, check=False, timeout=60).returncode
+        return subprocess.run([str(binary), "measure" if args.measure_only else "gate"], cwd=work, env=runtime, check=False, timeout=60).returncode
 
 
 if __name__ == "__main__":

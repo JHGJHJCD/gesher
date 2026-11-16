@@ -12,6 +12,13 @@
 #include <thread>
 #include <vector>
 
+bool count_fill_copies = false;
+size_t fill_copies = 0, fill_copy_bytes = 0;
+void* FileSourceCopy(void* dst, const void* src, size_t bytes) {
+  if (count_fill_copies) { ++fill_copies; fill_copy_bytes += bytes; }
+  return std::memcpy(dst, src, bytes);
+}
+
 namespace gesher::media {
 @API@
 @PACING@
@@ -141,9 +148,55 @@ void Case(Format format, uint32_t channels, uint32_t rate, uint32_t format_size)
   Check(Equal(untouched, sentinel), "zero-frame Fill preserves destination");
   Check(std::remove(path.c_str()) == 0, "Load releases its file handle");
 }
+
+void Measure(bool gate) {
+  constexpr size_t frames = 48000, channels = 2;
+  std::vector<uint8_t> wave;
+  Tag(wave, "RIFF"); U32(wave, static_cast<uint32_t>(36 + frames * channels * 2)); Tag(wave, "WAVE");
+  std::vector<uint8_t> fmt;
+  U16(fmt, 1); U16(fmt, channels); U32(fmt, 48000); U32(fmt, 192000); U16(fmt, 4); U16(fmt, 16);
+  Chunk(wave, "fmt ", fmt);
+  std::vector<uint8_t> data;
+  for (size_t sample = 0; sample < frames * channels; ++sample) U16(data, static_cast<uint16_t>(sample));
+  Chunk(wave, "data", data);
+  FILE* output = std::fopen("measure.wav", "wb");
+  Check(output != nullptr, "create measured WAV");
+  Check(std::fwrite(wave.data(), 1, wave.size(), output) == wave.size(), "write measured WAV");
+  Check(std::fclose(output) == 0, "close measured WAV");
+  gesher::media::FileProbe source;
+  std::string error;
+  Check(source.Load("measure.wav", &error) && source.Start(), "start measured file source");
+  std::vector<float> samples(480 * channels);
+  fill_copies = fill_copy_bytes = 0;
+  for (size_t block = 0; block < 100; ++block) {
+    count_fill_copies = true;
+    source.Fill(samples.data(), 480);
+    count_fill_copies = false;
+    for (size_t i = 0; i < samples.size(); ++i) {
+      const size_t at = (block * 480 * channels + i) % (frames * channels);
+      Check(Equal(samples[i], static_cast<int16_t>(at) / 32768.0f), "measured source samples match integer oracle");
+    }
+  }
+  Check(fill_copy_bytes == frames * channels * sizeof(float), "file Fill copies exactly one second of samples");
+  if (gate) Check(fill_copies == 100, "one contiguous copy per nonwrapping source block");
+  std::printf("File Fill: 100 stereo 480-frame blocks, %zu copies, %zu bytes\n", fill_copies, fill_copy_bytes);
+  // End near the loop boundary and request a block crossing it.
+  for (size_t block = 0; block < 99; ++block) source.Fill(samples.data(), 480);
+  source.Fill(samples.data(), 470);
+  fill_copies = 0;
+  count_fill_copies = true;
+  source.Fill(samples.data(), 480);
+  count_fill_copies = false;
+  if (gate) Check(fill_copies == 2, "wrapping source block needs two spans");
+  for (size_t i = 0; i < samples.size(); ++i) {
+    const size_t at = (47990 * channels + i) % (frames * channels);
+    Check(Equal(samples[i], static_cast<int16_t>(at) / 32768.0f), "continuation after complete loop matches oracle");
+  }
+  Check(std::remove("measure.wav") == 0, "measured source closes file handle");
+}
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
   for (Format format : {Format{1, 8}, Format{1, 16}, Format{1, 24}, Format{1, 32}, Format{3, 32}})
     for (uint32_t channels : {1u, 2u, 3u, 6u})
       for (uint32_t rate : {8000u, 11025u, 44100u, 48000u, 96000u}) {
@@ -151,5 +204,6 @@ int main() {
         Case(format, channels, rate, 18);
         Case(format, channels, rate, 40);
       }
+  Measure(argc < 2 || std::strcmp(argv[1], "measure") != 0);
   std::printf("Audio file source valid WAV: %zu files, %zu checks PASS\n", files, checks);
 }

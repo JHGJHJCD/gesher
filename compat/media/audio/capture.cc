@@ -176,9 +176,13 @@ class FileSource : public PacedSource {
 
  protected:
   void Fill(float* dst, size_t frames) override {
-    for (size_t i = 0; i < frames; i++) {
-      memcpy(dst + i * channels_, samples_.data() + pos_ * channels_, channels_ * sizeof(float));
-      pos_ = (pos_ + 1) % frames_;
+    while (frames > 0) {
+      const size_t take = std::min(frames, frames_ - pos_);
+      memcpy(dst, samples_.data() + pos_ * channels_, take * channels_ * sizeof(float));
+      dst += take * channels_;
+      frames -= take;
+      pos_ += take;
+      if (pos_ == frames_) pos_ = 0;
     }
   }
 
@@ -227,7 +231,7 @@ class CaptureEngine {
     std::lock_guard<std::mutex> lock(mu_);
     // Remember the idle transition even if the next stream starts before
     // Run wakes. File sources restart at that boundary, just as after a wait.
-    if (Started().empty()) restart_ = true;
+    if (!Started()) restart_ = true;
     if (!thread_.joinable()) thread_ = std::thread([this] { Run(); });
     cv_.notify_all();
   }
@@ -279,19 +283,23 @@ class CaptureEngine {
     info_known_ = true;
   }
 
-  // With mu_ held: the streams alive and started.
-  std::vector<std::shared_ptr<CaptureStream>> Started() {
-    std::vector<std::shared_ptr<CaptureStream>> out;
+  // With mu_ held: prune dead streams and optionally collect the started ones.
+  // Presence checks do not need an owning snapshot or its allocation.
+  bool Started(std::vector<std::shared_ptr<CaptureStream>>* out = nullptr) {
+    bool any = false;
     for (auto it = streams_.begin(); it != streams_.end();) {
       std::shared_ptr<CaptureStream> s = it->lock();
       if (s == nullptr) {
         it = streams_.erase(it);
         continue;
       }
-      if (s->started()) out.push_back(std::move(s));
+      if (s->started()) {
+        any = true;
+        if (out != nullptr) out->push_back(std::move(s));
+      }
       ++it;
     }
-    return out;
+    return any;
   }
 
   void Run() {
@@ -307,10 +315,10 @@ class CaptureEngine {
         running = false;
         restart_ = false;
       }
-      if (Started().empty()) {
+      if (!Started()) {
         if (running && source_ != nullptr) source_->Stop();
         running = false;
-        cv_.wait(lock, [this] { return !Started().empty(); });
+        cv_.wait(lock, [this] { return Started(); });
       }
       if (!running) {
         if (source_ == nullptr) {
@@ -341,7 +349,8 @@ class CaptureEngine {
       }
       const uint32_t ch = source_->channels(), rate = source_->rate();
       if (ch == 0 || buf.empty()) continue;
-      std::vector<std::shared_ptr<CaptureStream>> targets = Started();
+      std::vector<std::shared_ptr<CaptureStream>> targets;
+      Started(&targets);
       // Pushed without the engine's lock: a stream's events may start or stop streams.
       lock.unlock();
       for (auto& s : targets) s->Push(buf.data(), buf.size() / ch, rate, ch, now);
@@ -518,9 +527,20 @@ ssize_t CaptureStream::Read(void* dst, size_t bytes, bool blocking) {
     }
     const size_t cap = params_.capacity_frames;
     size_t n = std::min(avail, want - done);
-    for (size_t k = 0; k < n; k++) {
-      const size_t slot = static_cast<size_t>((read_ + k) % cap);
-      memcpy(d + (done + k) * frame_size_, ring_.data() + slot * frame_size_, frame_size_);
+    if (read_ + n - 1 < read_) {
+      // Preserve the frame counter's unsigned wrap before applying ring modulo.
+      // The ordinary path below copies an admitted block in at most two spans.
+      for (size_t k = 0; k < n; ++k) {
+        const size_t slot = static_cast<size_t>((read_ + k) % cap);
+        memcpy(d + (done + k) * frame_size_, ring_.data() + slot * frame_size_, frame_size_);
+      }
+    } else {
+      const size_t slot = static_cast<size_t>(read_ % cap);
+      const size_t first = std::min(n, cap - slot);
+      memcpy(d + done * frame_size_, ring_.data() + slot * frame_size_, first * frame_size_);
+      if (n > first) {
+        memcpy(d + (done + first) * frame_size_, ring_.data(), (n - first) * frame_size_);
+      }
     }
     read_ += n;
     done += n;
