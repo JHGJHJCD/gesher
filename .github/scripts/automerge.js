@@ -246,8 +246,22 @@ async function ciVerdict(github, owner, repo, pr, defaultBranch, baseSha) {
       const mergeSha = refs[0].sha;
       const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: mergeSha});
       if (commit.sha !== mergeSha || commit.parents?.length !== 2 ||
-          commit.parents[0].sha !== baseSha || commit.parents[1].sha !== head) {
-        return 'CI tested a different head or base';
+          !SHA.test(commit.parents[0].sha || '') || commit.parents[1].sha !== head) {
+        return 'CI has no valid tested base and approved head';
+      }
+      const testedBase = commit.parents[0].sha;
+      if (testedBase !== baseSha) {
+        // A reviewed head does not lose its passing CI merely because another
+        // PR advanced the target. Prove that the tested base is still in the
+        // actual target's history; live PR association data cannot prove this.
+        const {data: comparison} = await github.rest.repos.compareCommits({
+          owner, repo, base: testedBase, head: baseSha, per_page: 1,
+        });
+        if (comparison?.status !== 'ahead' ||
+            comparison.base_commit?.sha !== testedBase ||
+            comparison.merge_base_commit?.sha !== testedBase) {
+          return 'CI tested a base outside the current target history';
+        }
       }
     }
   }

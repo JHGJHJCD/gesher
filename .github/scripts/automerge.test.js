@@ -24,6 +24,7 @@ function world(over = {}) {
     mergeError: null, mergeResult: {merged: true}, calls: [], hooks: {}, warnings: [],
     mergeProof: {sha: MERGE, parents: [{sha: BASE}, {sha: HEAD}]},
     targetHead: BASE,
+    comparison: {status: 'diverged', base_commit: {sha: BASE}, merge_base_commit: {sha: OTHER}},
     ...over,
   };
   if (!over.runs) w.runs = ['ci', 'arm64-windows'].map((name, i) => ({
@@ -98,9 +99,13 @@ function world(over = {}) {
         return {permission: w.permission, user: {id: w.permissionUserId ?? 42}};
       }),
       listCommitStatusesForRef: page('statuses', () => w.statuses),
+      compareCommits: rec('compare', (args) => {
+        if (w.comparisonError) throw w.comparisonError;
+        return w.comparisons?.[args.base] ?? w.comparison;
+      }),
     },
     git: {
-      getCommit: rec('gitCommit', () => w.mergeProof),
+      getCommit: rec('gitCommit', (args) => w.mergeProofs?.[args.commit_sha] ?? w.mergeProof),
       getRef: rec('gitRef', (args) => ({ref: 'refs/' + args.ref,
         object: {type: 'commit', sha: w.targetHead}, ...w.targetRefOverride})),
     },
@@ -441,8 +446,85 @@ test('stale PR base metadata does not replace the current Git target reference',
   assert.deepEqual(w.did('gitRef')[0][1], {owner: 'o', repo: 'r', ref: 'heads/main'});
 });
 
-test('CI against an old target tip cannot pass through stale PR base metadata', async () => {
+test('an unproven old target tip cannot pass through stale PR base metadata', async () => {
   const w = world(); w.targetHead = OTHER;
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+});
+
+test('a reviewed passing head remains mergeable when its tested base is an ancestor of the target', async () => {
+  const w = world({targetHead: OTHER,
+    comparison: {status: 'ahead', base_commit: {sha: BASE}, merge_base_commit: {sha: BASE}}});
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 1);
+  assert.equal(w.did('merge')[0][1].sha, HEAD);
+  assert.equal(w.did('compare').length, 2);
+  for (const [, args] of w.did('compare')) {
+    assert.deepEqual(args, {owner: 'o', repo: 'r', base: BASE, head: OTHER, per_page: 1});
+  }
+});
+
+test('CI against the current target needs no ancestry query', async () => {
+  const w = world(); await w.ciDone();
+  assert.equal(w.did('merge').length, 1);
+  assert.equal(w.did('compare').length, 0);
+});
+
+test('rewound, divergent, unrelated or malformed target history cannot reuse old CI', async () => {
+  const valid = {status: 'ahead', base_commit: {sha: BASE}, merge_base_commit: {sha: BASE}};
+  for (const comparison of [
+    {...valid, status: 'behind'}, {...valid, status: 'diverged'},
+    {...valid, status: 'identical'}, {...valid, status: 'unknown'},
+    {...valid, base_commit: {sha: OTHER}}, {...valid, merge_base_commit: {sha: OTHER}},
+    {...valid, base_commit: null}, {...valid, merge_base_commit: null}, {}, null,
+  ]) {
+    const w = world({targetHead: OTHER, comparison}); await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('removeLabel').length, 0);
+  }
+});
+
+test('unavailable ancestry evidence never grants a merge', async () => {
+  for (const status of [403, 404, 422, 503]) {
+    const w = world({targetHead: OTHER,
+      comparisonError: Object.assign(new Error('comparison unavailable'), {status})});
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.warnings.length, 1);
+  }
+});
+
+test('each required workflow must independently prove its tested target history', async () => {
+  const secondMerge = 'e'.repeat(40);
+  const foreignBase = 'f'.repeat(40);
+  for (const foreignIndex of [0, 1]) {
+    const w = world({targetHead: OTHER,
+      comparison: {status: 'ahead', base_commit: {sha: BASE}, merge_base_commit: {sha: BASE}}});
+    w.runs[foreignIndex].referenced_workflows = [{
+      path: 'o/r/.github/workflows/source-identity.yml@' + secondMerge,
+      ref: 'refs/pull/7/merge', sha: secondMerge,
+    }];
+    w.mergeProofs = {[secondMerge]: {sha: secondMerge, parents: [{sha: foreignBase}, {sha: HEAD}]}};
+    w.comparisons = {[foreignBase]: {status: 'diverged',
+      base_commit: {sha: foreignBase}, merge_base_commit: {sha: BASE}}};
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('fork CI with empty live associations can prove an ancestor base through immutable metadata', async () => {
+  const w = world({targetHead: OTHER,
+    comparison: {status: 'ahead', base_commit: {sha: BASE}, merge_base_commit: {sha: BASE}}});
+  w.pr.head.repo.id = 20;
+  w.runs.forEach((r) => {r.head_repository.id = 20; r.pull_requests = [];});
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 1);
+});
+
+test('target advancement during ancestry verification defers the merge', async () => {
+  const w = world({targetHead: OTHER,
+    comparison: {status: 'ahead', base_commit: {sha: BASE}, merge_base_commit: {sha: BASE}}});
+  w.hooks.compare = () => {w.targetHead = 'e'.repeat(40);};
   await w.ciDone();
   assert.equal(w.did('merge').length, 0);
 });
@@ -834,11 +916,13 @@ test('every required workflow needs immutable local merge-source metadata', asyn
     }
   }
 });
-test('the immutable merge object must have the exact current base and approved head', async () => {
+test('the immutable merge object must have a valid proven base and the exact approved head', async () => {
   for (const mergeProof of [{sha: OTHER, parents: [{sha: BASE}, {sha: HEAD}]},
     {sha: MERGE, parents: [{sha: OTHER}, {sha: HEAD}]},
     {sha: MERGE, parents: [{sha: BASE}, {sha: OTHER}]},
+    {sha: MERGE, parents: [{sha: 'invalid'}, {sha: HEAD}]},
     {sha: MERGE, parents: [{sha: BASE}]},
+    {sha: MERGE, parents: [{sha: BASE}, {sha: HEAD}, {sha: OTHER}]},
     {sha: MERGE, parents: [{sha: HEAD}, {sha: BASE}]}]) {
     const w = world({mergeProof}); await w.ciDone();
     assert.equal(w.did('merge').length, 0);
