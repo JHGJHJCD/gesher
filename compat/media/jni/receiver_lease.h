@@ -53,11 +53,17 @@ class ReceiverLease {
     return ReceiverLease(receiver);
   }
 
-  static void Setup(JNIEnv* env, jobject thiz, jfieldID field, std::mutex& context) {
-    T* receiver = new (std::nothrow) T;
+  template <class... Args>
+  static bool Setup(JNIEnv* env, jobject thiz, jfieldID field, std::mutex& context,
+                    Args&&... args) {
+    T* receiver = new (std::nothrow) T(std::forward<Args>(args)...);
     if (receiver == nullptr) {
       jniThrow(env, "java/lang/OutOfMemoryError", "media receiver");
-      return;
+      return false;
+    }
+    if (env->ExceptionCheck()) {
+      Drop(receiver);
+      return false;
     }
     T* previous;
     {
@@ -66,6 +72,7 @@ class ReceiverLease {
       env->SetLongField(thiz, field, reinterpret_cast<jlong>(receiver));
     }
     Drop(previous);
+    return true;
   }
 
   static void Release(JNIEnv* env, jobject thiz, jfieldID field, std::mutex& context) {
