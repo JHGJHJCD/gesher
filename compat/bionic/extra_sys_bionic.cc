@@ -9,6 +9,7 @@
 #include "extra_bionic.h"
 
 #include <gesher/bionic_shim.h>
+#include <gesher/elf_loader.h>
 
 #include <windows.h>
 // bcrypt.h needs windows.h first.
@@ -541,7 +542,9 @@ int BIONIC_SYSV Getentropy(void* buf, size_t n) {
 }
 int BIONIC_SYSV MemfdCreate(const char* name, unsigned flags) { return memfd_create(name, flags); }
 int BIONIC_SYSV Madvise(void* addr, size_t len, int advice) { return madvise(addr, len, advice); }
-int BIONIC_SYSV Msync(void* addr, size_t len, int flags) { return msync(addr, len, flags); }
+int BIONIC_SYSV Msync(void* addr, size_t len, int flags) {
+  return gesher::elf::SyncLoadedMemory(addr, len, flags);
+}
 int BIONIC_SYSV Zero2(const void*, size_t) { return 0; }
 int BIONIC_SYSV Zero1(int) { return 0; }
 int BIONIC_SYSV Zero0() { return 0; }

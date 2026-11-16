@@ -73,6 +73,18 @@ AInputQueue, AChoreographer). It builds in steps, each verified in CI
   below the thread pointer, so a TLS library loaded later still gets a static
   offset and is copied into every live thread's block.
 
+- **Raw system calls and code that is not on disk**
+  ([0084](decisions/0084-native-libs-self-unpacking-code.md)). A `syscall`
+  instruction the rewrite decodes becomes `ud2`, which the vectored handler
+  emulates through the shim (`compat/bionic/syscall_bionic.cc`: x86-64
+  numbers to shim functions, also `syscall(2)`'s fallback). A self-unpacking
+  object (UPX: `.eh_frame_hdr` or FDEs outside its executable file bytes) is
+  not rewritten at load; its pages, and any pages of a loaded object that
+  loaded code makes executable again (`mmap`/`mprotect` through
+  `ProtectLoadedMemory`/`MapLoadedMemory`), stay non-executable until their
+  first execution, which rewrites the code reachable from there. Ijiami's
+  `libexec_x86.so` is such an object.
+
 - **The bionic shim** (`compat/bionic/`, CMake target `gesher_bionic`,
   `gesher/bionic_shim.h`): the libc/libm/libdl/liblog/pthread symbols an app
   `.so` imports, as System V entry points over gesher-base and the CRT, with

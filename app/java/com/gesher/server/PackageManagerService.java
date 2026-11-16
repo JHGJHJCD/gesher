@@ -510,7 +510,10 @@ public final class PackageManagerService extends IPackageManager.Default {
      * The device's system features (docs/e2e.md): a phone-sized window with a mouse
      * (faketouch, both orientations) whose launcher could host app widgets (apps reach
      * AppWidgetManager only on devices with app_widgets, and phone apps assume it).
-     * Telephony, Wi-Fi, camera, sensors, touchscreen and the rest are absent.
+     * Telephony, Wi-Fi, camera, sensors, touchscreen and the rest are absent. Bluetooth
+     * (docs/bluetooth.md) is there when the host has a radio: FEATURE_BLUETOOTH with an
+     * adapter, FEATURE_BLUETOOTH_LE when Windows reports LE support (apps such as
+     * companion apps check it before anything else).
      */
     static final android.util.ArrayMap<String, android.content.pm.FeatureInfo> FEATURES =
             new android.util.ArrayMap<>();
@@ -522,6 +525,25 @@ public final class PackageManagerService extends IPackageManager.Default {
             android.content.pm.FeatureInfo f = new android.content.pm.FeatureInfo();
             f.name = name;
             FEATURES.put(name, f);
+        }
+        try {
+            addBluetoothFeatures(FEATURES, WindowsBluetooth.adapter(0));
+        } catch (LinkageError e) {
+            // No runtime natives (a host JVM loading the class): no radio to report.
+        }
+    }
+
+    /** The Bluetooth features of {@code adapter} (none without a radio). */
+    static void addBluetoothFeatures(android.util.ArrayMap<String, android.content.pm.FeatureInfo> features,
+            WindowsBluetooth.Adapter adapter) {
+        if (!adapter.present) return;
+        java.util.List<String> names = new java.util.ArrayList<>();
+        names.add(PackageManager.FEATURE_BLUETOOTH);
+        if (adapter.le()) names.add(PackageManager.FEATURE_BLUETOOTH_LE);
+        for (String name : names) {
+            android.content.pm.FeatureInfo f = new android.content.pm.FeatureInfo();
+            f.name = name;
+            features.put(name, f);
         }
     }
 

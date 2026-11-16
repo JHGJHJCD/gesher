@@ -96,6 +96,13 @@ struct PlaceholderBoundary {
   }
 };
 const PlaceholderBoundary& Placeholders() { static PlaceholderBoundary boundary; return boundary; }
+// MapAnonymous reports a plain MAP_FIXED that already decommitted its pages
+// (the loader's shared-copy bookkeeping reads it) and maps Win32 errors.
+thread_local bool g_mmap_replaced_private_pages = false;
+DWORD GetLastError() { return 0; }
+namespace gesher {
+int ErrnoFromWin32(DWORD error) { return error == 0 ? EINVAL : static_cast<int>(error); }
+}  // namespace gesher
 
 @TYPES@
 

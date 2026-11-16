@@ -309,6 +309,75 @@ int fsync(int fd) {
   }
   return gesher::CrtResult(_commit(fd));
 }
+int gesher_ftruncate(int fd, off_t length) {
+  if (length < 0) return errno = EINVAL, -1;
+  // Pin the actual descriptor throughout the resize and cache update. A path
+  // lookup or an unguarded fd would allow close/dup2 to change the target.
+  gesher::record_locks::DescriptorGuard descriptor_guard;
+  HANDLE file = gesher::HandleFromFd(fd);
+  if (file == INVALID_HANDLE_VALUE) return errno = EBADF, -1;
+  uint32_t access = 0;
+  int error = gesher::record_locks::HandleAccess(file, &access);
+  if (error) return errno = error, -1;
+  // The CRT can short-circuit an unchanged size. A valid read-only descriptor
+  // must still fail ftruncate, including that no-op; keep the guest's EINVAL
+  // convention for a descriptor lacking write access.
+  if ((access & FILE_WRITE_DATA) == 0) return errno = EINVAL, -1;
+  LARGE_INTEGER before{};
+  const bool have_size = GetFileSizeEx(file, &before) != FALSE;
+  int result = _chsize_s(fd, length);
+  // Keep the existing guest wrapper's CRT error convention.
+  if (result != 0) return errno = result == EBADF ? EBADF : EINVAL, -1;
+  if (!have_size || length == 0 || before.QuadPart != length) return 0;
+
+  SYSTEM_INFO system{};
+  GetSystemInfo(&system);
+  const size_t in_page = static_cast<uint64_t>(length) % system.dwPageSize;
+  if (in_page == 0) return 0;
+
+  // Linux also discards cached bytes past EOF when ftruncate leaves the size
+  // unchanged. SetEndOfFile/_chsize_s does not. Clear only that part of the
+  // shared native final page; neither EOF nor the descriptor cursor moves.
+  // Growth must not use this path: Linux preserves cached bytes exposed by a
+  // growth within the old final page. Native shrinking already clears them.
+  const uint32_t mapping_access = FILE_READ_DATA | FILE_WRITE_DATA;
+  if ((access & mapping_access) != mapping_access) {
+    // Windows requires both rights for a writable file section. Preserve
+    // successful O_WRONLY ftruncate/truncate; never reopen with more rights.
+    // Invalidating an existing cached tail through a write-only handle remains
+    // a compatibility limit, rather than turning valid resizes into failures.
+    return 0;
+  }
+
+  HANDLE section = CreateFileMappingW(file, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+  if (!section) return gesher::FailWithLastError();
+  const uint64_t offset = static_cast<uint64_t>(length) -
+      static_cast<uint64_t>(length) % system.dwAllocationGranularity;
+  // A zero view length maps the actual section through EOF, including its
+  // existing partial final page. Requesting a rounded section size would grow
+  // the file and make these cache-only bytes visible to pread.
+  void* view = MapViewOfFile(section, FILE_MAP_WRITE,
+                            static_cast<DWORD>(offset >> 32),
+                            static_cast<DWORD>(offset), 0);
+  DWORD failure = view ? ERROR_SUCCESS : GetLastError();
+  if (view) {
+    LARGE_INTEGER current{};
+    if (!GetFileSizeEx(file, &current)) {
+      failure = GetLastError();
+    } else if (current.QuadPart == length) {
+      // A different length means another operation followed our truncate; do
+      // not overwrite its newly valid file data or touch a shorter mapping.
+      auto* tail = static_cast<unsigned char*>(view) +
+          static_cast<size_t>(static_cast<uint64_t>(length) - offset);
+      memset(tail, 0, system.dwPageSize - in_page);
+    }
+    UnmapViewOfFile(view);
+  }
+  CloseHandle(section);
+  if (failure != ERROR_SUCCESS) return errno = gesher::ErrnoFromWin32(failure), -1;
+  return 0;
+}
+
 int fdatasync(int fd) { return fsync(fd); }
 
 // Positioned I/O must not change the shared cursor, including through dup().

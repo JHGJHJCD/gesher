@@ -34,7 +34,7 @@ void* Rewrite(const std::vector<uint8_t>& code, size_t tls_size = 64, bool suppo
   std::memcpy(mapping, code.data(), code.size());
   elf::FsRewriteStats stats;
   std::string error;
-  if (!elf::RewriteFsAccesses("exec3-local-probe", file.data(), file.size(), mapping, &stats, &error, tls_size)) {
+  if (!elf::RewriteFsAccesses("exec3-local-probe", file.data(), file.size(), mapping, mapping, 4096, &stats, &error, tls_size)) {
     std::fprintf(stderr, "%s\n", error.c_str());
     return nullptr;
   }

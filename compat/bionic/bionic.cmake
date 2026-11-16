@@ -19,6 +19,7 @@ add_library(gesher_bionic STATIC
   ${CMAKE_CURRENT_LIST_DIR}/signal_bionic.cc
   ${CMAKE_CURRENT_LIST_DIR}/socket_bionic.cc
   ${CMAKE_CURRENT_LIST_DIR}/stdio_bionic.cc
+  ${CMAKE_CURRENT_LIST_DIR}/syscall_bionic.cc
   ${CMAKE_CURRENT_LIST_DIR}/time_bionic.cc
   ${CMAKE_CURRENT_LIST_DIR}/zlib_bionic.cc)
 target_include_directories(gesher_bionic PUBLIC ${CMAKE_CURRENT_LIST_DIR}/include)
@@ -27,3 +28,6 @@ target_link_libraries(gesher_bionic PUBLIC gesher_elf gesher_exec_spawn log sync
 # libz.so for app libraries: zlib_bionic.cc over external/zlib (third_party.cmake).
 target_link_libraries(gesher_bionic PRIVATE z gesher_bionic_unicode)
 target_compile_options(gesher_bionic PRIVATE -Wall -Wextra -Werror)
+# regcomp/regexec over std::regex, which reports a bad pattern by throwing.
+set_source_files_properties(${CMAKE_CURRENT_LIST_DIR}/syscall_bionic.cc PROPERTIES
+  COMPILE_OPTIONS "-fexceptions")
