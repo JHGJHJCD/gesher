@@ -1359,7 +1359,12 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     r.waitingFor = front;
                     if (front.state != State.PAUSING) pause = front;
                 } else {
-                    launchNow = app != null && app.ready;
+                    // A TaskStackBuilder child still depends on its preceding Activity
+                    // even when its target process is already ready. Starting it now
+                    // skips that parent's pause and races the complete back stack.
+                    // activityPaused(), or the already-paused fast path at the end of
+                    // startActivities(), releases the child in the correct order.
+                    launchNow = r.waitingFor == null && app != null && app.ready;
                 }
             }
         }
