@@ -194,6 +194,109 @@ public final class ActivityManagerService extends IActivityManager.Default {
         return result;
     }
 
+    /**
+     * ActivityManager.getMemoryInfo: Windows' physical memory, from /proc/meminfo as Gesher
+     * serves it (MemTotal, MemAvailable). Default's answer left every field 0: apps sizing
+     * caches by totalMem, or bailing out on lowMemory against a threshold of 0, got nothing.
+     */
+    @Override
+    public void getMemoryInfo(android.app.ActivityManager.MemoryInfo outInfo) {
+        if (outInfo == null) return;
+        long[] memory = readMemInfo(new java.io.File("/proc/meminfo"));
+        long total = memory[0];
+        long available = memory[1] > 0 ? memory[1] : memory[2];
+        // Android's thresholds come from lmkd's levels; on Windows the paging file stands
+        // behind physical memory, so "low" is the last sixteenth (at most 512 MiB).
+        long threshold = total > 0 ? Math.min(total / 16, 512L * 1024 * 1024) : 0;
+        outInfo.totalMem = total;
+        outInfo.availMem = available;
+        outInfo.threshold = threshold;
+        outInfo.lowMemory = total > 0 && available < threshold;
+        outInfo.hiddenAppThreshold = threshold;
+        outInfo.secondaryServerThreshold = threshold;
+        outInfo.visibleAppThreshold = threshold / 2;
+        outInfo.foregroundAppThreshold = threshold / 4;
+        outInfo.advertisedMem = total;
+    }
+
+    /** MemTotal, MemAvailable and MemFree+Cached, in bytes (0 when unknown). */
+    static long[] readMemInfo(java.io.File meminfo) {
+        long total = 0, available = 0, free = 0, cached = 0;
+        try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.FileReader(meminfo))) {
+            String line;
+            while ((line = in.readLine()) != null) {
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length < 2) continue;
+                long kb;
+                try {
+                    kb = Long.parseLong(parts[1]);
+                } catch (NumberFormatException e) {
+                    continue;
+                }
+                long bytes = kb * 1024;
+                switch (parts[0]) {
+                    case "MemTotal:": total = bytes; break;
+                    case "MemAvailable:": available = bytes; break;
+                    case "MemFree:": free = bytes; break;
+                    case "Cached:": cached = bytes; break;
+                    default: break;
+                }
+            }
+        } catch (java.io.IOException | RuntimeException e) {
+            // Unknown: the zeros Default answered, never a made-up size.
+        }
+        return new long[] {total, available, free + cached};
+    }
+
+    /**
+     * ActivityManager.getMyMemoryState: the calling process's importance, as
+     * getRunningAppProcesses reports it. Default left importance 0, which no
+     * RunningAppProcessInfo constant names (apps compare it with IMPORTANCE_FOREGROUND).
+     */
+    @Override
+    public void getMyMemoryState(android.app.ActivityManager.RunningAppProcessInfo outState) {
+        if (outState == null) return;
+        int pid = Binder.getCallingPid();
+        ActivityTaskManagerService.ProcessRecord p = mAtm.callerProcess(pid);
+        outState.pid = pid;
+        outState.uid = Binder.getCallingUid();
+        outState.lastTrimLevel = 0;
+        outState.importanceReasonCode =
+                android.app.ActivityManager.RunningAppProcessInfo.REASON_UNKNOWN;
+        if (p == null) {
+            // The system server itself, or a process not (yet) attached.
+            outState.importance =
+                    android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND;
+            return;
+        }
+        outState.processName = p.processName;
+        outState.importance = !p.activities.isEmpty()
+                ? android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+                : mServices.hasServices(p)
+                        ? android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_SERVICE
+                        : android.app.ActivityManager.RunningAppProcessInfo.IMPORTANCE_CACHED;
+    }
+
+    /**
+     * A process loading another package's code (createPackageContext with CODE): Android
+     * kills the dependent when that package is updated. Gesher does not track dependents:
+     * one keeps the code it already loaded until it restarts.
+     */
+    @Override
+    public void addPackageDependency(String packageName) {
+    }
+
+    /** Binder transactions to a frozen process: Gesher never freezes cached apps. */
+    @Override
+    public void frozenBinderTransactionDetected(int debugPid, int code, int flags, int err) {
+    }
+
+    /** No monkey (UI exerciser) runs on Gesher. */
+    @Override
+    public boolean isUserAMonkey() {
+        return false;
+    }
+
     // --- content providers (ContentProviders) -------------------------------------------
 
     @Override

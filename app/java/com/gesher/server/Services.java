@@ -237,6 +237,10 @@ public final class Services {
         services.put(Context.USAGE_STATS_SERVICE, StandIn.of(
                 android.app.usage.IUsageStatsManager.class,
                 new DeviceServices.UsageStatsService(pm)).asBinder());
+        // StorageStatsManager: app and volume sizes for file managers and cleaners.
+        services.put(Context.STORAGE_STATS_SERVICE, StandIn.of(
+                android.app.usage.IStorageStatsManager.class,
+                new StorageStatsService(pm)).asBinder());
         services.put(Context.DEVICE_POLICY_SERVICE, StandIn.of(
                 android.app.admin.IDevicePolicyManager.class,
                 new DeviceServices.DevicePolicyService()).asBinder());
@@ -549,6 +553,18 @@ public final class Services {
             return new DiskInfo[0];
         }
 
+        /**
+         * StorageManager's volume events: the one data volume is never mounted, ejected or
+         * moved while the device runs, so a listener has nothing to hear.
+         */
+        @Override
+        public void registerListener(android.os.storage.IStorageEventListener listener) {
+        }
+
+        @Override
+        public void unregisterListener(android.os.storage.IStorageEventListener listener) {
+        }
+
         @Override
         public VolumeInfo[] getVolumes(int flags) {
             // The two views refer to the same backing storage. Android also includes
@@ -843,6 +859,17 @@ public final class Services {
         @Override
         public boolean isUserRunning(int userId) {
             return userId == 0;
+        }
+
+        /** As UserManagerService: "" for a user that is not a profile, null for no user. */
+        @Override
+        public String getProfileType(int userId) {
+            return userId == 0 ? "" : null;
+        }
+
+        @Override
+        public boolean isDemoUser(int userId) {
+            return false;
         }
     }
 }
