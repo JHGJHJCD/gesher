@@ -91,6 +91,8 @@ constexpr ULONGLONG kSplashAfterDetachMs = 60000;
 constexpr ULONGLONG kCancelAfterDetachMs = 10000;
 // The environment variable that asks com.gesher.app.Launcher not to wait (Launcher.DETACH_ENV).
 constexpr wchar_t kDetachEnv[] = L"GESHER_LAUNCH_DETACH";
+// Where com.gesher.app.Launcher writes a failure for the user (Launcher.ERROR_FILE_ENV).
+constexpr wchar_t kErrorFileEnv[] = L"GESHER_LAUNCH_ERROR_FILE";
 // An app window's size when GESHER_DISPLAY gives none (WindowMode.DEFAULT_DISPLAY).
 constexpr int kDefaultWidth = 400, kDefaultHeight = 800;
 constexpr int kIconSize = 128;
@@ -126,6 +128,52 @@ std::wstring Lower(std::wstring s) {
 bool IsFile(const std::wstring& path) {
   DWORD attributes = GetFileAttributesW(path.c_str());
   return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+}
+
+// A new empty file in the user's temp directory for the launcher's failure
+// (kErrorFileEnv), or empty.
+std::wstring NewErrorFile() {
+  wchar_t dir[MAX_PATH + 1];
+  DWORD n = GetTempPathW(MAX_PATH + 1, dir);
+  if (n == 0 || n > MAX_PATH) return std::wstring();
+  wchar_t file[MAX_PATH];
+  if (GetTempFileNameW(dir, L"gsh", 0, file) == 0) return std::wstring();
+  return file;
+}
+
+// The UTF-8 text of `path` (at most 64 KiB), deleting the file.
+std::wstring TakeErrorText(const std::wstring& path) {
+  std::wstring text;
+  HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                         OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (f != INVALID_HANDLE_VALUE) {
+    std::string bytes(65536, '\0');
+    DWORD got = 0;
+    if (ReadFile(f, bytes.data(), static_cast<DWORD>(bytes.size()), &got, nullptr) && got > 0) {
+      int chars = MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(got), nullptr, 0);
+      if (chars > 0) {
+        text.resize(static_cast<size_t>(chars));
+        MultiByteToWideChar(CP_UTF8, 0, bytes.data(), static_cast<int>(got), text.data(), chars);
+      }
+    }
+    CloseHandle(f);
+  }
+  DeleteFileW(path.c_str());
+  return text;
+}
+
+// Shows the launcher's failure: nobody reads its output when Explorer started the
+// launch, and without this the splash would only close, as if the app had crashed.
+void ShowLaunchFailure(const std::wstring& reason) {
+  if (reason.empty()) return;
+  const auto language = GesherUiCurrentLanguage();
+  std::wstring text = GesherUiText(language, "launch_failed");
+  const size_t at = text.find(L"{0}");
+  if (at != std::wstring::npos) text.replace(at, 3, reason);
+  else text = reason;
+  UINT flags = MB_OK | MB_ICONERROR | MB_SETFOREGROUND;
+  if (GesherUiRtl(language)) flags |= MB_RTLREADING | MB_RIGHT;
+  MessageBoxW(nullptr, text.c_str(), GesherUiText(language, "brand"), flags);
 }
 
 // A small file's bytes (at most 4 MB).
@@ -741,10 +789,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
       LocalFree(argv);
     }
   }
+  // Nobody reads the output: a failure is shown in a message box (ShowLaunchFailure).
+  std::wstring error_file;
+  if (!inherit && !control_panel) {
+    error_file = NewErrorFile();
+    if (!error_file.empty()) SetEnvironmentVariableW(kErrorFileEnv, error_file.c_str());
+  }
   PROCESS_INFORMATION pi = {};
   std::wstring mutable_command = command;
   if (!CreateProcessW(powershell.c_str(), mutable_command.data(), nullptr, nullptr,
                       inherit ? TRUE : FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+    if (!error_file.empty()) DeleteFileW(error_file.c_str());
     return 1;
   }
   if (control_panel && !inherit) {
@@ -770,6 +825,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     }
     WaitForSingleObject(pi.hProcess, 1000);
     CloseHandle(pi.hProcess);
+    // The user cancelled: nothing to tell them.
+    if (!error_file.empty()) DeleteFileW(error_file.c_str());
     return 1;
   }
   if (job != nullptr) {
@@ -779,5 +836,9 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
   DWORD code = 1;
   GetExitCodeProcess(pi.hProcess, &code);
   CloseHandle(pi.hProcess);
+  if (!error_file.empty()) {
+    std::wstring failure = TakeErrorText(error_file);
+    if (code != 0) ShowLaunchFailure(failure);
+  }
   return static_cast<int>(code);
 }
