@@ -2169,6 +2169,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Verify coherent TCP reference role
         run: python3 tools/toolchain/coherent_tcp_context.py
       - name: Retain full independent Linux contract including inline mode

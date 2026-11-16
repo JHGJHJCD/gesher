@@ -1,5 +1,9 @@
 """PR API metadata must use the head while artifacts retain their merge source."""
 import copy
+import os
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -88,6 +92,96 @@ class SourceIdentityTest(unittest.TestCase):
             self.assertEqual(git.call_args_list[1].args[0], ['git', 'cat-file', '-p', 'a' * 40])
         with patch('source_identity.subprocess.check_output', return_value='d' * 40 + '\n'):
             with self.assertRaises(AssertionError):
+                source_identity(self.env, self.event)
+
+
+class SourceIdentityGitHistoryTest(unittest.TestCase):
+    """Use real commit ancestry, including a target that advances before checkout."""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        previous = os.getcwd()
+        self.addCleanup(os.chdir, previous)
+        os.chdir(temp.name)
+        self.git('init', '--quiet')
+        self.git('config', 'user.name', 'CI contract fixture')
+        self.git('config', 'user.email', 'ci-fixture@example.invalid')
+        self.tree = self.git('hash-object', '-t', 'tree', '--stdin', input='')
+        self.base = self.commit('payload base')
+        self.tested = self.commit('tested target', self.base)
+        self.tip = self.commit('target advanced', self.tested)
+        self.head = self.commit('fork head', self.base)
+        self.side = self.commit('other branch', self.base)
+        self.unrelated = self.commit('unrelated history')
+        self.git('update-ref', 'refs/remotes/origin/main', self.tip)
+        self.env = dict(GITHUB_EVENT_NAME='pull_request', GITHUB_REF='refs/pull/5/merge',
+                        GITHUB_BASE_REF='main', GITHUB_HEAD_REF='contributor/topic',
+                        GITHUB_REPOSITORY='gesher-runtime/gesher', GITHUB_REPOSITORY_ID='1426153186')
+        self.event = {'number': 5, 'pull_request': {
+            'base': {'sha': self.base, 'ref': 'main',
+                     'repo': {'id': 1426153186, 'full_name': 'gesher-runtime/gesher'}},
+            'head': {'sha': self.head, 'ref': self.env['GITHUB_HEAD_REF'],
+                     'repo': {'id': 1459959585, 'full_name': 'ztcebuck/gesher'}}}}
+        self.checkout(self.tested, self.head)
+
+    def git(self, *args, input=None):
+        return subprocess.check_output(['git', *args], input=input, text=True,
+                                       stderr=subprocess.PIPE).strip()
+
+    def commit(self, message, *parents):
+        args = ['commit-tree', self.tree, '-m', message]
+        for parent in parents:
+            args += ['-p', parent]
+        return self.git(*args)
+
+    def checkout(self, *parents):
+        self.env['GITHUB_SHA'] = self.commit('synthetic PR merge', *parents)
+        self.git('checkout', '--quiet', '--detach', self.env['GITHUB_SHA'])
+
+    def test_stale_payload_base_with_exact_or_advanced_target(self):
+        for target in (self.tested, self.tip):
+            self.git('update-ref', 'refs/remotes/origin/main', target)
+            with self.subTest(target=target):
+                self.assertEqual(source_identity(self.env, self.event),
+                                 {'checkout_sha': self.env['GITHUB_SHA'], 'api_head_sha': self.head,
+                                  'head_repository_id': '1459959585'})
+
+    def test_tested_base_on_another_branch_is_rejected(self):
+        self.checkout(self.side, self.head)
+        with self.assertRaisesRegex(AssertionError, 'Unproved PR target ancestry'):
+            source_identity(self.env, self.event)
+
+    def test_payload_base_must_belong_to_tested_history(self):
+        self.event['pull_request']['base']['sha'] = self.unrelated
+        with self.assertRaisesRegex(AssertionError, 'Unproved PR target ancestry'):
+            source_identity(self.env, self.event)
+
+    def test_rewritten_target_is_rejected(self):
+        self.git('update-ref', 'refs/remotes/origin/main', self.side)
+        with self.assertRaisesRegex(AssertionError, 'Unproved PR target ancestry'):
+            source_identity(self.env, self.event)
+
+    def test_revision_expressions_are_not_target_branches(self):
+        self.env['GITHUB_BASE_REF'] = 'main~1'
+        self.event['pull_request']['base']['ref'] = 'main~1'
+        with self.assertRaisesRegex(AssertionError, 'Cannot prove PR target history'):
+            source_identity(self.env, self.event)
+
+    def test_missing_target_and_shallow_history_fail_closed(self):
+        self.git('update-ref', '-d', 'refs/remotes/origin/main')
+        with self.assertRaisesRegex(AssertionError, 'requires fetch-depth: 0'):
+            source_identity(self.env, self.event)
+        self.git('update-ref', 'refs/remotes/origin/main', self.tip)
+        Path('.git/shallow').write_text(self.tested + '\n')
+        with self.assertRaisesRegex(AssertionError, 'Unproved PR target ancestry'):
+            source_identity(self.env, self.event)
+
+    def test_exact_head_and_two_parents_remain_required(self):
+        for parents in ((self.tested, self.side), (self.tested,),
+                        (self.tested, self.head, self.side)):
+            self.checkout(*parents)
+            with self.subTest(parents=parents), self.assertRaisesRegex(AssertionError, 'parent mismatch'):
                 source_identity(self.env, self.event)
 
 

@@ -16,15 +16,15 @@ original = source_path.read_bytes()
 read_bytes = Path.read_bytes
 
 
-def rejected(label, replacement, repin=False, target=source_path):
+def rejected(label, replacement, repin=False, target=source_path, pin_name='SYSTEM_SHA256'):
     assert replacement != read_bytes(target), 'negative control made no change'
     def mutated(path):
         return replacement if path == target else read_bytes(path)
     with patch.object(Path, 'read_bytes', mutated), contextlib.redirect_stdout(io.StringIO()):
-        saved = policy.SYSTEM_SHA256
+        saved = getattr(policy, pin_name)
         try:
             if repin:
-                policy.SYSTEM_SHA256 = hashlib.sha256(replacement).hexdigest()
+                setattr(policy, pin_name, hashlib.sha256(replacement).hexdigest())
             try:
                 policy.check()
             except AssertionError as error:
@@ -33,7 +33,7 @@ def rejected(label, replacement, repin=False, target=source_path):
             else:
                 raise RuntimeError('source policy accepted ' + label)
         finally:
-            policy.SYSTEM_SHA256 = saved
+            setattr(policy, pin_name, saved)
     print('PASS source policy rejects ' + print_result)
 
 
@@ -84,3 +84,20 @@ for before, after in policy.TCP_DIAGNOSTIC_REPLACEMENTS:
     without_diagnostics = without_diagnostics.replace(after, before, 1)
 rejected('TCP fixture missing required diagnostics', without_diagnostics, target=fixture_path)
 print('TCP diagnostic source policy: six negative controls passed')
+
+receipt_path = ROOT / 'tools/ci/receipt-diagnostics.ps1'
+receipt = receipt_path.read_bytes()
+receipt_controls = (
+    ('unrelated receipt diagnostic bytes', receipt + b'\n# unrelated change\n'),
+    ('receipt source changed to checkout',
+     receipt.replace(b"$Expected['source'] = $SourceIdentity.api_head_sha",
+                     b"$Expected['source'] = $SourceIdentity.checkout_sha", 1)),
+    ('missing receipt source parameter',
+     receipt.replace(policy.RECEIPT_SOURCE_PARAMETER,
+                     b'[Collections.IDictionary] $Expected = $null)', 1)),
+    ('duplicate receipt source block', receipt + policy.RECEIPT_SOURCE_BLOCK),
+)
+for label, replacement in receipt_controls:
+    rejected(label + ' even with a new full-file hash', replacement, True,
+             target=receipt_path, pin_name='RECEIPT_DIAGNOSTICS_SHA256')
+print('receipt diagnostic source policy: four negative controls passed')

@@ -34,14 +34,36 @@ def source_identity(env, event=None, checkout_parents=None):
     assert re.fullmatch(r'[0-9a-f]{40}', head), 'Invalid PR head SHA'
     base = pr['base']['sha']
     assert re.fullmatch(r'[0-9a-f]{40}', base), 'Invalid PR base SHA'
-    # synchronize payloads can still name an older merge_commit_sha. Bind the
-    # actual checkout to the payload's base/head via raw commit headers instead.
+    # synchronize payloads can still name an older merge_commit_sha or base SHA.
+    # Bind the actual checkout to the PR head through its raw commit headers.
     # cat-file retains parents even when checkout used fetch-depth: 1.
     if checkout_parents is None:
         assert subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip() == checkout, 'Checkout SHA mismatch'
         headers = subprocess.check_output(['git', 'cat-file', '-p', checkout], text=True).split('\n\n', 1)[0]
         checkout_parents = tuple(line[7:] for line in headers.splitlines() if line.startswith('parent '))
-    assert tuple(checkout_parents) == (base, head), 'PR checkout parent mismatch'
+    parents = tuple(checkout_parents)
+    detail = f'checkout={checkout}, payload_base={base}, head={head}, parents={parents}'
+    assert len(parents) == 2 and parents[1] == head, f'PR checkout parent mismatch: {detail}'
+    if parents[0] != base:
+        # GitHub may create the merge against a newer target tip while keeping
+        # the PR payload's original base. Accept only the requested target's
+        # fetched history: payload base -> tested base -> fetched target tip.
+        # A target that advanced before checkout remains valid; unrelated or
+        # rewritten ancestry, missing history and missing refs fail closed.
+        target_ref = f"refs/remotes/origin/{env['GITHUB_BASE_REF']}"
+        try:
+            target = subprocess.check_output(
+                ['git', 'show-ref', '--verify', '--hash', target_ref],
+                text=True, stderr=subprocess.PIPE).strip()
+        except subprocess.CalledProcessError as error:
+            raise AssertionError(f'Cannot prove PR target history ({target_ref}); '
+                                 f'checkout requires fetch-depth: 0: {detail}') from error
+        assert re.fullmatch(r'[0-9a-f]{40}', parents[0]), f'Invalid tested PR base: {detail}'
+        for older, newer in ((base, parents[0]), (parents[0], target)):
+            proof = subprocess.run(['git', 'merge-base', '--is-ancestor', older, newer],
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            assert proof.returncode == 0, (f'Unproved PR target ancestry {older} -> {newer}, '
+                                          f'target={target_ref}@{target}, git_exit={proof.returncode}: {detail}')
     # A fork is a distinct source repository, not a different target. Consumers
     # must bind artifact metadata to this event-supplied ID and the PR head SHA.
     return {'checkout_sha': checkout, 'api_head_sha': head,

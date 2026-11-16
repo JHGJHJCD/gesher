@@ -12,7 +12,7 @@ $trusted = @{
   'tools/net-tcp-priority/qualified/TsfJobSupervisor.cs'='625be4d5906bb48dd02d6103382fd2e85ac88738'
   'tools/native3-locks/artifact/download-verified-artifact.py'='cd5cc415e53102c664edac22b1604df639c8804b'
   'tools/ci/receipt-diagnostics.ps1'='b89f2f3f8a54a8b23937bae48ad900c85d4d49e9'
-  'tools/ci/source_identity.py'='e93808b2890bf8ad4bfc969b92262b6629894def'
+  'tools/ci/source_identity.py'='e03b6d4d926f954eecd524ee63ca182edfacdd17'
 }
 foreach ($entry in $trusted.GetEnumerator()) {
   $actualHelperBlob = git hash-object $entry.Key
