@@ -111,7 +111,7 @@ final class ActiveServices {
         final Map<Intent.FilterComparison, IntentBindRecord> bindings = new LinkedHashMap<>();
         // Android's main thread completes unbind callbacks in request order. The legacy
         // serviceDoneExecuting(UNBIND) reply contains no binding token; keep its owner.
-        final List<IntentBindRecord> pendingUnbinds = new ArrayList<>();
+        final List<UnbindAttempt> pendingUnbinds = new ArrayList<>();
 
         ServiceRecord(ServiceInfo info, ApkPackage owner) {
             super("ServiceRecord " + info.name);
@@ -144,12 +144,22 @@ final class ActiveServices {
         boolean received;    // publishService came
         IBinder binder;
         boolean unbindPending; // onUnbind is in flight; a new client waits for its answer
+        UnbindAttempt unbindToken; // unique per onUnbind, rejects stale completions
         boolean doRebind;      // onUnbind(true) requires one onRebind on the next binding
 
         IntentBindRecord(ServiceRecord service, Intent intent) {
             super("IntentBindRecord " + service.info.name);
             this.service = service;
             this.intent = intent;
+        }
+    }
+
+    /** Distinct Binder token for one unbind operation, never reused across cycles. */
+    private static final class UnbindAttempt extends Binder {
+        final IntentBindRecord binding;
+        UnbindAttempt(IntentBindRecord binding) {
+            super("Unbind " + binding.service.info.name);
+            this.binding = binding;
         }
     }
 
@@ -511,7 +521,8 @@ final class ActiveServices {
                     // connect to a Binder that onUnbind(false) will invalidate.
                     b.unbindPending = true;
                     b.doRebind = false;
-                    b.service.pendingUnbinds.add(b);
+                    b.unbindToken = new UnbindAttempt(b);
+                    b.service.pendingUnbinds.add(b.unbindToken);
                     unbind.add(b);
                 }
                 if (!services.contains(b.service)) services.add(b.service);
@@ -524,7 +535,8 @@ final class ActiveServices {
             synchronized (this) {
                 thread = r.app != null && r.created ? r.app.thread : null;
                 if (thread == null) {
-                    r.pendingUnbinds.remove(b);
+                    r.pendingUnbinds.remove(b.unbindToken);
+                    b.unbindToken = null;
                     b.unbindPending = false;
                     b.requested = false;
                     b.received = false;
@@ -534,11 +546,12 @@ final class ActiveServices {
             if (thread == null) continue;
             SystemServer.log("scheduleUnbindService " + r);
             try {
-                thread.scheduleUnbindService(r, b, b.intent);
+                thread.scheduleUnbindService(r, b.unbindToken, b.intent);
             } catch (RemoteException e) {
                 SystemServer.log("scheduleUnbindService " + r + ": " + e);
                 synchronized (this) {
-                    r.pendingUnbinds.remove(b);
+                    r.pendingUnbinds.remove(b.unbindToken);
+                    b.unbindToken = null;
                     b.unbindPending = false;
                     b.requested = false;
                     b.received = false;
@@ -558,10 +571,13 @@ final class ActiveServices {
         boolean retry;
         synchronized (this) {
             ServiceRecord r = byToken(token);
-            if (r == null || !(bindToken instanceof IntentBindRecord)) return;
+            if (r == null || !(bindToken instanceof UnbindAttempt)) return;
             requireServiceOwner(r);
-            b = (IntentBindRecord) bindToken;
-            if (b.service != r || !b.unbindPending || !r.pendingUnbinds.remove(b)) return;
+            UnbindAttempt attempt = (UnbindAttempt) bindToken;
+            b = attempt.binding;
+            if (b.service != r || b.unbindToken != attempt
+                    || !b.unbindPending || !r.pendingUnbinds.remove(attempt)) return;
+            b.unbindToken = null;
             b.unbindPending = false;
             // When a client arrived before onUnbind returned, it must receive the
             // old published Binder, followed by one onRebind. A missing initial
@@ -593,9 +609,12 @@ final class ActiveServices {
                 // Android 16's onUnbind(false) completes with UNBIND. Gesher's
                 // four-argument interface has no intent; callbacks are serialized
                 // by ActivityThread, so the oldest pending intent owns the reply.
-                IntentBindRecord b = r.pendingUnbinds.remove(0);
-                if (b.unbindPending) {
+                UnbindAttempt attempt = r.pendingUnbinds.remove(0);
+                IntentBindRecord b = attempt.binding;
+                if (b.unbindToken == attempt && b.unbindPending) {
+                    b.unbindToken = null;
                     b.unbindPending = false;
+                    b.unbindToken = null;
                     b.doRebind = false;
                     b.requested = false;
                     b.received = false;
