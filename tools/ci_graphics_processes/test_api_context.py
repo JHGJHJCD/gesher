@@ -11,7 +11,14 @@ class ContextTests(unittest.TestCase):
     def test_strict_context(self):
         e={'GITHUB_ACTIONS':'true','GITHUB_JOB':'fixture-producer','GITHUB_REPOSITORY':'gesher-runtime/gesher','GITHUB_REPOSITORY_ID':'1426153186','GITHUB_REF':'refs/heads/wip/ci-graphics-processes','GITHUB_ACTOR':'palmoni5','GITHUB_TRIGGERING_ACTOR':'palmoni5','GITHUB_EVENT_NAME':'push','GITHUB_SHA':'a'*40,'GITHUB_WORKFLOW_SHA':'a'*40,'GITHUB_RUN_ID':'42','GITHUB_RUN_ATTEMPT':'1'}
         self.assertEqual(m.context(e,'fixture-producer')['source'],'a'*40)
-        for key,value in [('GITHUB_ACTIONS','false'),('GITHUB_JOB','other'),('GITHUB_REPOSITORY_ID','1'),('GITHUB_REF','refs/heads/main'),('GITHUB_TRIGGERING_ACTOR','other'),('GITHUB_EVENT_NAME','pull_request'),('GITHUB_WORKFLOW_SHA','b'*40),('GITHUB_RUN_ATTEMPT','01')]:
+        for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+            arbitrary=dict(e,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+            self.assertEqual(m.context(arbitrary,'fixture-producer'),m.context(e,'fixture-producer'))
+        for field in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR'):
+            for value in ('',None,42):
+                bad=dict(e);bad[field]=value
+                with self.assertRaises(AssertionError):m.context(bad,'fixture-producer')
+        for key,value in [('GITHUB_ACTIONS','false'),('GITHUB_JOB','other'),('GITHUB_REPOSITORY_ID','1'),('GITHUB_REF','refs/heads/main'),('GITHUB_TRIGGERING_ACTOR',''),('GITHUB_EVENT_NAME','pull_request'),('GITHUB_WORKFLOW_SHA','b'*40),('GITHUB_RUN_ATTEMPT','01')]:
             bad=copy.deepcopy(e);bad[key]=value
             with self.assertRaises(AssertionError):m.context(bad,'fixture-producer')
         with self.assertRaises(AssertionError):m.api('../outside')

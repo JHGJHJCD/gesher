@@ -13,13 +13,17 @@ def main():
              GITHUB_RUN_ID='123456',GITHUB_RUN_ATTEMPT='1',
              GESHER_FIRST_LINK_POLICY_REF=focused.REPOSITORY+'/'+focused.POLICY_PATH+'@'+'2'*40)
     context=focused.context(env,'selected-minimum')
+    for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+        for event in ('push','workflow_dispatch'):
+            arbitrary=dict(env,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger,GITHUB_EVENT_NAME=event)
+            assert focused.context(arbitrary,'selected-minimum')==context
     assert factory.caller(env,'selected-minimum')==context
     focused.check_descriptor(focused.descriptor(env),context)
     bad_values=dict(GITHUB_ACTIONS='false',GITHUB_REPOSITORY='other/gesher',GITHUB_REPOSITORY_ID='1',
                     GITHUB_REF='refs/heads/main',GITHUB_WORKFLOW='ci',GITHUB_WORKFLOW_REF=focused.REPOSITORY+'/.github/workflows/ci.yml@'+focused.TUPLE['ref'],
                     GITHUB_JOB='compile',GESHER_HOST_PTHREAD_CALLER='ci/build',GESHER_HOST_PTHREAD_SELECTION='publisher-control',
                     GITHUB_SHA='3'*40,GITHUB_WORKFLOW_SHA='3'*40,GESHER_FIRST_LINK_AUTHORIZED_SOURCE='3'*40,
-                    GITHUB_EVENT_NAME='pull_request',GITHUB_ACTOR='other',GITHUB_TRIGGERING_ACTOR='other',
+                    GITHUB_EVENT_NAME='pull_request',GITHUB_ACTOR='',GITHUB_TRIGGERING_ACTOR='',
                     GITHUB_RUN_ID='0',GITHUB_RUN_ATTEMPT='0',GESHER_FIRST_LINK_POLICY_REF='unbound-policy')
     for key,value in bad_values.items():
         bad=dict(env);bad[key]=value
@@ -34,7 +38,7 @@ def main():
     assert factory.recipe()['caller']=='ci/build'
     assert factory.recipe(focused.CALLER)['focused_caller']==focused.TUPLE
     assert factory.fingerprint(factory.recipe())!=factory.fingerprint(factory.recipe(focused.CALLER))
-    print('PASS focused exact path/ref/name/job/source/policy/actor authority:18 env+7descriptor negatives; explicit recipe distinction; native/network0')
+    print('PASS focused exact path/ref/name/job/source/policy and actor metadata:18 env+7descriptor negatives; explicit recipe distinction; native/network0')
 
 
 if __name__=='__main__':main()

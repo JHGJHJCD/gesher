@@ -376,7 +376,8 @@ def context(env, job):
     expected = {'GITHUB_REPOSITORY': REPOSITORY, 'GITHUB_REPOSITORY_ID': str(REPOSITORY_ID),
                 'GITHUB_REF': 'refs/heads/' + BRANCH, 'GITHUB_WORKFLOW': WORKFLOW,
                 'GITHUB_WORKFLOW_REF': REPOSITORY + '/' + CALLER + '@refs/heads/' + BRANCH,
-                'GITHUB_JOB': job, 'GITHUB_ACTOR': 'palmoni5', 'GITHUB_TRIGGERING_ACTOR': 'palmoni5'}
+                'GITHUB_JOB': job}
+    require(all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR')), 'actor metadata')
     require(all(env.get(k) == v for k, v in expected.items()), 'dedicated caller context')
     require(env.get('GITHUB_EVENT_NAME') in ('push', 'workflow_dispatch'), 'event')
     source = env.get('GITHUB_SHA'); hexid(source)
@@ -389,7 +390,7 @@ def context(env, job):
 def verify_run(run, current, guard):
     require(str(run['id']) == current['run'] and str(run['run_attempt']) == current['attempt'] and run['head_sha'] == current['source'], 'API source/run/attempt')
     require(run['name'] == WORKFLOW and run['path'] == CALLER and run['head_branch'] == BRANCH and run['event'] in ('push', 'workflow_dispatch'), 'API caller')
-    require(run['actor']['login'] == run['triggering_actor']['login'] == 'palmoni5', 'API actors')
+    require(all(isinstance(run.get(k), dict) and isinstance(run[k].get('login'), str) and run[k]['login'] for k in ('actor', 'triggering_actor')), 'API actor metadata')
     for key in ('repository', 'head_repository'):
         require(run[key]['id'] == REPOSITORY_ID and run[key]['full_name'] == REPOSITORY, 'API repositories')
     refs = run.get('referenced_workflows')

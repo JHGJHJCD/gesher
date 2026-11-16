@@ -13,7 +13,7 @@ env:
 jobs:
   source_authority:
     # Independently frozen policy; approved caller source is a separate variable.
-    uses: gesher-runtime/gesher/.github/workflows/pthread-first-link-trusted-source.yml@89bb554c51c0e52d7dc348c04a30db704bf97581
+    uses: gesher-runtime/gesher/.github/workflows/pthread-first-link-trusted-source.yml@927eb1f6a166b8ab6ae1da271bf7d18a488ebd5e
   build:
     needs: [source_authority]
     runs-on: ubuntu-24.04

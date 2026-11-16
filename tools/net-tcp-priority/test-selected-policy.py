@@ -118,6 +118,18 @@ TCP_DIAGNOSTIC_REPLACEMENTS=(
 # Only the successful protocol fixture's startup budget changed. Pin its exact
 # reviewed bytes separately; controller, worker and execution gates retain BASE.
 CONTROL_BASE='c62c0ea4f88447c64608851ecf661f630e259442'
+# Reviewed fork-PR diagnostics add only optional source identity observations.
+# Keep the original diagnostics byte-for-byte after removing these exact
+# additions, and pin the complete new file independently. Acceptance remains
+# in the callers; the helper still does not accept, reject or retry inputs.
+RECEIPT_DIAGNOSTICS_SHA256='6f9c75a7042b6777893cddfaf000498414ad192f2d006cd6a41d429a51d39b77'
+RECEIPT_SOURCE_PARAMETER=b'[Collections.IDictionary] $Expected = $null, [object] $SourceIdentity = $null)'
+RECEIPT_SOURCE_BLOCK=b'''  if ($null -ne $SourceIdentity) {
+    $Expected['source'] = $SourceIdentity.api_head_sha
+    $Expected['checkout'] = $SourceIdentity.checkout_sha
+    $Expected['head_repository_id'] = $SourceIdentity.head_repository_id
+  }
+'''
 def old(path):return subprocess.check_output(['git','-C',str(ROOT),'show',BASE+':'+path])
 def check():
  paths=subprocess.check_output(['git','-C',str(ROOT),'diff','1745e99d7f2849ba81784545e07d60cb2b7800c3^','1745e99d7f2849ba81784545e07d60cb2b7800c3','--name-only'],text=True).splitlines()
@@ -166,6 +178,11 @@ def check():
     actual_cursor=actual.index(end,actual_start);expected_cursor=expected.index(end,expected_start)
    assert actual[actual_cursor:]==expected[expected_cursor:],path
    assert hashlib.sha256(actual).hexdigest()==SYSTEM_SHA256,path
+  elif path=='tools/ci/receipt-diagnostics.ps1':
+   assert actual.count(RECEIPT_SOURCE_PARAMETER)==actual.count(RECEIPT_SOURCE_BLOCK)==2,path
+   original=actual.replace(RECEIPT_SOURCE_PARAMETER,b'[Collections.IDictionary] $Expected = $null)')
+   assert original.replace(RECEIPT_SOURCE_BLOCK,b'')==expected,path
+   assert hashlib.sha256(actual).hexdigest()==RECEIPT_DIAGNOSTICS_SHA256,path
   else:assert actual==expected,path
  before=old('tools/net-tcp-priority/run-component.ps1').decode();after=(ROOT/'tools/net-tcp-priority/run-component.ps1').read_text(encoding='utf-8')
  marker='function RequireDiagnosticRetirement';assert after[after.index(marker):]==before[before.index(marker):],'Actual controller/guarded-copy/census/cancel/HOST/bothABI execution gates changed'

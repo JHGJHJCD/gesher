@@ -13,7 +13,7 @@ def context(env,job):
     assert env.get('GITHUB_ACTIONS')=='true' and env.get('GITHUB_JOB')==job
     assert env.get('GITHUB_REPOSITORY')=='gesher-runtime/gesher' and env.get('GITHUB_REPOSITORY_ID')=='1426153186'
     assert env.get('GITHUB_REF')=='refs/heads/wip/ci-graphics-processes'
-    assert env.get('GITHUB_ACTOR')==env.get('GITHUB_TRIGGERING_ACTOR')=='palmoni5'
+    assert all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
     assert env.get('GITHUB_EVENT_NAME') in ('push','workflow_dispatch')
     source=env.get('GITHUB_SHA','');assert re.fullmatch('[0-9a-f]{40}',source)
     assert env.get('GITHUB_WORKFLOW_SHA')==source

@@ -135,6 +135,8 @@ public final class Launcher {
                     return text("install_bad_signature", detail);
                 case "INSTALL_FAILED_BAD_SPLIT_SIGNATURE":
                     return text("install_bad_split_signature", detail);
+                case "INSTALL_FAILED_MISSING_SPLIT":
+                    return text("install_missing_split", detail);
                 case "INSTALL_FAILED_NO_MATCHING_ABIS":
                 case "INSTALL_FAILED_BAD_DEX_METADATA":
                     // Their text already says what is wrong.

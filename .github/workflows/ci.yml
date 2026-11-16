@@ -16,6 +16,12 @@ permissions:
   contents: read
   actions: read  # framework.yml finds host tools other branches built
 
+# One current run per PR or branch. The root-specific prefix cannot collide
+# with reusable workflows, which inherit the caller's github.workflow value.
+concurrency:
+  group: ci-run-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   LLVM_MINGW_TAG: "20261006"
   LLVM_MINGW_NAME: llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64
@@ -111,6 +117,7 @@ jobs:
         run: |
           python3 tools/ci/receipt_identity.py
           python3 -m unittest discover -s tools/ci -p test_source_identity.py
+          python3 -m unittest discover -s tools/ci -p test_workflow_actor_metadata.py
           python3 -m unittest discover -s tools/ci -p test_github_read.py
           python3 tools/toolchain/test_coherent_tcp_context.py
           python3 tools/host-pthread-authority/test_minimum_supplier_entry.py
@@ -2179,6 +2186,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Verify coherent TCP reference role
         run: python3 tools/toolchain/coherent_tcp_context.py
       - name: Retain full independent Linux contract including inline mode

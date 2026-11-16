@@ -22,8 +22,9 @@ def verify_context(env, job):
                 'GITHUB_REPOSITORY_ID': str(REPOSITORY_ID),
                 'GITHUB_REF': 'refs/heads/' + BRANCH, 'GITHUB_WORKFLOW': WORKFLOW,
                 'GITHUB_WORKFLOW_REF': REPOSITORY + '/' + CALLER + '@refs/heads/' + BRANCH,
-                'GITHUB_JOB': job, 'GITHUB_ACTOR': 'palmoni5',
-                'GITHUB_TRIGGERING_ACTOR': 'palmoni5'}
+                'GITHUB_JOB': job}
+    if not all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR')):
+        raise ValueError('actor metadata')
     if any(env.get(key) != value for key, value in expected.items()):
         raise ValueError('caller identity')
     sha = env.get('GITHUB_SHA', '')
@@ -50,7 +51,7 @@ def verify_run(run, context, guard):
             raise ValueError('repository')
     for key in ('actor', 'triggering_actor'):
         value = run.get(key)
-        if type(value) is not dict or value.get('login') != 'palmoni5':
+        if type(value) is not dict or not isinstance(value.get('login'), str) or not value['login']:
             raise ValueError('actor')
     refs = run.get('referenced_workflows')
     if (type(refs) is not list or len(refs) != 1 or type(refs[0]) is not dict

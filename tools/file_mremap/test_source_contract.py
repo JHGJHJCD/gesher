@@ -1,7 +1,7 @@
 """Pure synthetic contract mutants. No process/PE/compiler/native execution."""
 import copy,unittest
 from source_contract import (INPUTS,BASE,SCOPE,REPO,RID,CALLER,POLICY,BRANCH,WORKFLOW,
-    canonical,digest,decode,validate_freeze,validate_plan,ContractError)
+    canonical,digest,decode,validate_freeze,validate_plan,current_context,ContractError)
 from producer_receipt import OUTPUT_ROLES,OBJECTS,validate_producer
 from windows_controller import verify_fault,verify_protection,PROTECTION_CASES,verify_punch,PUNCH_CASES
 H='1'*40;G='2'*40;D='3'*64
@@ -128,6 +128,22 @@ def punch_data(case):
     return dict(event_rows=rows)
 
 class SourceContracts(unittest.TestCase):
+    def test_account_independent_current_context(self):
+        env=dict(GITHUB_ACTIONS='true',GITHUB_REPOSITORY=REPO,GITHUB_REPOSITORY_ID=RID,
+          GITHUB_REF='refs/heads/'+BRANCH,GITHUB_WORKFLOW=WORKFLOW,
+          GITHUB_WORKFLOW_REF=REPO+'/'+CALLER+'@refs/heads/'+BRANCH,GITHUB_JOB='produce',
+          GITHUB_ACTOR='contributor',GITHUB_TRIGGERING_ACTOR='rerun-maintainer',
+          GITHUB_EVENT_NAME='workflow_dispatch',GITHUB_SHA=H,GITHUB_WORKFLOW_SHA=H,
+          GESHER_FILE_MREMAP_AUTHORIZED_SOURCE=H,GITHUB_RUN_ID='701',GITHUB_RUN_ATTEMPT='2')
+        self.assertEqual(current_context(env,'produce'),data()['context'])
+        for actor,trigger in (('contributor','rerun-maintainer'),('github-actions[bot]','release-maintainer')):
+            arbitrary=dict(env,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+            self.assertEqual(current_context(arbitrary,'produce'),data()['context'])
+            d=data();d['run'].update(actor=dict(login=actor),triggering_actor=dict(login=trigger));union(d)
+        for key in env:
+            bad=dict(env);bad[key]='' if key in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR') else 'invalid'
+            with self.subTest(field=key),self.assertRaises(ContractError):current_context(bad,'produce')
+
     def test_structural_baselines_are_synthetic_only(self):
         d=data();validate_freeze(d['freeze']);validate_plan(d['plan'],d['expected'],d['freeze']);union(d)
     def test_duplicate_json_key(self):
@@ -151,7 +167,7 @@ class SourceContracts(unittest.TestCase):
         with self.assertRaises(ContractError):validate_plan(d['plan'],d['expected'],d['freeze'])
     def test_current_role_attempt_artifact_mutants(self):
         mutations=[lambda d:d['run'].update(run_attempt=1),lambda d:d['run'].update(head_sha=G),
-          lambda d:d['run']['head_repository'].update(id=1),lambda d:d['run']['triggering_actor'].update(login='other'),
+          lambda d:d['run']['head_repository'].update(id=1),lambda d:d['run']['triggering_actor'].update(login=''),
           lambda d:d['run'].update(referenced_workflows=[]),lambda d:d['jobs'].update(total_count=3),
           lambda d:d['jobs']['jobs'].append(copy.deepcopy(d['jobs']['jobs'][0])),
           lambda d:d['jobs']['jobs'][1].update(name='build'),lambda d:d['jobs']['jobs'][0].update(run_attempt=1),

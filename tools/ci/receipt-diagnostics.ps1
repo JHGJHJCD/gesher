@@ -1,7 +1,7 @@
 # Identity observations only. These functions do not accept, reject or retry.
 function Write-CiProducerIdentity {
   param([string] $Producer, [AllowEmptyCollection()][object[]] $Rows,
-        [Collections.IDictionary] $Expected = $null)
+        [Collections.IDictionary] $Expected = $null, [object] $SourceIdentity = $null)
   if ($null -eq $Expected) {
     $Expected = [ordered]@{
       repository = $env:GITHUB_REPOSITORY; repository_id = $env:GITHUB_REPOSITORY_ID
@@ -10,6 +10,11 @@ function Write-CiProducerIdentity {
       workflow = $env:GITHUB_WORKFLOW
       status_policy = 'observed only; original predicate unchanged'
     }
+  }
+  if ($null -ne $SourceIdentity) {
+    $Expected['source'] = $SourceIdentity.api_head_sha
+    $Expected['checkout'] = $SourceIdentity.checkout_sha
+    $Expected['head_repository_id'] = $SourceIdentity.head_repository_id
   }
   $received = @($Rows | ForEach-Object {
     $row = $_
@@ -49,7 +54,7 @@ function Write-CiArtifactIdentity {
 
 function Write-CiArtifactInventory {
   param([string] $Name, [object] $Inventory, [AllowEmptyCollection()][object[]] $Rows,
-        [object] $Producer, [Collections.IDictionary] $Expected = $null)
+        [object] $Producer, [Collections.IDictionary] $Expected = $null, [object] $SourceIdentity = $null)
   if ($null -eq $Expected) {
     $Expected = [ordered]@{ name = $Name; required_count = 1; source = $env:GITHUB_SHA
       run_id = $env:GITHUB_RUN_ID; attempt = $env:GITHUB_RUN_ATTEMPT
@@ -57,6 +62,11 @@ function Write-CiArtifactInventory {
       head_repository_id = $env:GITHUB_REPOSITORY_ID; expired = $false; size_min = 1
       digest_pattern = 'sha256:[0-9a-f]{64}'; producer_id = $Producer.id
       upload_not_before = $Producer.started_at; upload_not_after = $Producer.completed_at }
+  }
+  if ($null -ne $SourceIdentity) {
+    $Expected['source'] = $SourceIdentity.api_head_sha
+    $Expected['checkout'] = $SourceIdentity.checkout_sha
+    $Expected['head_repository_id'] = $SourceIdentity.head_repository_id
   }
   $record = [ordered]@{ stage = 'artifact_inventory'; expected = $Expected; reason = 'observed'
     received = [ordered]@{ total_count = $Inventory.total_count; received_count = @($Inventory.artifacts).Count
