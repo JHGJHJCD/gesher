@@ -173,6 +173,12 @@ add_executable(elf_load_test tests/native/elf_load_test.cc)
 target_compile_options(elf_load_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(elf_load_test PRIVATE gesher_bionic gesher_elf)
 
+# ADR 0086: the stand-in libart.so as a packer's shell finds and hooks it
+# (tests/native/art_hook_test.so, built with the NDK by native-libs.yml).
+add_executable(art_shim_test tests/native/art_shim_test.cc)
+target_compile_options(art_shim_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(art_shim_test PRIVATE gesher_bionic gesher_elf)
+
 # Actual Bionic truncate exports, access rights and shared cursor contracts.
 add_executable(bionic_ftruncate_test tests/native/bionic_ftruncate_test.cc)
 target_compile_options(bionic_ftruncate_test PRIVATE -Wall -Wextra -Werror)

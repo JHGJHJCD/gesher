@@ -165,9 +165,21 @@ const char* const kDescriptions[kNsig] = {
     "File size limit exceeded", "Virtual timer expired", "Profiling timer expired",
     "Window size changed", "I/O possible", "Power failure", "Bad system call"};
 
+// Where a guest (arm64) thread was when it raised a fatal signal or called
+// abort(): gesher_arm64.dll prints its registers and backtrace, as debuggerd
+// would. Nothing on an x86-64 thread or without the DLL.
+void PrintGuestState() {
+  HMODULE dll = GetModuleHandleA("gesher_arm64.dll");
+  if (dll == nullptr) return;
+  auto print = reinterpret_cast<void (*)()>(
+      reinterpret_cast<void*>(GetProcAddress(dll, "gesher_arm64_print_guest_state")));
+  if (print != nullptr) print();
+}
+
 [[noreturn]] void Terminate(int sig) {
   std::fprintf(stderr, "gesher bionic: signal %d (SIG%s) with its default action: terminating\n",
                sig, sig < 32 && kNames[sig] ? kNames[sig] : "RT");
+  if (DefaultDumpsCore(sig)) PrintGuestState();
   std::fflush(stdout);
   std::fflush(stderr);
   if (DefaultDumpsCore(sig)) std::abort();
@@ -488,9 +500,7 @@ void BIONIC_SYSV Psignal(int sig, const char* s) {
     handler = S().actions[kSigabrt].handler;
   }
   if (handler != kSigDfl && handler != kSigIgn) Run(self, kSigabrt, MakeInfo(kSigabrt, kSiTkill, 0));
-  std::fflush(stdout);
-  std::fflush(stderr);
-  std::abort();
+  Terminate(kSigabrt);
 }
 
 unsigned BIONIC_SYSV Alarm(unsigned) { return 0; }

@@ -668,20 +668,41 @@ bool ReadSafely(uintptr_t addr, void* out, size_t n) {
 // instruction bytes, and at least kFingerprintMin bytes around them that
 // match outwards from it (a copy may end soon after: UPX copies its stub up
 // to its last `ret`). With g_lock held.
+//
+// The bytes around `rip` are read once, a page at a time outwards from it
+// (where a page is unreadable the window stops), and every fingerprint is
+// compared in memory. Reading them per fingerprint and per byte cost a system
+// call each: with Ijiami's many sites, the rewrite of one page on execution
+// held g_lazy_lock for minutes, and a thread ART counted as runnable waited
+// in mprotect until ART's suspend timeout aborted the process (ADR 0086).
 uint8_t CopiedSyscallLengthLocked(uintptr_t rip) {
+  if (Fingerprints().empty() || rip < kFingerprintSide) return 0;
+  constexpr size_t kBack = kFingerprintSide;
+  uint8_t window[kFingerprintSide + 15 + kFingerprintSide];
+  size_t lo = kBack, hi = kBack;  // window[lo, hi) holds rip - kBack + lo ...
+  for (uintptr_t a = rip; hi < sizeof(window);) {
+    const size_t n = std::min<uintptr_t>(sizeof(window) - hi, PageOf(a) + kPage - a);
+    if (!ReadSafely(a, window + hi, n)) break;
+    hi += n;
+    a += n;
+  }
+  for (uintptr_t a = rip; lo > 0;) {
+    const size_t n = std::min<uintptr_t>(lo, a - PageOf(a - 1));
+    if (!ReadSafely(a - n, window + lo - n, n)) break;
+    lo -= n;
+    a -= n;
+  }
   for (const SyscallFingerprint& f : Fingerprints()) {
-    uint8_t insn[15];
-    if (!ReadSafely(rip, insn, f.length) || std::memcmp(insn, f.bytes + f.before, f.length) != 0) {
+    if (hi - kBack < f.length || std::memcmp(window + kBack, f.bytes + f.before, f.length) != 0) {
       continue;
     }
     size_t back = 0, forward = 0;
-    uint8_t byte;
-    while (back < f.before && ReadSafely(rip - 1 - back, &byte, 1) &&
-           byte == f.bytes[f.before - 1 - back]) {
+    while (back < f.before && kBack - 1 - back >= lo &&
+           window[kBack - 1 - back] == f.bytes[f.before - 1 - back]) {
       ++back;
     }
-    while (forward < f.after && ReadSafely(rip + f.length + forward, &byte, 1) &&
-           byte == f.bytes[f.before + f.length + forward]) {
+    while (forward < f.after && kBack + f.length + forward < hi &&
+           window[kBack + f.length + forward] == f.bytes[f.before + f.length + forward]) {
       ++forward;
     }
     if (back + forward >= kFingerprintMin) return f.length;

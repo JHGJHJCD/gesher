@@ -193,6 +193,16 @@ int main(int argc, char** argv) {
     Check("CNTPCT is within the sampled advertised-clock bounds",
           counter >= GuestCounterValue(static_cast<uint64_t>(before.QuadPart), host_frequency) &&
           counter <= GuestCounterValue(static_cast<uint64_t>(after.QuadPart), host_frequency));
+    // CNTVCT_EL0, the count Linux user space reads (SQLCipher), is the same clock.
+    uint32_t virtual_code[] = {0xD53BE040u, kRet};    // mrs x0, cntvct_el0
+    void* virtual_fn = GuestPage(virtual_code, 2);
+    api->add_code(virtual_fn, sizeof(virtual_code), "counter_virtual");
+    RequireHarness(QueryPerformanceCounter(&before) != 0, "read QPC lower bound");
+    const uint64_t virtual_counter = api->call(virtual_fn, nullptr, 0);
+    RequireHarness(QueryPerformanceCounter(&after) != 0, "read QPC upper bound");
+    Check("CNTVCT reads the same clock within the sampled bounds",
+          virtual_counter >= GuestCounterValue(static_cast<uint64_t>(before.QuadPart), host_frequency) &&
+          virtual_counter <= GuestCounterValue(static_cast<uint64_t>(after.QuadPart), host_frequency));
   }
 
   // 1. host -> guest: a guest function returning 42.

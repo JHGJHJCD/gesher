@@ -15,6 +15,7 @@
 // System V thunk from core_jni_helpers.h (frameworks/base patch 0001).
 
 #include <gesher/builtin_library.h>
+#include <gesher/process_name.h>
 
 #include <ctype.h>
 #include <errno.h>
@@ -201,7 +202,18 @@ static jint Process_getProcessGroup(JNIEnv*, jclass, jint) {
   return -1;  // THREAD_GROUP_DEFAULT
 }
 
-static void Process_setArgV0Native(JNIEnv*, jclass, jstring) {}
+// As AndroidRuntime::setArgv0(name, /*setProcName=*/true) on a device: the process
+// name /proc/self/cmdline and /proc/self/comm report (gesher/process_name.h), and
+// the calling thread's name, its last 15 bytes if longer.
+static void Process_setArgV0Native(JNIEnv* env, jclass, jstring name) {
+  if (name == nullptr) return;
+  const char* utf = env->GetStringUTFChars(name, nullptr);
+  if (utf == nullptr) return;
+  gesher_set_process_argv0(utf);
+  const size_t len = strlen(utf);
+  pthread_setname_np(pthread_self(), len < 15 ? utf : utf + len - 15);
+  env->ReleaseStringUTFChars(name, utf);
+}
 
 static jlong Process_getElapsedCpuTime(JNIEnv*, jclass) {
   struct timespec ts;

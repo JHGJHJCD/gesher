@@ -36,6 +36,7 @@
 #include "shim_internal.h"
 
 #include <gesher/arm64_runtime.h>
+#include <gesher/art_shim.h>
 #include <gesher/bionic_shim.h>
 #include <gesher/elf_dlopen.h>
 #include <gesher/elf_loader.h>
@@ -55,6 +56,14 @@
 #include <vector>
 
 namespace elf = gesher::elf;
+
+// ART's LoadClass hook (runtime/class_linker.cc, patches/art/0800): the
+// stand-in libart.so's LoadClass once an app's packer needs it (ADR 0086).
+extern "C" void* volatile gesher_art_load_class_hook;
+// ART's JNIEnv table and its override (runtime/jni/jni_env_ext.cc,
+// patches/art/0801).
+extern "C" const JNINativeInterface* gesher_art_jni_function_table();
+extern "C" void gesher_art_set_jni_table_override(const JNINativeInterface* table);
 using gesher::bionic::NextFp;
 using gesher::bionic::NextGp;
 using gesher::bionic::SysvVaList;
@@ -192,7 +201,13 @@ JNIEnv* WrapGuest(JNIEnv* real) {
 
 JNIEnv* WrapFor(bool guest, JNIEnv* real) { return guest ? WrapGuest(real) : Wrap(real); }
 
-inline JNIEnv* Real(JNIEnv* env) { return reinterpret_cast<ProxyEnv*>(env)->real; }
+// The real JNIEnv of a proxy; ART's own JNIEnv as it is (a packer's loaded code
+// calls ART's table with it, through InstallCallerAbiJniTable's stubs).
+inline JNIEnv* Real(JNIEnv* env) {
+  auto* proxy = reinterpret_cast<ProxyEnv*>(env);
+  return proxy->functions == g_env_table || proxy->functions == g_env_table_guest ? proxy->real
+                                                                                  : env;
+}
 
 // --- stubs ---------------------------------------------------------------------
 
@@ -829,8 +844,110 @@ void Install() {
   });
 }
 
+// ART's own JNIEnv in loaded code (ADR 0086). Ijiami makes Java methods native by
+// writing their ArtMethod (flags and JNI entry) instead of RegisterNatives, so ART
+// calls its functions with its own JNIEnv, not the proxy the NativeEntry stub
+// gives, and the shell calls that table with the System V ABI. Every entry of
+// ART's table is replaced by a stub that looks at its return address: a caller
+// in dalvikvm.exe (Gesher's own code, the proxy's functions) takes ART's
+// Microsoft ABI function, any other (loaded ELF code) the System V one of the
+// proxy table, which accepts ART's JNIEnv as well (Real()). r10 and r11 are the
+// only registers it uses: scratch in both ABIs, and not %al, which holds the
+// vector-register count of a System V variadic call.
+//
+// Each stub, with the image's bounds and both targets in its own data:
+//   mov r11, [rsp]          ; the return address
+//   mov r10, imm64          ; this stub's data
+//   cmp r11, [r10]          ; below the image: System V
+//   jb  sysv
+//   cmp r11, [r10+8]        ; inside it: Microsoft
+//   jb  ms
+// sysv: jmp [r10+24]
+// ms:   jmp [r10+16]
+void InstallCallerAbiJniTable() {
+  static std::once_flag once;
+  std::call_once(once, [] {
+    const JNINativeInterface* real = gesher_art_jni_function_table();
+    if (real == nullptr) return;
+    auto* image = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
+    const uint64_t lo = reinterpret_cast<uint64_t>(image);
+    const uint64_t hi = lo + nt->OptionalHeader.SizeOfImage;
+
+    constexpr size_t kStub = 80;    // code (33 bytes), then its data
+    constexpr size_t kData = 40;    // lo, hi, Microsoft target, System V target
+    auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, kEnvSlots * kStub,
+                                                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    auto* table = static_cast<void**>(VirtualAlloc(nullptr, sizeof(JNINativeInterface),
+                                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    if (code == nullptr || table == nullptr) return;
+    void* const* ms = reinterpret_cast<void* const*>(real);
+    for (size_t i = 0; i < kEnvSlots; ++i) {
+      if (ms[i] == nullptr || g_env_table[i] == nullptr) {
+        table[i] = ms[i];
+        continue;
+      }
+      uint8_t* p = code + i * kStub;
+      uint8_t* data = p + kData;
+      const uint8_t stub[] = {
+          0x4c, 0x8b, 0x1c, 0x24,                          // mov r11, [rsp]
+          0x49, 0xba, 0, 0, 0, 0, 0, 0, 0, 0,              // mov r10, imm64 (data)
+          0x4d, 0x3b, 0x1a,                                // cmp r11, [r10]
+          0x72, 0x06,                                      // jb sysv (+6)
+          0x4d, 0x3b, 0x5a, 0x08,                          // cmp r11, [r10+8]
+          0x72, 0x04,                                      // jb ms (+4)
+          0x41, 0xff, 0x62, 0x18,                          // sysv: jmp [r10+24]
+          0x41, 0xff, 0x62, 0x10,                          // ms: jmp [r10+16]
+      };
+      static_assert(sizeof(stub) <= kData && kData + 32 <= kStub, "stub layout");
+      std::memcpy(p, stub, sizeof(stub));
+      const uint64_t data_address = reinterpret_cast<uint64_t>(data);
+      std::memcpy(p + 6, &data_address, 8);
+      const uint64_t values[4] = {lo, hi, reinterpret_cast<uint64_t>(ms[i]),
+                                  reinterpret_cast<uint64_t>(g_env_table[i])};
+      std::memcpy(data, values, sizeof(values));
+      table[i] = p;
+    }
+    DWORD old = 0;
+    VirtualProtect(code, kEnvSlots * kStub, PAGE_EXECUTE_READ, &old);
+    VirtualProtect(table, sizeof(JNINativeInterface), PAGE_READONLY, &old);
+    FlushInstructionCache(GetCurrentProcess(), code, kEnvSlots * kStub);
+    gesher_art_set_jni_table_override(reinterpret_cast<const JNINativeInterface*>(table));
+    std::fprintf(stderr,
+                 "gesher art: ART's JNIEnv table chooses its ABI by caller (a packer calls it "
+                 "from loaded code)\n");
+  });
+}
+
+// An app library that is a packer's shell hooking ART by symbol (Ijiami's
+// libexec*.so): before it runs, the stand-in libart.so it looks for, and ART's
+// LoadClass calling it (ADR 0086). GESHER_ART_SHIM=0 turns this off.
+void LoadArtShimFor(const char* path) {
+  if (!gesher::bionic::IsArtHookingPacker(path) || gesher_art_load_class_hook != nullptr) return;
+  const char* off = std::getenv("GESHER_ART_SHIM");
+  if (off != nullptr && std::strcmp(off, "0") == 0) return;
+  const char* data = std::getenv("ANDROID_DATA");
+  const std::string dir = std::string(data != nullptr && *data != 0 ? data : ".") +
+                          "/system/gesher-art";
+  std::string shim, message;
+  void* entry = gesher::bionic::LoadArtShim(dir, &shim, &message);
+  if (entry == nullptr) {
+    std::fprintf(stderr, "gesher art: %s hooks ART by symbol, but no stand-in libart.so: %s\n",
+                 path, message.c_str());
+    return;
+  }
+  gesher_art_load_class_hook = entry;
+  InstallCallerAbiJniTable();
+  std::fprintf(stderr,
+               "gesher art: %s hooks ART by symbol: ClassLinker::LoadClass from a stand-in "
+               "libart.so (%s)\n",
+               path, shim.c_str());
+}
+
 void* ElfOpen(const char* path, int /*flags*/, char* error, size_t error_size) {
   Install();
+  LoadArtShimFor(path);
   elf::LoadOptions options;
   // DT_NEEDED libraries the APK ships (libc++_shared.so, ...) sit next to it.
   std::string dir(path);
