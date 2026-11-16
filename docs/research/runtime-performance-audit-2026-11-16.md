@@ -25,14 +25,14 @@ and supplier workflows.
 
 | Area | Review and evidence |
 |---|---|
-| ART/JIT, ARM64 and ELF | Runtime startup/linking; symbol precedence and owned keys; environment lifetime/cache retention; translation smoke and thread churn; ELF hash/dependency traversal remains a follow-up |
+| ART/JIT, ARM64 and ELF | Runtime startup/linking; symbol precedence and owned keys; bounded dependency traversal; environment lifetime/cache retention; translation smoke and thread churn |
 | Bionic, POSIX and Binder | Symbol dispatch; task membership/liveness/DACLs; wildcard matching; native polling scratch/reentry/retirement; message framing and partial writes |
 | Network | Real sockets, guarded UDP receives/faults, event-loop probes and native polling; TCP supplier/inline limitations are recorded below |
 | Graphics, windows and input | Cropped pixel ownership and row stride; resize/padding; layered GDI lifetime; input geometry handoff and device/resize failure paths |
-| Camera/media/devices | Capture publication, conversion, callback admission, restart and close ownership; mixer/video staging and device scheduling candidates |
+| Camera/media/devices | Capture publication, conversion, callback admission, restart and close ownership; audio resampling/ring publication and file sources; video staging and device scheduling candidates |
 | Java services and installation | Metadata equality; existing durable settings, reflected dispatch and native-library discovery regression suites; package/shell publication |
 | Launcher and desktop UX | Reverse log scans, bounded tail/forwarding, concurrent output; panel icon reuse and live refresh; long dashboard operations |
-| WebView, HTTP and shell | Body/preview ownership and whole-body buffering candidates; APK icon index publication and Explorer background-work bounds |
+| WebView, HTTP and shell | Owned-document response copies and publication; remaining native preview/whole-body buffering candidates; APK icon index publication and Explorer background-work bounds |
 | Build, package and CI | Repeated source walks, sparse membership construction, deterministic source archives, standalone font proof and mandatory host/Windows gates |
 
 ## Implemented and measured changes
@@ -45,6 +45,25 @@ lookups preserve the actual resolver's hit, miss, replacement and pointer rules.
 For **each** of the three resolvers, 400,000 long-name hit/miss queries fall from
 400,000 temporary allocations / 19,200,000 bytes to zero. Each resolver passes
 4,106 checks. This does not eliminate registration or unrelated JNI allocations.
+
+### Small ELF dependency walks without heap scratch
+
+Handle lookup keeps its first 16 dependency identities in an invocation-owned
+stack queue. Larger frontiers switch to the original vector/set policy, seeded
+with the complete visited prefix. Root-first and breadth-first precedence,
+cycles, hashing and resolver calls remain unchanged; there is no persistent
+lookup cache. For 100,000 six-library hit/miss queries, scratch allocation falls
+from 1,000,000 allocations / 36,000,000 bytes to zero. A 17-library graph also
+needs no heap scratch; larger graphs retain the original asymptotic policy.
+
+Independent QA passes 200,600 oracle/baseline differential controls, including
+ASan/UBSan, overflow boundaries, duplicate frontiers, changed graphs and symbols,
+IFUNC reentry, parallel callers and a 65,536-node cycle. The existing 2,090 lookup
+controls and newly rebuilt x86-64/ARM64 runtimes pass the actual 12-check guest
+graph each. The queue adds 128 bytes of stack payload. Exact local full-loader
+compilation measures a 504-byte lookup frame versus 328 baseline; this is
+distinct from the smaller extracted fixture. Normal frame bounds are checked
+separately from sanitizer instrumentation. Unrelated loader work can allocate.
 
 ### Targeted task membership
 
@@ -134,6 +153,29 @@ callback buffers or enqueuing callbacks once replacement is current. Ongoing
 native surface delivery and already queued Handler messages cannot be retracted.
 The final preview fixture passes 1,254 behavioral and 12 measurement controls.
 
+### Audio capture without per-frame scratch allocation
+
+Capture resampling reuses its previous-frame scratch within each Push call and
+converts the admitted output directly into at most two contiguous ring segments.
+This removes an unused temporary, one allocation per resampled frame and the
+intermediate PCM buffer/copy. No additional storage is retained between calls.
+For 100 stereo 48 kHz blocks of 480 frames, allocation falls from 48,400 /
+963,200 bytes to 300 / 387,200 bytes; output/interpolation scratch and callback
+storage can still allocate.
+
+Independent ASan/UBSan coverage passes 4,867,923 controls and a 14,795,322-byte
+exact baseline comparison of PCM, state and callback order. It includes all
+supported PCM formats, rate changes, odd channel counts, ring wrap/full/empty
+boundaries and callbacks that synchronously read, push again and release.
+These are engine-boundary measurements, not physical microphone latency claims.
+
+File-source format reads also validate complete format chunks and supported
+sample widths before conversion, with storage-width chunk arithmetic and
+unsigned PCM24 byte assembly. A positive-only fixture passes 280 valid WAVs /
+62,440 checks on both old and new sources, including normal/extensible formats,
+sample extrema, padding, interleaving, loop and restart. Truncated audio-data
+clamping and complete-frame handling are unchanged by source inspection.
+
 ### Pixel views and layered GDI resources
 
 Inset popup presentation passes a cropped source view and row stride into the
@@ -185,6 +227,25 @@ Two 48 MiB files compare under a 24 MiB heap where the baseline runs out of
 memory. Filename sets, exact bytes, errors and ownership remain covered by
 209 behavioral, five measurement and two constrained-heap checks. The existing
 installation workflow owns these files; this does not add filesystem snapshots.
+
+### Privately owned WebView document responses
+
+The provider passes its own encoded loadDataWithBaseURL body directly to the
+existing synchronous native response boundary, bypassing stream aggregation.
+An immutable pending record binds URL, MIME and bytes, and an atomic claim
+prevents an older worker from clearing a replacement. A lost claim follows the
+ordinary interception/file/network path and leaves the replacement pending.
+Application-provided streams retain their existing reading, closing, exception
+and interception behavior, including ByteArrayInputStream subclasses.
+
+For an 8 MiB internally owned response, Java answerRequest allocation falls
+from 25,166,560 bytes to 440. JNI and COM still copy the response; those bytes
+are excluded. Independent portable and real Android-class fixtures each pass
+289 behavioral, 331 concurrency and four measurement controls. The old behavior
+control passes while its allocation and replacement-race gates fail. Concurrent
+same/different-URL replacement, two document workers, empty/Base64/Unicode data,
+headers and application stream lifecycle/error cases are covered. The complete
+provider also compiles against the prepared Android core/framework APIs.
 
 ### Desktop icons and build work
 
@@ -283,7 +344,7 @@ No assertion was relaxed and neither scope is reported as passing. The new
 allocation fixtures complement the existing supplier/lifecycle gates.
 
 Further work needing separate workloads or hardware evidence includes ARM64 JIT
-retention/recompilation, ELF graph lookup, owning outer poll/epoll snapshots,
+retention/recompilation, owning outer poll/epoll snapshots,
 mapping rollback copies, video staging, full-body HTTP fallback/backpressure,
 WebView preview marshaling, camera hot-plug inventory and WASAPI device-period
 scheduling. These candidates do not justify speculative caching or coalescing
