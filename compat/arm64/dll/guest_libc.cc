@@ -28,6 +28,7 @@
 #include <windows.h>
 
 #include <cstdint>
+#include <atomic>
 #include <memory>
 #include <new>
 #include <cstring>
@@ -69,7 +70,12 @@ struct GuestThreadStart {
   void* argument;
   uint32_t fpcr;
   uint32_t fpsr;
+  std::atomic<int32_t> references{2};
+  std::atomic<int32_t> ready{0};
 };
+void ReleaseGuestThreadStart(GuestThreadStart* start) {
+  if (start->references.fetch_sub(1, std::memory_order_acq_rel) == 1) delete start;
+}
 // fork()/vfork() fail with EAGAIN in guest code. The shim's fork is
 // vfork-style (ADR 0055): the child runs on, and the second return goes back
 // to the host frame that called fork, but the guest's registers are then
@@ -82,18 +88,31 @@ int GESHER_SYSV GuestFork() {
 }
 
 void* GESHER_SYSV StartGuestThread(void* opaque) {
-  std::unique_ptr<GuestThreadStart> start(static_cast<GuestThreadStart*>(opaque));
-  GuestThreadStart captured = *start;
-  start.reset();  // A guest may terminate with pthread_exit rather than return.
-  SetGuestFpcr(captured.fpcr);
-  SetGuestFpsr(captured.fpsr);
-  return captured.function(captured.argument);
+  auto* start = static_cast<GuestThreadStart*>(opaque);
+  ThreadStart function = start->function;
+  void* argument = start->argument;
+  // Creating the Env publishes its private stack before the creator can query
+  // this pthread. Release the startup record before guest code, which may
+  // terminate through pthread_exit rather than returning through this frame.
+  SetGuestFpcr(start->fpcr);
+  SetGuestFpsr(start->fpsr);
+  start->ready.store(1, std::memory_order_release);
+  WakeByAddressAll(&start->ready);
+  ReleaseGuestThreadStart(start);
+  return function(argument);
 }
 int GESHER_SYSV GuestPthreadCreate(void* thread, const void* attributes, ThreadStart function, void* argument) {
   auto* start = new (std::nothrow) GuestThreadStart{function, argument, GuestFpcr(), GuestFpsr()};
   if (start == nullptr) return 12;  // Android ENOMEM.
   int result = g_pthread_create(thread, attributes, StartGuestThread, start);
-  if (result != 0) delete start;
+  if (result != 0) {
+    delete start;
+  } else {
+    int32_t pending = 0;
+    while (start->ready.load(std::memory_order_acquire) == 0)
+      WaitOnAddress(&start->ready, &pending, sizeof pending, INFINITE);
+    ReleaseGuestThreadStart(start);
+  }
   return result;
 }
 
@@ -684,6 +703,8 @@ void InitGuestLibc() {
 
   g_pthread_create = reinterpret_cast<ThreadCreate>(Host("pthread_create"));
   if (g_pthread_create) Override("pthread_create", reinterpret_cast<void*>(&GuestPthreadCreate));
+  if (void* getattr = Host("__gesher_arm64_pthread_getattr_np"))
+    Override("pthread_getattr_np", getattr);
 
   g_localeconv = Host("localeconv");
   if (g_localeconv) Override("localeconv", reinterpret_cast<void*>(&GuestLocaleconv));
