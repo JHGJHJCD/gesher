@@ -4,6 +4,7 @@ Paths are AOSP-relative (`frameworks/base/core/java/...`). File lists come
 from each project's git tree (`git ls-tree`), so globs resolve before the
 files are checked out; .bp files must be checked out.
 """
+from bisect import bisect_left
 import fnmatch
 import os
 import re
@@ -58,7 +59,22 @@ class Tree:
         if project is None:
             return []
         regex = re.compile(glob_regex(full))
-        return sorted(f for f in self.files(project) if regex.fullmatch(f))
+        # Project file lists are immutable HEAD snapshots for this Tree. Index
+        # their names once, then visit only the literal directory before the
+        # first wildcard. Keep files()/dir_files() in their original Git order.
+        key = ('sorted', project)
+        if key not in self._files:
+            self._files[key] = sorted(self.files(project))
+        files = self._files[key]
+        literal = re.split(r'[*?\[]', full, maxsplit=1)[0]
+        directory, separator, _ = literal.rpartition('/')
+        if separator:
+            prefix = directory + '/'
+            start = bisect_left(files, prefix)
+            end = bisect_left(files, directory + '0')
+        else:
+            start, end = 0, len(files)
+        return [files[i] for i in range(start, end) if regex.fullmatch(files[i])]
 
     def dir_files(self, directory):
         directory = norm(directory)

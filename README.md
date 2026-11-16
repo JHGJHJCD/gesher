@@ -31,6 +31,10 @@ the Linux kernel:
 
 Full design: [docs/architecture.md](docs/architecture.md).
 
+The [November 16 performance follow-up](docs/research/runtime-performance-followup-2026-11-16.md)
+adds measured audio, path, WebView, camera, framework-build and dashboard-row
+improvements, with independent QA and Windows/ART checks.
+
 The [November 16 performance audit](docs/research/runtime-performance-audit-2026-11-16.md)
 records subsequent allocation, polling, camera, graphics, logging and desktop
 improvements, independent QA, actual Windows/ART checks and remaining limits.
