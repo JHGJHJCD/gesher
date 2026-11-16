@@ -12,10 +12,10 @@ find_path(GESHER_CREDENTIAL_JNI jni.h
 add_library(gesher_account_crypto SHARED "${CMAKE_CURRENT_LIST_DIR}/account_crypto.c")
 target_include_directories(gesher_account_crypto PRIVATE
   "${CMAKE_CURRENT_LIST_DIR}/include" "${GESHER_CREDENTIAL_JNI}")
-target_link_libraries(gesher_account_crypto PRIVATE crypt32 kernel32 shell32 user32)
+target_link_libraries(gesher_account_crypto PRIVATE crypt32 kernel32 shell32 user32 gdi32)
 set_target_properties(gesher_account_crypto PROPERTIES
   PREFIX "lib" SUFFIX ".so" OUTPUT_NAME "gesher_account_crypto")
-target_compile_options(gesher_account_crypto PRIVATE -Wall -Wextra -Werror)
+target_compile_options(gesher_account_crypto PRIVATE -UNOGDI -Wall -Wextra -Werror)
 add_dependencies(dalvikvm gesher_account_crypto)
 
 add_executable(account_chooser_test EXCLUDE_FROM_ALL
@@ -29,3 +29,9 @@ add_executable(window_promotion_test EXCLUDE_FROM_ALL
 target_link_libraries(window_promotion_test PRIVATE kernel32 user32)
 target_compile_options(window_promotion_test PRIVATE -UNOGDI -Wall -Wextra -Werror)
 target_link_options(window_promotion_test PRIVATE -municode)
+
+# Standalone native permission UI contracts; runs on an owned, never-shown desktop.
+add_executable(permission_dialog_test EXCLUDE_FROM_ALL
+  "${CMAKE_SOURCE_DIR}/tests/native/permission_dialog_test.c")
+target_link_libraries(permission_dialog_test PRIVATE kernel32 user32 gdi32)
+target_compile_options(permission_dialog_test PRIVATE -UNOGDI -Wall -Wextra -Werror)

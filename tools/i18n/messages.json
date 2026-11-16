@@ -45,6 +45,11 @@
       "en": "Gesher permission request",
       "he": "גשר — בקשת הרשאה"
     },
+    "permission_heading": {"en": "Allow app access?", "he": "לאפשר גישה ליישום?"},
+    "permission_app": {"en": "Android application", "he": "יישום Android"},
+    "permission_requested": {"en": "This app is requesting the following permissions:", "he": "היישום מבקש את ההרשאות הבאות:"},
+    "permission_allow": {"en": "Allow", "he": "לאפשר"},
+    "permission_deny": {"en": "Don't allow", "he": "לא לאפשר"},
     "permission_prefix": {
       "en": "Allow the Android application ",
       "he": "לאפשר ליישום Android ‏"
