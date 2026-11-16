@@ -2,7 +2,27 @@
 
 A repository collaborator with write or admin access can apply the automerge label to opt in a specific PR head. Maintain access is reported as write by GitHub's permission API. Triage access does not authorize merging.
 
-The label workflow records a small, unedited github-actions bot comment containing the repository, PR, head SHA, target branch, label event ID and actor ID. A later workflow completion or scheduled sweep can use only that recorded approval. It cannot infer approval from a label that predates installation, a missed label delivery, an edited comment or ambiguous history. Remove and reapply the label if no approval was recorded. The timestamp and sender of the delivered label event must match the unique current label event; ambiguous relabels within one second require a fresh application.
+A label supplied when the PR is opened cannot approve it. The label event must
+be strictly later than the PR's creation timestamp, including when the opener
+has write or admin access. GitHub timestamps have second precision, so a label
+added in that same second must also be removed and reapplied. Opening events,
+label events, CI completion and scheduled sweeps enforce this rule. The opened
+event also removes a label already present in its opening snapshot, even when
+the snapshot's update timestamp is later than creation. A delayed opening
+event preserves a later explicit replacement label. An author with merge access
+can deliberately apply the label after opening, under the same rules as any
+other authorized collaborator.
+
+The controller first records an unedited bot opening receipt, bound to the
+repository, PR number, creation time and an approval boundary. A new unlabelled
+PR is initialized by its opened event. If a label event arrives first, or the
+PR predates this policy, initialization instead covers the current label and
+removes it. Apply the label once more after initialization. This one-time
+reapproval prevents webhook ordering from turning an initial label into an
+approval. Concurrent initialization receipts use their latest boundary; a
+late opening event cannot relax it. The boundary is checked again before merge.
+
+The label workflow records a small, unedited github-actions bot comment containing the repository, PR, head SHA, target branch, label event ID and actor ID. A later workflow completion or scheduled sweep can use only that recorded approval. It cannot infer approval from a label that predates installation, a missed label delivery, an edited comment or ambiguous history. Remove and reapply the label if no approval was recorded. The delivered update timestamp must be zero or one second after the label timestamp, with exactly one label event in that interval and the same sender. Ambiguous same- or adjacent-second relabels require a fresh application.
 
 Pushing a different head, force-pushing, reopening or retargeting requires a new approval. Delayed synchronize jobs re-read the current label event so they do not remove a newer approval.
 
@@ -10,7 +30,7 @@ Pushing a different head, force-pushing, reopening or retargeting requires a new
 
 The controller resolves required workflows by their registered repository IDs and file paths. The required ci workflow, plus arm64-windows for main and feature/arm64-windows, must have successful pull_request runs for the approved head and source repository. A manual run or another workflow with the same display name cannot substitute.
 
-Both required workflows call local reusable workflows. GitHub records the resolved source SHA and refs/pull/NUMBER/merge in referenced_workflows. The controller verifies that this immutable Git commit has the current base and approved head as its two parents. The ARM64 source-identity call supplies this metadata without checking out or executing PR code in the privileged controller.
+Both required workflows call local reusable workflows. GitHub records the resolved source SHA and refs/pull/NUMBER/merge in referenced_workflows. The controller verifies that this immutable Git commit has the current target branch tip and approved head as its two parents. It resolves the target through the Git reference API because PR base.sha may retain an earlier snapshot, and rereads that target after checking CI. The ARM64 source-identity call supplies this metadata without checking out or executing PR code in the privileged controller.
 
 The pull_requests array in a workflow run is live association data and is empty for some fork runs. It is checked when available, but is never treated as historical proof of the tested base. Missing or mixed immutable source metadata blocks merging; legacy runs before the source-identity call was added need fresh CI.
 
@@ -23,6 +43,12 @@ The privileged job checks out only the default branch's scripts. It never downlo
 Workflow completion normally wakes the controller. A five-minute scheduled sweep also observes external checks and manually dispatched workflows that finish last; GitHub may delay scheduled jobs. Each API listing is bounded to 1000 items, and malformed, missing or excessive history blocks the PR for manual handling.
 
 A confirmed merge into the default branch explicitly dispatches ci.yml because the workflow's GITHUB_TOKEN does not trigger ordinary push workflows.
+
+The ci workflow cancels superseded runs for the same PR or branch. Its
+root-specific concurrency group stays distinct from reusable workflow groups,
+so a child cannot cancel its parent. ARM64 already cancels its superseded
+runs independently. The approval controller keeps cancel-in-progress disabled:
+new CI must not interrupt a pending approval capture or a merge operation.
 
 Run the deterministic REST-fixture regression suite with:
 
