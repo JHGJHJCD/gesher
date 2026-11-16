@@ -109,9 +109,6 @@ final class ActiveServices {
         ScheduledFuture<?> restart;
         final List<PendingStart> pendingStarts = new ArrayList<>();
         final Map<Intent.FilterComparison, IntentBindRecord> bindings = new LinkedHashMap<>();
-        // Android's main thread completes unbind callbacks in request order. The legacy
-        // serviceDoneExecuting(UNBIND) reply contains no binding token; keep its owner.
-        final List<UnbindAttempt> pendingUnbinds = new ArrayList<>();
 
         ServiceRecord(ServiceInfo info, ApkPackage owner) {
             super("ServiceRecord " + info.name);
@@ -143,23 +140,11 @@ final class ActiveServices {
         boolean requested;   // scheduleBindService sent
         boolean received;    // publishService came
         IBinder binder;
-        boolean unbindPending; // onUnbind is in flight; a new client waits for its answer
-        UnbindAttempt unbindToken; // unique per onUnbind, rejects stale completions
-        boolean doRebind;      // onUnbind(true) requires one onRebind on the next binding
 
         IntentBindRecord(ServiceRecord service, Intent intent) {
             super("IntentBindRecord " + service.info.name);
             this.service = service;
             this.intent = intent;
-        }
-    }
-
-    /** Distinct Binder token for one unbind operation, never reused across cycles. */
-    private static final class UnbindAttempt extends Binder {
-        final IntentBindRecord binding;
-        UnbindAttempt(IntentBindRecord binding) {
-            super("Unbind " + binding.service.info.name);
-            this.binding = binding;
         }
     }
 
@@ -411,7 +396,7 @@ final class ActiveServices {
             connectionRecord = c;
             b.connections.add(c);
             mConnections.computeIfAbsent(connection.asBinder(), k -> new ArrayList<>()).add(c);
-            received = b.received && !b.unbindPending;
+            received = b.received;
             if (received) published = b.binder;
             // A new client: the idle reaper must not take this as an unused process.
             if (r.app != null) r.app.markActive(SystemClock.uptimeMillis());
@@ -424,11 +409,7 @@ final class ActiveServices {
             // not a pending bind: every later client must receive onNullBinding too.
             if (received) {
                 connected(connectionRecord, published);
-                // The service retains the original published Binder. Only the first
-                // returned client schedules onRebind, even with reentrant callbacks.
-                requestRebind(b);
-            } else if (!b.unbindPending
-                    && ((flags & Context.BIND_AUTO_CREATE) != 0 || r.created)) {
+            } else if ((flags & Context.BIND_AUTO_CREATE) != 0 || r.created) {
                 bringUp(r);
             }
         } finally { Binder.restoreCallingIdentity(identity); }
@@ -443,7 +424,7 @@ final class ActiveServices {
             if (r == null || !(bindToken instanceof IntentBindRecord)) return;
             requireServiceOwner(r);
             IntentBindRecord b = (IntentBindRecord) bindToken;
-            if (b.service != r || !b.requested || b.received || b.unbindPending) return;
+            if (b.service != r) return;
             b.binder = service;
             b.received = true;
             for (ConnectionRecord c : b.connections) clients.add(c);
@@ -456,12 +437,7 @@ final class ActiveServices {
 
     private void connected(ConnectionRecord connection, IBinder service) {
         ServiceRecord r = connection.binding.service;
-        synchronized (this) {
-            if (mServices.get(r.name) != r
-                    || !connection.binding.connections.contains(connection)
-                    || connection.binding.unbindPending) return;
-        }
-        if (!connection.lifetime.getAsBoolean() || !serviceCurrent(r)) return;
+        if (!connection.lifetime.getAsBoolean() || service != null && !serviceCurrent(r)) return;
         try {
             connection.conn.connected(r.name, service, null /* session */, false /* dead */);
         } catch (RemoteException e) {
@@ -469,36 +445,9 @@ final class ActiveServices {
         }
     }
 
-    /** Schedule a single rebind after the old onUnbind(true) publication. */
-    private void requestRebind(IntentBindRecord b) {
-        ServiceRecord r = b.service;
-        IApplicationThread thread;
-        long sequence;
-        synchronized (this) {
-            if (!b.doRebind || b.unbindPending || !b.received
-                    || b.connections.isEmpty() || r.app == null || !r.created
-                    || mServices.get(r.name) != r || !serviceCurrent(r)) return;
-            b.doRebind = false;
-            thread = r.app.thread;
-            sequence = ++mBindSeq;
-        }
-        try {
-            thread.scheduleBindService(r, b, b.intent, true /* rebind */,
-                    ActivityManager.PROCESS_STATE_SERVICE, sequence);
-        } catch (RemoteException e) {
-            SystemServer.log("scheduleRebindService " + r + ": " + e);
-            synchronized (this) {
-                // A failed delivery must not consume the rebind request for this
-                // still-live service, nor revive a retired service generation.
-                if (mServices.get(r.name) == r && r.app != null
-                        && r.app.thread == thread && !b.unbindPending) b.doRebind = true;
-            }
-        }
-    }
-
     boolean unbindService(IServiceConnection connection) {
         List<ConnectionRecord> removed;
-        List<UnbindAttempt> unbind = new ArrayList<>();
+        List<IntentBindRecord> unbind = new ArrayList<>();
         List<ServiceRecord> services = new ArrayList<>();
         synchronized (this) {
             List<ConnectionRecord> existing = mConnections.get(connection.asBinder());
@@ -515,120 +464,45 @@ final class ActiveServices {
             for (ConnectionRecord c : removed) {
                 IntentBindRecord b = c.binding;
                 b.connections.remove(c);
-                if (b.connections.isEmpty() && b.requested && !b.unbindPending) {
-                    // Do not drop the published Binder until onUnbind completes.
-                    // A concurrent bind must not observe a speculative onBind or
-                    // connect to a Binder that onUnbind(false) will invalidate.
-                    b.unbindPending = true;
-                    b.doRebind = false;
-                    b.unbindToken = new UnbindAttempt(b);
-                    b.service.pendingUnbinds.add(b.unbindToken);
-                    unbind.add(b.unbindToken);
+                if (b.connections.isEmpty() && b.requested) {
+                    b.requested = false;
+                    b.received = false;
+                    b.binder = null;
+                    unbind.add(b);
                 }
                 if (!services.contains(b.service)) services.add(b.service);
             }
         }
         for (ServiceRecord r : services) SystemServer.log("unbindService " + r);
-        for (UnbindAttempt attempt : unbind) {
-            IntentBindRecord b = attempt.binding;
+        for (IntentBindRecord b : unbind) {
             ServiceRecord r = b.service;
-            IApplicationThread thread;
-            synchronized (this) {
-                if (b.unbindToken != attempt || !b.unbindPending) continue;
-                thread = r.app != null && r.created ? r.app.thread : null;
-                if (thread == null) {
-                    r.pendingUnbinds.remove(attempt);
-                    b.unbindToken = null;
-                    b.unbindPending = false;
-                    b.requested = false;
-                    b.received = false;
-                    b.binder = null;
-                }
-            }
-            if (thread == null) continue;
+            if (r.app == null || !r.created) continue;
             SystemServer.log("scheduleUnbindService " + r);
             try {
-                thread.scheduleUnbindService(r, attempt, b.intent);
+                r.app.thread.scheduleUnbindService(r, b, b.intent);
             } catch (RemoteException e) {
                 SystemServer.log("scheduleUnbindService " + r + ": " + e);
-                synchronized (this) {
-                    if (b.unbindToken == attempt) {
-                        r.pendingUnbinds.remove(attempt);
-                        b.unbindToken = null;
-                        b.unbindPending = false;
-                        b.requested = false;
-                        b.received = false;
-                        b.binder = null;
-                    }
-                }
             }
         }
         for (ServiceRecord r : services) maybeBringDown(r);
         return true;
     }
 
-    /** Android's onUnbind(true): retain the Binder and schedule onRebind once. */
     void unbindFinished(IBinder token, IBinder bindToken) {
-        IntentBindRecord b;
-        List<ConnectionRecord> waiting;
-        IBinder published;
-        boolean retry;
-        synchronized (this) {
-            ServiceRecord r = byToken(token);
-            if (r == null || !(bindToken instanceof UnbindAttempt)) return;
-            requireServiceOwner(r);
-            UnbindAttempt attempt = (UnbindAttempt) bindToken;
-            b = attempt.binding;
-            if (b.service != r || b.unbindToken != attempt
-                    || !b.unbindPending || !r.pendingUnbinds.remove(attempt)) return;
-            b.unbindToken = null;
-            b.unbindPending = false;
-            // When a client arrived before onUnbind returned, it must receive the
-            // old published Binder, followed by one onRebind. A missing initial
-            // publication cannot be reused; request a new onBind instead.
-            retry = !b.received && !b.connections.isEmpty();
-            b.doRebind = b.received;
-            if (!b.received) b.requested = false;
-            waiting = new ArrayList<>(b.connections);
-            published = b.binder;
-        }
-        if (retry) {
-            bringUp(b.service);
-        } else if (!waiting.isEmpty()) {
-            requestRebind(b);
-            for (ConnectionRecord c : waiting) connected(c, published);
-        }
+        // onUnbind returned true: onRebind on the next bind would follow. Bindings start
+        // over here instead (onBind again).
     }
 
     void serviceDoneExecuting(IBinder token, int type, int startId, int res) {
         ServiceRecord r;
-        boolean retryBinding = false;
         synchronized (this) {
-            r = byToken(token);
+            r = token instanceof ServiceRecord ? (ServiceRecord) token : null;
             if (r != null) requireServiceOwner(r);
             if (r != null && type == 1 && startId == r.lastStartId) {
                 r.startResult = res;
             }
-            if (r != null && type == 4 && !r.pendingUnbinds.isEmpty()) {
-                // Android 16's onUnbind(false) completes with UNBIND. Gesher's
-                // four-argument interface has no intent; callbacks are serialized
-                // by ActivityThread, so the oldest pending intent owns the reply.
-                UnbindAttempt attempt = r.pendingUnbinds.remove(0);
-                IntentBindRecord b = attempt.binding;
-                if (b.unbindToken == attempt && b.unbindPending) {
-                    b.unbindToken = null;
-                    b.unbindPending = false;
-                    b.unbindToken = null;
-                    b.doRebind = false;
-                    b.requested = false;
-                    b.received = false;
-                    b.binder = null;
-                    retryBinding = !b.connections.isEmpty();
-                }
-            }
         }
         if (r == null) return;
-        if (retryBinding) bringUp(r);
         String what;
         switch (type) {
             case 0: what = "created"; break;          // SERVICE_DONE_EXECUTING_ANON
@@ -766,7 +640,7 @@ final class ActiveServices {
                 starts = new ArrayList<>(r.pendingStarts);
                 r.pendingStarts.clear();
                 for (IntentBindRecord b : r.bindings.values()) {
-                    if (!b.requested && !b.unbindPending && !b.connections.isEmpty()) {
+                    if (!b.requested && !b.connections.isEmpty()) {
                         b.requested = true;
                         binds.add(b);
                     }
@@ -943,10 +817,7 @@ final class ActiveServices {
                 }
                 r.app = null;
                 r.created = false;
-                r.pendingUnbinds.clear();
                 for (IntentBindRecord b : r.bindings.values()) {
-                    b.unbindPending = false;
-                    b.doRebind = false;
                     disconnected.addAll(b.connections);
                     b.requested = false;
                     b.received = false;
