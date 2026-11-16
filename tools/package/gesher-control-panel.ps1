@@ -25,7 +25,6 @@ $script:UpdateDirectory = Join-Path $root 'updates'
 # new one. "Reopen" after an update starts the new version while the old one is still
 # open: GESHER_PANEL_REOPEN lets that start through.
 $script:PanelRequestFile = Join-Path $root 'data/system/control-panel-request'
-$script:PanelRequestTaken = "$($script:PanelRequestFile).taken"
 $script:PanelReopen = ($env:GESHER_PANEL_REOPEN -eq '1')
 Remove-Item Env:GESHER_PANEL_REOPEN -ErrorAction SilentlyContinue
 $script:PanelInstanceCreated = $false
@@ -613,9 +612,12 @@ function Invoke-LiveRefreshTick {
 function Read-PanelRequest {
     $file = $script:PanelRequestFile
     if (-not (Test-Path -LiteralPath $file)) { return $null }
-    try { Move-Item -LiteralPath $file -Destination $script:PanelRequestTaken -Force -ErrorAction Stop } catch { return $null }
-    try { $text = [System.IO.File]::ReadAllText($script:PanelRequestTaken) } catch { $text = $null }
-    Remove-Item -LiteralPath $script:PanelRequestTaken -Force -ErrorAction SilentlyContinue
+    # Reopen can briefly leave two consumers. Each owns its taken file, so a newer
+    # request cannot overwrite one that the other panel has moved but not yet read.
+    $taken = "$file.$([guid]::NewGuid().ToString('N')).taken"
+    try { Move-Item -LiteralPath $file -Destination $taken -ErrorAction Stop } catch { return $null }
+    try { $text = [System.IO.File]::ReadAllText($taken) } catch { $text = $null }
+    Remove-Item -LiteralPath $taken -Force -ErrorAction SilentlyContinue
     if ($null -eq $text) { return $null }
     return $text.Trim()
 }

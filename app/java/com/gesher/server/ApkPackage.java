@@ -43,7 +43,9 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -89,6 +91,31 @@ public final class ApkPackage {
     private Signature[] mVerifiedSignatures;
     private int mVerifiedSignatureSchemeVersion;
     private com.android.apksig.SigningCertificateLineage mVerifiedLineage;
+    // Immutable snapshots: metadata generation also runs outside the PM monitor.
+    private volatile Map<String, Integer> mComponentStates = Collections.emptyMap();
+
+    int componentEnabledState(String name) {
+        Map<String, Integer> states = mComponentStates;
+        Integer state = states == null ? null : states.get(name);
+        return state == null ? PackageManager.COMPONENT_ENABLED_STATE_DEFAULT : state;
+    }
+
+    synchronized void setComponentEnabledState(String name, int state) {
+        Map<String, Integer> states = mComponentStates == null ? new LinkedHashMap<>()
+                : new LinkedHashMap<>(mComponentStates);
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT) states.remove(name);
+        else states.put(name, state);
+        mComponentStates = Collections.unmodifiableMap(states);
+    }
+
+    /** An update keeps installed component settings; a fresh install has none. */
+    void inheritComponentStates(ApkPackage previous) {
+        if (previous != null && previous != this) mComponentStates = previous.mComponentStates;
+    }
+
+    void clearComponentStates() {
+        mComponentStates = Collections.emptyMap();
+    }
 
     private ApkPackage(String apkPath, ParsedPackage parsed) throws IOException {
         this.apkPath = apkPath;
@@ -502,16 +529,30 @@ public final class ApkPackage {
         }
         PackageInfo pi = PackageInfoCommonUtils.generate(parsed, flags, 0 /* userId */);
         installed(pi.applicationInfo);
-        for (ComponentInfo[] components : new ComponentInfo[][] {pi.activities,
-                pi.receivers, pi.services, pi.providers}) {
-            if (components == null) continue;
-            for (ComponentInfo c : components) {
-                component(c, pi.applicationInfo);
-            }
-        }
+        pi.activities = installedComponents(pi.activities, pi.applicationInfo, flags);
+        pi.receivers = installedComponents(pi.receivers, pi.applicationInfo, flags);
+        pi.services = installedComponents(pi.services, pi.applicationInfo, flags);
+        pi.providers = installedComponents(pi.providers, pi.applicationInfo, flags);
         pi.firstInstallTime = mInstallTime;
         pi.lastUpdateTime = mUpdateTime;
         return GmsSignatureSpoofing.maybeSpoofPackageInfo(this, pi, flags);
+    }
+
+    /** Apply installed state once, including provider startup and activity-options queries. */
+    private <T extends ComponentInfo> T[] installedComponents(T[] components,
+            ApplicationInfo application, long flags) {
+        if (components == null) return null;
+        Map<String, Integer> states = mComponentStates;
+        boolean includeDisabled = (flags & PackageManager.MATCH_DISABLED_COMPONENTS) != 0;
+        int count = 0;
+        for (T info : components) {
+            component(info, application);
+            Integer state = states == null ? null : states.get(info.name);
+            if (state != null) info.enabled = state == PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+            if (includeDisabled || info.enabled) components[count++] = info;
+        }
+        return count == components.length ? components
+                : count == 0 ? null : Arrays.copyOf(components, count);
     }
 
     public ApplicationInfo applicationInfo(long flags) {

@@ -59,15 +59,34 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ("gesher-panel-request-" + [guid]::
 New-Item -ItemType Directory -Force (Join-Path $root 'data/system') | Out-Null
 try {
     $script:PanelRequestFile = Join-Path $root 'data/system/control-panel-request'
-    $script:PanelRequestTaken = "$($script:PanelRequestFile).taken"
 
     # A request is read once and leaves nothing behind.
     Assert-Request ($null -eq (Read-PanelRequest)) 'A missing request was read'
     [IO.File]::WriteAllText($script:PanelRequestFile, "com.example.app`n")
     Assert-Request ((Read-PanelRequest) -eq 'com.example.app') 'The request package was not read'
     Assert-Request (-not (Test-Path -LiteralPath $script:PanelRequestFile)) 'The request was not taken'
-    Assert-Request (-not (Test-Path -LiteralPath $script:PanelRequestTaken)) 'The taken request was left behind'
+    Assert-Request (@(Get-ChildItem -LiteralPath (Split-Path $script:PanelRequestFile) -Filter '*.taken').Count -eq 0) 'The taken request was left behind'
     Assert-Request ($null -eq (Read-PanelRequest)) 'A taken request was read twice'
+
+    # Deterministically interleave two consumers as during Reopen: the first has moved
+    # its request but not read it when the second takes a newly published request.
+    $script:InjectNextRequest = $true
+    $script:NestedRequest = $null
+    function Move-Item {
+        param([string] $LiteralPath, [string] $Destination, [switch] $Force, $ErrorAction)
+        Microsoft.PowerShell.Management\Move-Item -LiteralPath $LiteralPath -Destination $Destination -Force:$Force -ErrorAction Stop
+        if ($script:InjectNextRequest) {
+            $script:InjectNextRequest = $false
+            [IO.File]::WriteAllText($script:PanelRequestFile, "com.example.second`n")
+            $script:NestedRequest = Read-PanelRequest
+        }
+    }
+    try {
+        [IO.File]::WriteAllText($script:PanelRequestFile, "com.example.first`n")
+        Assert-Request ((Read-PanelRequest) -eq 'com.example.first') 'A concurrent consumer replaced the first request'
+        Assert-Request ($script:NestedRequest -eq 'com.example.second') 'A concurrent consumer lost the second request'
+        Assert-Request (@(Get-ChildItem -LiteralPath (Split-Path $script:PanelRequestFile) -Filter '*.taken').Count -eq 0) 'Concurrent consumers left taken files behind'
+    } finally { Remove-Item Function:Move-Item }
 
     # packages.list times (ms since 1970) become local dates; unknown packages have none.
     [IO.File]::WriteAllText((Join-Path $root 'data/system/packages.list'),

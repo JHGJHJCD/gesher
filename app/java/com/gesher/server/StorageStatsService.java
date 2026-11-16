@@ -321,7 +321,8 @@ final class StorageStatsService extends IStorageStatsManager.Default {
 
                         @Override
                         public FileVisitResult visitFileFailed(Path file, IOException e) {
-                            return FileVisitResult.CONTINUE;
+                            return --entries[0] <= 0 ? FileVisitResult.TERMINATE
+                                    : FileVisitResult.CONTINUE;
                         }
                     });
         } catch (IOException | RuntimeException e) {

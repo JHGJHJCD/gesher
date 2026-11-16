@@ -271,6 +271,13 @@ public final class SettingsIntentsTest {
         require(pm.getActivityInfo(main, 0, 0) == null, "disabled activity still found by name");
         require(pm.getActivityInfo(main, PackageManager.MATCH_DISABLED_COMPONENTS, 0) != null,
                 "MATCH_DISABLED_COMPONENTS lost the activity by name");
+        require(!pm.getActivityInfo(main, PackageManager.MATCH_DISABLED_COMPONENTS, 0).enabled,
+                "disabled activity metadata still says enabled");
+        require(!names(pm.queryIntentActivityOptions(null, null, null, launcher, null, 0, 0)
+                .getList()).contains(main.getClassName()), "activity options still finds disabled activity");
+        require(names(pm.queryIntentActivityOptions(null, null, null, launcher, null,
+                PackageManager.MATCH_DISABLED_COMPONENTS, 0).getList()).contains(main.getClassName()),
+                "activity options lost MATCH_DISABLED_COMPONENTS");
         // DISABLED_USER is an application state: ignored for a component, as on Android.
         pm.setComponentEnabledSetting(receiver,
                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER, 0, 0, PACKAGE);
@@ -313,6 +320,21 @@ public final class SettingsIntentsTest {
                 == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, "unknown class not DEFAULT");
         throwsType(IllegalArgumentException.class, () -> pm.getComponentEnabledSetting(
                 new ComponentName("com.example.missing", "X"), 0), "unknown package read");
+        com.gesher.server.PackageManagerService service = (com.gesher.server.PackageManagerService) pm;
+        com.gesher.server.ApkPackage replacement = com.gesher.server.ApkPackage.parse(service.get(PACKAGE).apkPath);
+        Method add = service.getClass().getDeclaredMethod("add", com.gesher.server.ApkPackage.class);
+        Method remove = service.getClass().getDeclaredMethod("remove", String.class);
+        add.setAccessible(true);
+        remove.setAccessible(true);
+        pm.setComponentEnabledSetting(main, PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                PackageManager.DONT_KILL_APP, 0, PACKAGE);
+        add.invoke(service, replacement);
+        require(pm.getComponentEnabledSetting(main, 0) == PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                && pm.getActivityInfo(main, 0, 0) == null, "package update lost component state");
+        remove.invoke(service, PACKAGE);
+        add.invoke(service, replacement);
+        require(pm.getComponentEnabledSetting(main, 0) == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                && pm.getActivityInfo(main, 0, 0) != null, "uninstall retained component state");
         System.out.println("SettingsIntentsTest: component enabled states are kept and applied");
     }
 
@@ -327,6 +349,52 @@ public final class SettingsIntentsTest {
         List<ResolveInfo> none = pm.queryIntentContentProviders(
                 new Intent("android.content.action.DOCUMENTS_PROVIDER"), null, 0, 0).getList();
         require(none.isEmpty(), "a provider without that filter matched: " + none);
+
+        // All consumers share the installed state: by name, authority, intent, package
+        // metadata and the provider-start path must agree about a disabled provider.
+        String authority = "com.gesher.components.items";
+        Class<?> pmClass = Class.forName("com.gesher.server.PackageManagerService");
+        Class<?> providersClass = Class.forName("com.gesher.server.ContentProviders");
+        Method declared = providersClass.getDeclaredMethod("declaredProvider", pmClass, String.class);
+        declared.setAccessible(true);
+        pm.setComponentEnabledSetting(provider, PackageManager.COMPONENT_ENABLED_STATE_DISABLED,
+                PackageManager.DONT_KILL_APP, 0, PACKAGE);
+        require(pm.getProviderInfo(provider, 0, 0) == null, "disabled provider found by name");
+        require(pm.resolveContentProvider(authority, 0, 0) == null, "disabled provider found by authority");
+        require(pm.queryIntentContentProviders(new Intent().setComponent(provider), null, 0, 0)
+                .getList().isEmpty(), "disabled provider found by intent");
+        require(declared.invoke(null, pm, authority) == null, "provider acquisition found disabled provider");
+        android.content.pm.PackageInfo metadata = pm.getPackageInfo(PACKAGE, PackageManager.GET_PROVIDERS, 0);
+        require(metadata.providers == null || metadata.providers.length == 0,
+                "package metadata includes disabled provider");
+        android.content.pm.ProviderInfo disabled = pm.resolveContentProvider(authority,
+                PackageManager.MATCH_DISABLED_COMPONENTS, 0);
+        require(disabled != null && !disabled.enabled, "disabled provider flag was lost");
+
+        // An ENABLED override must also override a disabled manifest declaration.
+        com.gesher.server.ApkPackage apk = ((com.gesher.server.PackageManagerService) pm).get(PACKAGE);
+        com.android.internal.pm.pkg.component.ParsedProviderImpl parsed =
+                (com.android.internal.pm.pkg.component.ParsedProviderImpl) apk.parsed.getProviders().get(0);
+        boolean manifestEnabled = parsed.isEnabled();
+        try {
+            parsed.setEnabled(false);
+            pm.setComponentEnabledSetting(provider, PackageManager.COMPONENT_ENABLED_STATE_ENABLED,
+                    PackageManager.DONT_KILL_APP, 0, PACKAGE);
+            require(pm.resolveContentProvider(authority, 0, 0).enabled,
+                    "ENABLED did not override provider manifest state");
+            require(declared.invoke(null, pm, authority) != null,
+                    "enabled provider cannot be acquired");
+            pm.setComponentEnabledSetting(provider, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                    PackageManager.DONT_KILL_APP, 0, PACKAGE);
+            require(pm.resolveContentProvider(authority, 0, 0) == null,
+                    "DEFAULT did not restore disabled manifest state");
+        } finally {
+            parsed.setEnabled(manifestEnabled);
+            pm.setComponentEnabledSetting(provider, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
+                    PackageManager.DONT_KILL_APP, 0, PACKAGE);
+        }
+        require(pm.resolveContentProvider(authority, 0, 0) != null,
+                "restored provider stayed disabled");
         System.out.println("SettingsIntentsTest: queryIntentContentProviders answers");
     }
 

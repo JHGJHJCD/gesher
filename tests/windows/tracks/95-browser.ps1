@@ -34,3 +34,8 @@ Check 'services: Settings screens reach the Control Center or Windows Settings; 
   'SettingsIntentsTest: component enabled states are kept and applied',
   'SettingsIntentsTest: storage stats measure the app''s files',
   'SettingsIntentsTest all passed:')
+
+Check 'services: concurrent Control Center requests stay whole on the runtime filesystem' {
+  & "$Dir/dalvikvm.exe" "-Xbootclasspath:$bcpBrowser" "-Ximage:$(NoDrive "$root/system")/framework/boot.art" `
+    -Xint '-Xusejit:false' -cp (NoDrive "$Dir/services-tests.dex") gesher.services.ControlCenterRequestsTest
+} @('ControlCenterRequestsTest all passed:')
