@@ -18,6 +18,7 @@ import android.content.pm.ParceledListSlice;
 import android.content.pm.ResolveInfo;
 import android.content.pm.ServiceInfo;
 import android.content.res.CompatibilityInfo;
+import android.net.Uri;
 import android.os.Binder;
 import android.os.IBinder;
 import android.os.RemoteException;
@@ -341,6 +342,12 @@ final class ActiveServices {
         }
         SystemServer.log("startService " + r + " from " + callingPackage
                 + (requireForeground ? " (foreground)" : ""));
+        int grantModes = service.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        if ((grantModes & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) != 0) {
+            grantServiceUris(r, sender, service, grantModes);
+        }
         long identity = Binder.clearCallingIdentity();
         try { bringUp(r); } finally { Binder.restoreCallingIdentity(identity); }
         return r.name;
@@ -426,6 +433,12 @@ final class ActiveServices {
         }
         SystemServer.log("bindService " + r + " from " + callingPackage + " (flags 0x"
                 + Long.toHexString(flags) + ")");
+        int grantModes = service.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        if ((grantModes & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) != 0) {
+            grantServiceUris(r, sender, service, grantModes);
+        }
         long identity = Binder.clearCallingIdentity();
         try {
             // onBind may have completed with null. That is a published null binding,
@@ -794,6 +807,16 @@ final class ActiveServices {
         });
     }
 
+    private void grantServiceUris(ServiceRecord r, Sender sender, Intent service, int grantModes) {
+        UriGrants grants = mAtm.uriGrants();
+        if (grants == null) return;
+        int callerUid = sender.system ? android.os.Process.SYSTEM_UID : (mPm.get(sender.packageName) != null
+                ? mPm.get(sender.packageName).uid() : Binder.getCallingUid());
+        for (Uri uri : ActivityCallerState.contentUris(service)) {
+            grants.grantFromOwner(r, callerUid, r.info.packageName, uri, grantModes, 0, 0);
+        }
+    }
+
     /** ActiveServices.bringDownServiceIfNeededLocked: destroy it if nothing keeps it. */
     private void maybeBringDown(ServiceRecord r) {
         synchronized (this) {
@@ -810,6 +833,9 @@ final class ActiveServices {
                     if (l != null) l.remove(c);
                 }
             }
+        }
+        if (mAtm.uriGrants() != null) {
+            mAtm.uriGrants().revokeByOwner(r);
         }
         if (r.foregroundId != 0) mNotifications.cancel(r.info.packageName, null, r.foregroundId);
         if (r.app == null || !r.created) return;

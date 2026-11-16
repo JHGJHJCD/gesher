@@ -294,6 +294,14 @@ Check 'services: URI delegation, provider patterns, exact identities and scoped 
   $uriGrantsOut
 } @('UriGrantContractTest all passed: 138 checks; binder=true')
 
+$intentUriGrantsOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' +
+  'IntentUriGrantContractTest') 90
+$intentUriGrantsCode = $LASTEXITCODE
+Check 'services: Intent URI grants, IBinder owner lifecycle and non-system ignore' {
+  $global:LASTEXITCODE = $intentUriGrantsCode
+  $intentUriGrantsOut
+} @('IntentUriGrantContractTest passed: 15 checks')
+
 # Caller identity and URI snapshots must survive actual ActivityThread delivery,
 # relaunch and results, including a PendingIntent holder cleared by its own send.
 . "$PSScriptRoot/../component-caller-contracts.ps1"

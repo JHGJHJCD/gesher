@@ -404,6 +404,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         mAm = am;
     }
 
+    UriGrants uriGrants() {
+        return mAm != null ? mAm.uriGrants() : null;
+    }
+
     void setAccountManager(AccountManagerService accounts) { mAccounts = accounts; }
 
     private int chooseAccount(IApplicationThread caller, String callingPackage, Intent intent,
@@ -1123,16 +1127,17 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 && (publication == null || publication.getAsBoolean());
         Intent launch = new Intent(intent);
         launch.setComponent(new ComponentName(info.packageName, info.name));
+        final ActivityCallerState.Origin callerOrigin;
         final ActivityCallerState.Snapshot callerSnapshot;
         synchronized (mPm) {
             if (!sourceCurrent.getAsBoolean()) return ActivityManager.START_CANCELED;
             if (mAm == null) throw new IllegalStateException("Activity caller permission service unavailable");
-            ActivityCallerState.Origin origin = attributedCaller == null || systemCreator
+            callerOrigin = attributedCaller == null || systemCreator
                     ? new ActivityCallerState.Origin(null, systemCreator ? android.os.Process.SYSTEM_UID
                             : Binder.getCallingUid(), systemCreator ? "android" : null, true, shareIdentity)
                     : new ActivityCallerState.Origin(originalCallerCode, originalCallerCode.uid(),
                             attributedCaller, false, shareIdentity);
-            callerSnapshot = ActivityCallerState.capture(origin, launch, mAm.uriGrants());
+            callerSnapshot = ActivityCallerState.capture(callerOrigin, launch, mAm.uriGrants());
         }
         int callingPid = Binder.getCallingPid();
         int launchFlags = intent.getFlags();
@@ -1256,6 +1261,21 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 }
             }
         }
+        int grantModes = launchFlags & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        if ((grantModes & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) != 0
+                && mAm != null && mAm.uriGrants() != null) {
+            ActivityRecord targetActivity = r != null ? r : deliverTo;
+            if (targetActivity != null) {
+                try {
+                    grantIntentUris(targetActivity.token, callerOrigin.uid, info.packageName, launch, grantModes);
+                } catch (RuntimeException e) {
+                    if (r != null) remove(r);
+                    throw e;
+                }
+            }
+        }
         if (deliverTo != null) {
             started[0] = deliverTo;
             SystemServer.log("START u0 {" + launch.toShortString(false, true, true, false)
@@ -1290,6 +1310,13 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         for (ActivityRecord a : reconfigure) ensureConfiguration(a);
         updateTopResumed();
         return ActivityManager.START_SUCCESS;
+    }
+
+    private void grantIntentUris(IBinder owner, int fromUid, String targetPackage, Intent intent, int modes) {
+        if (mAm == null || mAm.uriGrants() == null || intent == null) return;
+        for (Uri uri : ActivityCallerState.contentUris(intent)) {
+            mAm.uriGrants().grantFromOwner(owner, fromUid, targetPackage, uri, modes, 0, 0);
+        }
     }
 
     private static String callerName(String callingPackage, int callingPid) {
@@ -2153,6 +2180,11 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             updateIdle();
             notifyAll();
         }
+        if (mAm != null && mAm.uriGrants() != null) {
+            for (ActivityRecord r : app.activities) {
+                if (r.token != null) mAm.uriGrants().revokeByOwner(r.token);
+            }
+        }
         SystemServer.log(app + " died");
         mAm.processDied(app);
         if (!app.spawned) mExitStatus.unavailable(app.exitGeneration);
@@ -3012,6 +3044,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             notifyAll();
         }
         updateTopResumed();
+        if (r.token != null && mAm != null && mAm.uriGrants() != null) {
+            mAm.uriGrants().revokeByOwner(r.token);
+        }
         maybeExit(check);
     }
 
