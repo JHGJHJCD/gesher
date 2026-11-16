@@ -1328,6 +1328,10 @@ function New-PanelActionWorker([string] $operation, $request) {
             param($here, $operation, $request, $installDefinition, $language)
             $ErrorActionPreference = 'Stop'
             $ProgressPreference = 'SilentlyContinue'
+            # This process already has the panel's chosen display language.
+            # Reuse it without compiling a native language reader, and without
+            # changing GESHER_LOCALES (which also configures Android apps).
+            $env:GESHER_PANEL_UI_LANGUAGE = $language
             # Includes nested microG staging helpers. Bound transport waits;
             # committing an installation is deliberately never force-stopped.
             $PSDefaultParameterValues = @{ 'Invoke-WebRequest:TimeoutSec' = 120 }
@@ -1390,99 +1394,128 @@ function New-PanelActionWorker([string] $operation, $request) {
         $owner = {
             param($body, $here, $operation, $request, $installDefinition, $language)
             $ErrorActionPreference = 'Stop'
-            $stage = 'prepare native action host'
-            try {
             # ConsoleHost preserves the packaged helpers' native stderr semantics.
             # A bare PowerShell API runspace turns even successful ART diagnostics
             # into terminating errors under ErrorActionPreference=Stop.
-            if (-not ('Gesher.PanelActionHost' -as [type])) {
-                Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.Runtime.InteropServices;
-using System.Text;
-namespace Gesher {
-  public static class PanelActionHost {
-    [StructLayout(LayoutKind.Sequential)] struct Security {
-      public int length; public IntPtr descriptor; [MarshalAs(UnmanagedType.Bool)] public bool inherit;
-    }
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
-      public int size; public IntPtr reserved, desktop, title;
-      public int x,y,width,height,charsX,charsY,fill,flags;
-      public short show,reservedSize;
-      public IntPtr reservedBytes,input,output,error;
-    }
-    [StructLayout(LayoutKind.Sequential)] struct ExtendedStartup { public Startup startup; public IntPtr attributes; }
-    [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr process,thread; public uint processId,threadId; }
-    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
-    static extern IntPtr CreateFileW(string path,uint access,uint share,ref Security security,uint creation,uint flags,IntPtr template);
-    [DllImport("kernel32.dll",SetLastError=true)]
-    static extern bool InitializeProcThreadAttributeList(IntPtr list,int count,uint flags,ref IntPtr size);
-    [DllImport("kernel32.dll",SetLastError=true)]
-    static extern bool UpdateProcThreadAttribute(IntPtr list,uint flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr result);
-    [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
-    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
-    static extern bool CreateProcessW(string application,StringBuilder command,IntPtr processSecurity,IntPtr threadSecurity,
-      bool inherit,uint flags,IntPtr environment,string directory,ref ExtendedStartup startup,out ProcessInfo process);
-    [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
-    [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process,out uint code);
-    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-    static bool Valid(IntPtr handle) { return handle!=IntPtr.Zero && handle!=new IntPtr(-1); }
-    static Win32Exception NativeFailure(string stage) {
-      int error=Marshal.GetLastWin32Error();
-      return new Win32Exception(error,stage+" (Win32="+error+"): "+new Win32Exception(error).Message);
-    }
-    public static int Run(string executable,string script,string directory) {
-      var security=new Security { length=Marshal.SizeOf(typeof(Security)), inherit=true };
-      IntPtr input=IntPtr.Zero,output=IntPtr.Zero,attributes=IntPtr.Zero,handles=IntPtr.Zero;
-      bool initialized=false;
-      var process=new ProcessInfo();
-      try {
-        input=CreateFileW("NUL",0x80000000,3,ref security,3,0,IntPtr.Zero);
-        if(!Valid(input)) throw NativeFailure("Open NUL input");
-        output=CreateFileW("NUL",0x40000000,3,ref security,3,0,IntPtr.Zero);
-        if(!Valid(output)) throw NativeFailure("Open NUL output");
-        IntPtr size=IntPtr.Zero;
-        InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size);
-        if(size==IntPtr.Zero) throw NativeFailure("Size process attributes");
-        attributes=Marshal.AllocHGlobal(size);
-        if(!InitializeProcThreadAttributeList(attributes,1,0,ref size)) throw NativeFailure("Initialize process attributes");
-        initialized=true;
-        handles=Marshal.AllocHGlobal(2*IntPtr.Size);
-        Marshal.WriteIntPtr(handles,0,input); Marshal.WriteIntPtr(handles,IntPtr.Size,output);
-        // Only these NUL handles are inherited: no redirected reader threads,
-        // accumulating logs, or unrelated inheritable profile/process handles.
-        if(!UpdateProcThreadAttribute(attributes,0,new IntPtr(0x00020002),handles,new IntPtr(2*IntPtr.Size),IntPtr.Zero,IntPtr.Zero))
-          throw NativeFailure("Set inherited NUL handles");
-        var startup=new ExtendedStartup();
-        startup.startup.size=Marshal.SizeOf(typeof(ExtendedStartup));
-        startup.startup.flags=0x100;
-        startup.startup.input=input; startup.startup.output=output; startup.startup.error=output;
-        startup.attributes=attributes;
-        // Script is an owned .ps1 path, never a user command or argument.
-        var command=new StringBuilder("\""+executable+"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \""+script+"\"");
-        if(!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,0x08080000,IntPtr.Zero,directory,ref startup,out process))
-          throw NativeFailure("Create action process: executable="+executable+", script="+script+", directory="+directory);
-        CloseHandle(process.thread); process.thread=IntPtr.Zero;
-        if(WaitForSingleObject(process.process,0xffffffff)!=0) throw NativeFailure("Wait for action process");
-        uint code;
-        if(!GetExitCodeProcess(process.process,out code)) throw NativeFailure("Read action exit code");
-        return unchecked((int)code);
-      } finally {
-        if(Valid(process.thread)) CloseHandle(process.thread);
-        if(Valid(process.process)) CloseHandle(process.process);
-        if(initialized) DeleteProcThreadAttributeList(attributes);
-        if(attributes!=IntPtr.Zero) Marshal.FreeHGlobal(attributes);
-        if(handles!=IntPtr.Zero) Marshal.FreeHGlobal(handles);
-        if(Valid(input)) CloseHandle(input);
-        if(Valid(output)) CloseHandle(output);
-      }
-    }
-  }
-}
-'@
+            # Declare Unicode Win32 entry points in memory. Runtime CodeDOM compilation
+            # uses ANSI-dependent native temporary-path code on some .NET Framework builds.
+            # Sequential value types keep pointer-size-dependent layout with the CLR marshaler.
+            function Initialize-PanelActionNative {
+                if ('Gesher.PanelActionNative' -as [type]) { return }
+                $name = [Reflection.AssemblyName]::new('Gesher.PanelActionNative')
+                if ($PSVersionTable.PSEdition -eq 'Core') {
+                    $assembly = [Reflection.Emit.AssemblyBuilder]::DefineDynamicAssembly($name, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+                } else {
+                    $assembly = [AppDomain]::CurrentDomain.DefineDynamicAssembly($name, [Reflection.Emit.AssemblyBuilderAccess]::Run)
+                }
+                $module=$assembly.DefineDynamicModule('Native')
+                function Define-Struct([string] $name, $fields) {
+                    $builder=$module.DefineType($name,[Reflection.TypeAttributes]'Public,Sealed,SequentialLayout',[ValueType])
+                    foreach($name in $fields.Keys) { $null=$builder.DefineField($name,$fields[$name],[Reflection.FieldAttributes]::Public) }
+                    $builder.CreateType()
+                }
+                $security=Define-Struct 'Gesher.PanelActionSecurity' ([ordered]@{Length=[int];Descriptor=[IntPtr];Inherit=[int]})
+                $startup=Define-Struct 'Gesher.PanelActionStartup' ([ordered]@{
+                    Size=[int];Reserved=[IntPtr];Desktop=[IntPtr];Title=[IntPtr]
+                    X=[int];Y=[int];Width=[int];Height=[int];CharsX=[int];CharsY=[int];Fill=[int];Flags=[int]
+                    Show=[int16];ReservedSize=[int16];ReservedBytes=[IntPtr];Input=[IntPtr];Output=[IntPtr];Error=[IntPtr]
+                })
+                $extended=Define-Struct 'Gesher.PanelActionExtendedStartup' ([ordered]@{Startup=$startup;Attributes=[IntPtr]})
+                $process=Define-Struct 'Gesher.PanelActionProcessInfo' ([ordered]@{Process=[IntPtr];Thread=[IntPtr];ProcessId=[uint32];ThreadId=[uint32]})
+                $builder=$module.DefineType('Gesher.PanelActionNative',[Reflection.TypeAttributes]'Public,Abstract,Sealed')
+                $lastError = $builder.DefineField('LastError', [int], [Reflection.FieldAttributes]'Public,Static')
+                $threadStatic = [Reflection.Emit.CustomAttributeBuilder]::new([ThreadStaticAttribute].GetConstructor(@()), [object[]]@())
+                $lastError.SetCustomAttribute($threadStatic)
+                $getLastError = [Runtime.InteropServices.Marshal].GetMethod('GetLastWin32Error')
+                $constructor=[Runtime.InteropServices.DllImportAttribute].GetConstructor(@([string]))
+                $fields=[Reflection.FieldInfo[]]@([Runtime.InteropServices.DllImportAttribute].GetField('CharSet'),[Runtime.InteropServices.DllImportAttribute].GetField('SetLastError'),[Runtime.InteropServices.DllImportAttribute].GetField('EntryPoint'))
+                foreach($signature in @(
+                    @{Name='CreateFileW';Return=[IntPtr];Parameters=[Type[]]@([string],[uint32],[uint32],$security.MakeByRefType(),[uint32],[uint32],[IntPtr])},
+                    @{Name='InitializeProcThreadAttributeList';Return=[bool];Parameters=[Type[]]@([IntPtr],[int],[uint32],[IntPtr].MakeByRefType())},
+                    @{Name='UpdateProcThreadAttribute';Return=[bool];Parameters=[Type[]]@([IntPtr],[uint32],[IntPtr],[IntPtr],[IntPtr],[IntPtr],[IntPtr])},
+                    @{Name='DeleteProcThreadAttributeList';Return=[void];Parameters=[Type[]]@([IntPtr])},
+                    @{Name='CreateProcessW';Return=[bool];Parameters=[Type[]]@([string],[Text.StringBuilder],[IntPtr],[IntPtr],[bool],[uint32],[IntPtr],[string],$extended.MakeByRefType(),$process.MakeByRefType())},
+                    @{Name='WaitForSingleObject';Return=[uint32];Parameters=[Type[]]@([IntPtr],[uint32])},
+                    @{Name='GetExitCodeProcess';Return=[bool];Parameters=[Type[]]@([IntPtr],[uint32].MakeByRefType())},
+                    @{Name='CloseHandle';Return=[bool];Parameters=[Type[]]@([IntPtr])}
+                )) {
+                    $values=[object[]]@([Runtime.InteropServices.CharSet]::Unicode,$true,$signature.Name)
+                    $attribute=[Reflection.Emit.CustomAttributeBuilder]::new($constructor,[object[]]@('kernel32.dll'),$fields,$values)
+                    $native=$builder.DefineMethod(('Native'+$signature.Name),[Reflection.MethodAttributes]'Private,Static,PinvokeImpl',$signature.Return,$signature.Parameters)
+                    $native.SetCustomAttribute($attribute)
+                    $native.SetImplementationFlags([Reflection.MethodImplAttributes]::PreserveSig)
+                    # PowerShell's binder can invoke other APIs before a later
+                    # GetLastWin32Error call. Preserve this call's error in managed
+                    # IL before crossing that boundary, isolated per native thread.
+                    $method=$builder.DefineMethod($signature.Name,[Reflection.MethodAttributes]'Public,Static',$signature.Return,$signature.Parameters)
+                    $il=$method.GetILGenerator()
+                    for($argument=0;$argument -lt $signature.Parameters.Count;$argument++) {
+                        $il.Emit([Reflection.Emit.OpCodes]::Ldarg,[int16]$argument)
+                    }
+                    $il.Emit([Reflection.Emit.OpCodes]::Call,$native)
+                    $result=$null
+                    if($signature.Return -ne [void]) {
+                        $result=$il.DeclareLocal($signature.Return)
+                        $il.Emit([Reflection.Emit.OpCodes]::Stloc,$result)
+                    }
+                    $il.Emit([Reflection.Emit.OpCodes]::Call,$getLastError)
+                    $il.Emit([Reflection.Emit.OpCodes]::Stsfld,$lastError)
+                    if($result) { $il.Emit([Reflection.Emit.OpCodes]::Ldloc,$result) }
+                    $il.Emit([Reflection.Emit.OpCodes]::Ret)
+                }
+                $null=$builder.CreateType()
             }
-            $stage = 'create action staging directory'
+
+            function Invoke-PanelActionNative([string] $executable,[string] $entry,[string] $here) {
+                Initialize-PanelActionNative
+                $security=[Gesher.PanelActionSecurity]::new()
+                $security.Length=[Runtime.InteropServices.Marshal]::SizeOf([type][Gesher.PanelActionSecurity])
+                $security.Inherit=1
+                $inputHandle=[IntPtr]::Zero; $outputHandle=[IntPtr]::Zero; $attributes=[IntPtr]::Zero; $handles=[IntPtr]::Zero
+                $initialized=$false
+                $process=[Gesher.PanelActionProcessInfo]::new()
+                function Throw-NativeFailure {
+                    $errorCode=[Gesher.PanelActionNative]::LastError
+                    throw [ComponentModel.Win32Exception]::new($errorCode)
+                }
+                function Valid([IntPtr] $handle) { $handle -ne [IntPtr]::Zero -and $handle -ne [IntPtr]::new(-1) }
+                try {
+                    $inputHandle=[Gesher.PanelActionNative]::CreateFileW('NUL',2147483648,3,[ref]$security,3,0,[IntPtr]::Zero)
+                    if(-not (Valid $inputHandle)) { Throw-NativeFailure }
+                    $outputHandle=[Gesher.PanelActionNative]::CreateFileW('NUL',1073741824,3,[ref]$security,3,0,[IntPtr]::Zero)
+                    if(-not (Valid $outputHandle)) { Throw-NativeFailure }
+                    $size=[IntPtr]::Zero
+                    $null=[Gesher.PanelActionNative]::InitializeProcThreadAttributeList([IntPtr]::Zero,1,0,[ref]$size)
+                    if($size -eq [IntPtr]::Zero) { Throw-NativeFailure }
+                    $attributes=[Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+                    if(-not [Gesher.PanelActionNative]::InitializeProcThreadAttributeList($attributes,1,0,[ref]$size)) { Throw-NativeFailure }
+                    $initialized=$true
+                    $handles=[Runtime.InteropServices.Marshal]::AllocHGlobal(2*[IntPtr]::Size)
+                    [Runtime.InteropServices.Marshal]::WriteIntPtr($handles,0,$inputHandle)
+                    [Runtime.InteropServices.Marshal]::WriteIntPtr($handles,[IntPtr]::Size,$outputHandle)
+                    if(-not [Gesher.PanelActionNative]::UpdateProcThreadAttribute($attributes,0,[IntPtr]::new(0x20002),$handles,[IntPtr]::new(2*[IntPtr]::Size),[IntPtr]::Zero,[IntPtr]::Zero)) { Throw-NativeFailure }
+                    $startup=[Gesher.PanelActionStartup]::new()
+                    $startup.Size=[Runtime.InteropServices.Marshal]::SizeOf([type][Gesher.PanelActionExtendedStartup])
+                    $startup.Flags=0x100; $startup.Input=$inputHandle; $startup.Output=$outputHandle; $startup.Error=$outputHandle
+                    $extended=[Gesher.PanelActionExtendedStartup]::new()
+                    $extended.Startup=$startup; $extended.Attributes=$attributes
+                    $command=[Text.StringBuilder]::new('"'+$executable+'" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "'+$entry+'"')
+                    if(-not [Gesher.PanelActionNative]::CreateProcessW($executable,$command,[IntPtr]::Zero,[IntPtr]::Zero,$true,0x08080000,[IntPtr]::Zero,$here,[ref]$extended,[ref]$process)) { Throw-NativeFailure }
+                    $null=[Gesher.PanelActionNative]::CloseHandle($process.Thread); $process.Thread=[IntPtr]::Zero
+                    if([Gesher.PanelActionNative]::WaitForSingleObject($process.Process,[uint32]::MaxValue) -ne 0) { Throw-NativeFailure }
+                    $code=[uint32]0
+                    if(-not [Gesher.PanelActionNative]::GetExitCodeProcess($process.Process,[ref]$code)) { Throw-NativeFailure }
+                    return [int][BitConverter]::ToInt32([BitConverter]::GetBytes($code),0)
+                } finally {
+                    if(Valid $process.Thread) { $null=[Gesher.PanelActionNative]::CloseHandle($process.Thread) }
+                    if(Valid $process.Process) { $null=[Gesher.PanelActionNative]::CloseHandle($process.Process) }
+                    if($initialized) { [Gesher.PanelActionNative]::DeleteProcThreadAttributeList($attributes) }
+                    if($attributes -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($attributes) }
+                    if($handles -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::FreeHGlobal($handles) }
+                    if(Valid $inputHandle) { $null=[Gesher.PanelActionNative]::CloseHandle($inputHandle) }
+                    if(Valid $outputHandle) { $null=[Gesher.PanelActionNative]::CloseHandle($outputHandle) }
+                }
+            }
             $directory = Join-Path ([IO.Path]::GetTempPath()) ('gesher-panel-action-' + [guid]::NewGuid().ToString('N'))
             $null = [IO.Directory]::CreateDirectory($directory)
             $configuration = Join-Path $directory 'request.json'
@@ -1491,7 +1524,6 @@ namespace Gesher {
             try {
                 $data = @{ Body = $body; Here = $here; Operation = $operation; Request = $request
                     InstallDefinition = $installDefinition; Language = $language }
-                $stage = 'write action request'
                 [IO.File]::WriteAllText($configuration, ($data | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($true))
                 $hostScript = @'
 $ErrorActionPreference = 'Stop'
@@ -1505,24 +1537,16 @@ try {
     exit 1
 }
 '@
-                $stage = 'write action entry point'
                 [IO.File]::WriteAllText($entry, $hostScript, [Text.UTF8Encoding]::new($true))
                 $executable = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell/v1.0/powershell.exe'
-                $stage = 'run native action host'
-                $exitCode = [Gesher.PanelActionHost]::Run($executable, $entry, $here)
+                $exitCode = (Invoke-PanelActionNative $executable $entry $here)
                 if (-not [IO.File]::Exists($resultPath)) { throw "Dashboard operation exited without a result (exit code $exitCode)." }
-                $stage = 'read action result'
                 [IO.File]::ReadAllText($resultPath) | ConvertFrom-Json
             } finally {
                 # Only this owner's three known files and empty directory are
                 # removed, after its native process has exited. No recursive delete.
                 foreach ($path in $entry, $configuration, $resultPath) { [IO.File]::Delete($path) }
                 [IO.Directory]::Delete($directory, $false)
-            }
-            } catch {
-                $detail = $_.Exception.GetBaseException().ToString()
-                if ($detail.Length -gt 4096) { $detail = $detail.Substring(0, 4096) }
-                throw "Dashboard action failed at $stage`: $detail"
             }
         }
         $null = $powerShell.AddScript($owner.ToString()).AddArgument($work.ToString()).AddArgument($here).AddArgument($operation).

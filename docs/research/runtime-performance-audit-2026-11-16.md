@@ -199,9 +199,16 @@ waits are bounded. A noncancellable commit defers closing with a visible message
 instead of terminating installation. One background owner waits for a hidden
 PowerShell ConsoleHost using structured request/result files and only whitelisted
 NUL standard handles. This preserves real native stderr/exit behavior without
-reader threads, accumulated logs or output buffers. The 64-check Windows fixture
-uses actual WPF dispatchers/processes, Unicode/literal arguments, failed process
-start, abrupt exit, 64 MiB discarded output and warmed handle-count equality.
+reader threads, accumulated logs or output buffers. Native declarations are
+emitted in memory, avoiding the runtime compiler's ANSI-dependent temporary
+paths. Small managed wrappers preserve the native error immediately in a
+thread-local field before PowerShell binding can overwrite it. Child helpers
+reuse the selected display language without changing Android application locales.
+The 84-check Windows fixture passes on x64 and x86 and uses actual WPF
+dispatchers/processes, Unicode/literal arguments and temporary paths outside the
+ANSI code page, failed process start, abrupt exit, 64 MiB discarded output and
+exact warmed handle-count equality. A deliberately retained NUL handle proves
+the census detects a leak before explicit cleanup restores its baseline.
 A 450 ms helper leaves the dispatcher running (55+ observed ticks including
 host startup), while action submission takes about 20 ms on the local machine.
 These timings describe the fixture; they are not an installation speedup. A

@@ -12,6 +12,21 @@ foreach ($name in 'Set-Busy','Complete-DashboardAction','Install-PanelApk','New-
         $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
     }, $false))
     if ($definition.Count -ne 1) { throw "Expected one production function: $name" }
+    $functionSource = $definition[0].Extent.Text
+    if ($name -eq 'New-PanelActionWorker') {
+        # Reject compiler invocation in the real owner and child paths. The
+        # surrounding UI/IPC/native process code is the production implementation.
+        $functionSource = $functionSource.Replace("`$ErrorActionPreference = 'Stop'", "`$ErrorActionPreference = 'Stop'`nfunction Add-Type { throw 'Action helper unexpectedly invoked a compiler' }")
+    }
+    . ([scriptblock]::Create($functionSource))
+}
+# The native functions are nested inside the production owner. Extract them
+# unchanged for ABI inspection and a direct, warmed native failure census.
+foreach ($name in 'Initialize-PanelActionNative', 'Invoke-PanelActionNative') {
+    $definition = @($ast.FindAll({ param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
+    }, $true))
+    if ($definition.Count -ne 1) { throw "Expected one production native function: $name" }
     . ([scriptblock]::Create($definition[0].Extent.Text))
 }
 $script:Checks = 0
@@ -68,10 +83,10 @@ function Drain-Action {
 $scratchRoot = [IO.Path]::GetFullPath((Join-Path $repo 'out')) + [IO.Path]::DirectorySeparatorChar
 # Exercise native process/script quoting independently of the request's paths.
 # Codepoints preserve real Unicode under Windows PowerShell's source decoding.
-$here = Join-Path $scratchRoot ('panel-actions- space & '' ' + [char]0x05e9 + [char]0x05dc + [char]0x05d5 + [char]0x05dd + '-' + [guid]::NewGuid().ToString('N'))
+$here = Join-Path $scratchRoot ('panel-actions- space & '' ' + [char]0x05e9 + [char]0x05dc + [char]0x05d5 + [char]0x05dd + [char]0x4e2d + '-' + [guid]::NewGuid().ToString('N'))
 $null = [IO.Directory]::CreateDirectory($here)
 $savedEnvironment = @{}
-foreach ($name in 'TMP','TEMP','GESHER_LAUNCH_ERROR_FILE') {
+foreach ($name in 'TMP','TEMP','GESHER_LAUNCH_ERROR_FILE','GESHER_LOCALES','GESHER_PANEL_UI_LANGUAGE') {
     $savedEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 $script:UiThread = [Threading.Thread]::CurrentThread.ManagedThreadId
@@ -84,6 +99,10 @@ $btnReopenPanel = [Windows.Controls.Button]::new()
 $servicesCards = [Windows.Controls.StackPanel]::new()
 $applicationsSection = [Windows.Controls.GroupBox]::new()
 try {
+    # The real panel loads its UI helper before starting an action. Warm that
+    # parent-only language reader before varying TEMP beyond the ANSI code page;
+    # the fresh child must use its selected language without compiling anything.
+    . (Join-Path $repo 'tools/package/gesher-ui.ps1')
     $env:TEMP = $here; $env:TMP = $here
     Copy-Item -LiteralPath (Join-Path $repo 'tools/package/ui-messages.json') -Destination $here
     $ui = [IO.File]::ReadAllText((Join-Path $repo 'tools/package/gesher-ui.ps1'))
@@ -107,8 +126,9 @@ function Invoke-WebRequest {
     $script:GesherUiLanguage = 'en'
     $app = @'
 param([Parameter(ValueFromRemainingArguments=$true)][string[]] $Parts)
+. (Join-Path $PSScriptRoot 'gesher-ui.ps1')
 $cfg = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'fixture.json') -Raw | ConvertFrom-Json
-$call = [PSCustomObject]@{ Parts = @($Parts); Process = $PID; Thread = [Threading.Thread]::CurrentThread.ManagedThreadId; Carrier = $env:GESHER_LAUNCH_ERROR_FILE }
+$call = [PSCustomObject]@{ Parts = @($Parts); Process = $PID; Thread = [Threading.Thread]::CurrentThread.ManagedThreadId; Carrier = $env:GESHER_LAUNCH_ERROR_FILE; UiLanguage = $script:GesherUiLanguage; AndroidLocales = $env:GESHER_LOCALES; PanelLanguage = $env:GESHER_PANEL_UI_LANGUAGE }
 Add-Content -LiteralPath (Join-Path $PSScriptRoot 'calls.log') -Value ($call | ConvertTo-Json -Compress) -Encoding UTF8
 Write-Output 'discarded helper output'
 Write-Host 'discarded helper information'
@@ -161,6 +181,61 @@ exit $cfg.MicrogExit
     Assert-Action ($calls.Count -eq 1 -and $calls[0].Parts[0] -eq 'start' -and $calls[0].Process -ne $PID) 'Device command did not run in its isolated host, or overlapping action ran'
     Write-Host "Panel async measurement: start_ms=$($watch.ElapsedMilliseconds) dispatcher_ticks=$script:PumpTicks helper_delay_ms=450"
 
+    $wide = [IntPtr]::Size -eq 8
+    $layouts = @(
+        @{ Type = [Gesher.PanelActionSecurity]; Size = $(if ($wide) { 24 } else { 12 }); Offsets = @{ Descriptor = $(if ($wide) { 8 } else { 4 }); Inherit = $(if ($wide) { 16 } else { 8 }) } },
+        @{ Type = [Gesher.PanelActionStartup]; Size = $(if ($wide) { 104 } else { 68 }); Offsets = @{ ReservedBytes = $(if ($wide) { 72 } else { 52 }); Input = $(if ($wide) { 80 } else { 56 }); Error = $(if ($wide) { 96 } else { 64 }) } },
+        @{ Type = [Gesher.PanelActionExtendedStartup]; Size = $(if ($wide) { 112 } else { 72 }); Offsets = @{ Attributes = $(if ($wide) { 104 } else { 68 }) } },
+        @{ Type = [Gesher.PanelActionProcessInfo]; Size = $(if ($wide) { 24 } else { 16 }); Offsets = @{ Thread = [IntPtr]::Size; ProcessId = $(if ($wide) { 16 } else { 8 }); ThreadId = $(if ($wide) { 20 } else { 12 }) } }
+    )
+    foreach ($layout in $layouts) {
+        $valid = [Runtime.InteropServices.Marshal]::SizeOf([type]$layout.Type) -eq $layout.Size
+        foreach ($field in $layout.Offsets.Keys) {
+            $valid = $valid -and [Runtime.InteropServices.Marshal]::OffsetOf([type]$layout.Type, $field).ToInt32() -eq $layout.Offsets[$field]
+        }
+        Assert-Action $valid "Native structure layout does not match Win32: $($layout.Type.FullName)"
+    }
+    $valid = $true
+    foreach ($name in 'CreateFileW','InitializeProcThreadAttributeList','UpdateProcThreadAttribute','DeleteProcThreadAttributeList','CreateProcessW','WaitForSingleObject','GetExitCodeProcess','CloseHandle') {
+        $method = [Gesher.PanelActionNative].GetMethod($name)
+        $native = [Gesher.PanelActionNative].GetMethod(('Native' + $name), [Reflection.BindingFlags]'NonPublic,Static')
+        $attribute = $native.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false)[0]
+        $valid = $valid -and $attribute.SetLastError -and $attribute.CharSet -eq [Runtime.InteropServices.CharSet]::Unicode -and
+            $attribute.CallingConvention -eq [Runtime.InteropServices.CallingConvention]::Winapi -and $attribute.EntryPoint -ceq $name -and
+            $method.ReturnType -eq $native.ReturnType -and $method.GetCustomAttributes([Runtime.InteropServices.DllImportAttribute], $false).Count -eq 0
+    }
+    Assert-Action $valid 'Emitted native imports lost Unicode, Winapi calling convention or last-error preservation'
+    $errorField = [Gesher.PanelActionNative].GetField('LastError')
+    Assert-Action ($errorField.IsStatic -and $errorField.FieldType -eq [int] -and $errorField.GetCustomAttributes([ThreadStaticAttribute], $false).Count -eq 1) 'Saved native error is not isolated per native thread'
+    $probeRunspace = [Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $probe = [PowerShell]::Create()
+    try {
+        $probeRunspace.ThreadOptions = [Management.Automation.Runspaces.PSThreadOptions]::ReuseThread
+        $probeRunspace.Open(); $probe.Runspace = $probeRunspace
+        [Gesher.PanelActionNative]::LastError = 12345
+        $null = $probe.AddScript(@'
+$initial = [Gesher.PanelActionNative]::LastError
+$code = [uint32]0
+$ok = [Gesher.PanelActionNative]::GetExitCodeProcess([IntPtr]::Zero, [ref]$code)
+[PSCustomObject]@{ Initial = $initial; Ok = $ok; Error = [Gesher.PanelActionNative]::LastError; Thread = [Threading.Thread]::CurrentThread.ManagedThreadId }
+'@)
+        $result = @($probe.Invoke())
+        Assert-Action ($result.Count -eq 1 -and $result[0].Initial -eq 0 -and -not $result[0].Ok -and $result[0].Error -eq 6 -and
+            $result[0].Thread -ne $script:UiThread -and [Gesher.PanelActionNative]::LastError -eq 12345) 'Native error wrapper lost ERROR_INVALID_HANDLE or overwrote another thread error'
+    } finally { $probe.Dispose(); $probeRunspace.Dispose() }
+
+    foreach ($language in 'he', 'en') {
+        Reset-Action
+        $env:GESHER_LOCALES = 'fr-FR,en-US'
+        $script:GesherUiLanguage = $language
+        [void](Start-PanelAction 'Device' @{ Command = 'start' }); Drain-Action
+        $calls = Read-ActionCalls
+        Assert-Action ($script:Messages.Count -eq 0 -and $calls[0].UiLanguage -eq $language -and $calls[0].PanelLanguage -eq $language) 'Child did not reuse the chosen display language without compiling'
+        Assert-Action ($calls[0].AndroidLocales -ceq 'fr-FR,en-US' -and $env:GESHER_LOCALES -ceq 'fr-FR,en-US') 'Display-language reuse changed Android application locales'
+        Assert-Action ([Environment]::GetEnvironmentVariable('GESHER_PANEL_UI_LANGUAGE','Process') -ceq $savedEnvironment['GESHER_PANEL_UI_LANGUAGE']) 'Child display-language override leaked into parent environment'
+    }
+    $script:GesherUiLanguage = 'en'
+
     Reset-Action
     $literal = Join-Path $here "שלום [x] '{1};`$data.apk"
     $outer = Join-Path $here 'outer-error.txt'
@@ -206,18 +281,52 @@ exit $cfg.MicrogExit
 
     $process = [Diagnostics.Process]::GetCurrentProcess()
     try {
-        # Isolate native host cleanup from one-time runspace/type initialization.
-        try { [void][Gesher.PanelActionHost]::Run((Join-Path $here 'missing.exe'), 'unused.ps1', $here) }
-        catch { }
-        $null = $process.Handle
-        $process.Refresh(); $handlesBefore = $process.HandleCount
-        for ($attempt = 0; $attempt -lt 32; $attempt++) {
-            try { [void][Gesher.PanelActionHost]::Run((Join-Path $here 'missing.exe'), 'unused.ps1', $here) }
-            catch { }
+        # Isolate native cleanup from reflection, PowerShell binding and process
+        # census initialization. Require real Win32 errors rather than swallowing
+        # missing-method/type errors that could make this check ineffective.
+        function Invoke-FailedNativeStart {
+            try { [void](Invoke-PanelActionNative (Join-Path $here 'missing.exe') 'unused.ps1' $here) }
+            catch {
+                $failure = $_.Exception.GetBaseException()
+                if ($failure -is [ComponentModel.Win32Exception] -and $failure.NativeErrorCode -eq 2) { $script:NativeFailureCount++; return }
+                throw
+            }
+            throw 'Missing native executable unexpectedly started'
         }
+        $script:NativeFailureCount = 0
+        for ($attempt = 0; $attempt -lt 32; $attempt++) { Invoke-FailedNativeStart }
+        $null = $process.Handle
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+        $process.Refresh(); $handlesBefore = $process.HandleCount
+        $script:NativeFailureCount = 0
+        for ($attempt = 0; $attempt -lt 32; $attempt++) { Invoke-FailedNativeStart }
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
         $process.Refresh()
         Write-Host "Panel failed-start handles: before=$handlesBefore after=$($process.HandleCount) attempts=32"
-        Assert-Action ($process.HandleCount -le $handlesBefore) 'Native failed-start attempts leaked inherited handles or process attributes'
+        Assert-Action ($script:NativeFailureCount -eq 32) 'Native census did not exercise 32 real ERROR_FILE_NOT_FOUND failures'
+        Assert-Action ($process.HandleCount -eq $handlesBefore) 'Native failed-start attempts changed the warmed native handle balance'
+
+        # Demonstrate that the exact census rejects an owned handle leak, then
+        # restore ownership before continuing the remaining action contracts.
+        $security = [Gesher.PanelActionSecurity]::new()
+        $security.Length = [Runtime.InteropServices.Marshal]::SizeOf([type][Gesher.PanelActionSecurity])
+        function Open-NulForCensus { [Gesher.PanelActionNative]::CreateFileW('NUL',1073741824,3,[ref]$security,3,0,[IntPtr]::Zero) }
+        $warmHandle = Open-NulForCensus
+        [void][Gesher.PanelActionNative]::CloseHandle($warmHandle)
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+        $process.Refresh(); $negativeBaseline = $process.HandleCount
+        $leaked = Open-NulForCensus
+        try {
+            Assert-Action ($leaked -ne [IntPtr]::Zero -and $leaked -ne [IntPtr]::new(-1)) 'Could not create the handle-census negative control'
+            $process.Refresh()
+            Write-Host "Panel handle negative control: before=$negativeBaseline retained=$($process.HandleCount)"
+            Assert-Action ($process.HandleCount -eq $negativeBaseline + 1) 'Handle census failed to detect one deliberately retained NUL handle'
+        } finally { $closed = [Gesher.PanelActionNative]::CloseHandle($leaked) }
+        Assert-Action $closed 'Could not release the handle-census negative control'
+        [GC]::Collect(); [GC]::WaitForPendingFinalizers(); [GC]::Collect()
+        $process.Refresh()
+        Write-Host "Panel handle negative cleanup: after=$($process.HandleCount)"
+        Assert-Action ($process.HandleCount -eq $negativeBaseline) 'Handle negative-control cleanup did not restore ownership balance'
     } finally { $process.Dispose() }
 
     foreach ($enable in $true, $false) {
