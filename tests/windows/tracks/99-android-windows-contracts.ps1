@@ -1,5 +1,14 @@
 # Runtime contracts added by the November 14 Android/Windows audit.
 # Track 50 supplies bounded RunTimed; track 94 supplies the framework boot path.
+# Exercise synthetic Hebrew/English permission dialogs on a never-shown desktop.
+# This is the production dialog implementation, with denial/keyboard/scroll checks.
+$permissionDialogOut = RunTimed "$Dir/permission_dialog_test.exe" @() 60
+$permissionDialogCode = $LASTEXITCODE
+Check 'services: native permission dialog explicit consent and Hebrew/English controls' {
+  $global:LASTEXITCODE = $permissionDialogCode
+  $permissionDialogOut
+} @('permission_dialog_test:', ' checks, 0 failures')
+
 foreach ($serviceFixture in @('RunningTaskSnapshotTest', 'TextServicesContractTest', 'MediaRouterContractTest')) {
   $serviceContractOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' + $serviceFixture) 90
   $serviceContractCode = $LASTEXITCODE

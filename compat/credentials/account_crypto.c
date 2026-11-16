@@ -109,6 +109,8 @@ Java_com_gesher_server_AccountSecretStore_nativeUnprotect(JNIEnv* env, jclass cl
   (void)cls; return Crypt(env, input, FALSE);
 }
 
+#include "permission_dialog.inc"
+
 JNIEXPORT jboolean GESHER_NATIVE
 Java_com_gesher_server_PermissionRequests_nativeConfirm(JNIEnv* env, jclass cls,
                                                        jstring label, jstring permissions) {
@@ -119,24 +121,16 @@ Java_com_gesher_server_PermissionRequests_nativeConfirm(JNIEnv* env, jclass cls,
   jsize pn = (*env)->GetStringLength(env, permissions);
   if (ln > 1024 || pn > 8192) return JNI_FALSE;
   enum GesherUiLanguage lang = GesherUiCurrentLanguage();
-  const WCHAR* prefix = GesherUiText(lang, "permission_prefix");
-  const WCHAR* middle = GesherUiText(lang, "permission_middle");
-  SIZE_T length = (SIZE_T)ln + (SIZE_T)pn + wcslen(prefix) + wcslen(middle) + 5;
+  SIZE_T length = (SIZE_T)ln + (SIZE_T)pn + 2;
   WCHAR* text = (WCHAR*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, length * sizeof(WCHAR));
   if (text == NULL) return JNI_FALSE;
-  SIZE_T at = 0;
-  for (SIZE_T i = 0; prefix[i]; ++i) text[at++] = prefix[i];
-  text[at++] = 0x2068;  // Isolate mixed-direction app identifiers from the sentence.
-  (*env)->GetStringRegion(env, label, 0, ln, (jchar*)(text + at)); at += (SIZE_T)ln;
-  text[at++] = 0x2069;
-  for (SIZE_T i = 0; middle[i]; ++i) text[at++] = middle[i];
-  (*env)->GetStringRegion(env, permissions, 0, pn, (jchar*)(text + at));
+  WCHAR* permission_text = text + ln + 1;
+  (*env)->GetStringRegion(env, label, 0, ln, (jchar*)text);
+  (*env)->GetStringRegion(env, permissions, 0, pn, (jchar*)permission_text);
   if ((*env)->ExceptionCheck(env)) { HeapFree(GetProcessHeap(), 0, text); return JNI_FALSE; }
-  int choice = MessageBoxW(NULL, text, GesherUiText(lang, "permission_title"),
-                          MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2 | MB_SETFOREGROUND
-                          | (GesherUiRtl(lang) ? MB_RTLREADING | MB_RIGHT : 0));
+  BOOL allowed = PermissionDialog(lang, text, permission_text);
   HeapFree(GetProcessHeap(), 0, text);
-  return choice == IDYES ? JNI_TRUE : JNI_FALSE;
+  return allowed ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jboolean GESHER_NATIVE

@@ -139,9 +139,11 @@ final class PermissionRequests {
                 try { label = Resources.getSystem().getText(info.labelRes); }
                 catch (Resources.NotFoundException ignored) { }
             }
-            if (text.length() != 0) text.append('\n');
-            if (label != null) text.append(label).append(" (").append(name).append(")");
-            else text.append(name);
+            if (text.length() != 0) text.append("\r\n");
+            // The native host dialog uses GDI: use LRE/PDF rather than FSI/PDI.
+            // Keep the technical identifier and its parentheses LTR inside RTL labels.
+            if (label != null) text.append(label).append(" \u202a(").append(name).append(")\u202c");
+            else text.append('\u202a').append(name).append('\u202c');
         }
         return text.toString();
     }

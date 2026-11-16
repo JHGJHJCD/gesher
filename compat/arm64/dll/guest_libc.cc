@@ -70,6 +70,17 @@ struct GuestThreadStart {
   uint32_t fpcr;
   uint32_t fpsr;
 };
+// fork()/vfork() fail with EAGAIN in guest code. The shim's fork is
+// vfork-style (ADR 0055): the child runs on, and the second return goes back
+// to the host frame that called fork, but the guest's registers are then
+// the child's, not the parent's. A failure Linux also gives (RLIMIT_NPROC)
+// is safer. Ijiami's anti-debug check forks a child that sends itself
+// SIGABRT; run in this process, that killed the app (ADR 0086).
+int GESHER_SYSV GuestFork() {
+  SetErrno(11);  // EAGAIN
+  return -1;
+}
+
 void* GESHER_SYSV StartGuestThread(void* opaque) {
   std::unique_ptr<GuestThreadStart> start(static_cast<GuestThreadStart*>(opaque));
   GuestThreadStart captured = *start;
@@ -724,6 +735,8 @@ void InitGuestLibc() {
   g_open = Host("open");
   g_openat = Host("openat");
   g_fcntl = Host("fcntl");
+  for (const char* n : {"fork", "vfork"}) Override(n, reinterpret_cast<void*>(&GuestFork));
+
   g_spawn_addopen = Host("posix_spawn_file_actions_addopen");
   if (g_open) {
     for (const char* n : {"open", "open64", "__open_2"}) Override(n, reinterpret_cast<void*>(&GuestOpen));

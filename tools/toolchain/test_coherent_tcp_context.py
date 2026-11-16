@@ -55,6 +55,20 @@ def main():
   try:c.context(e,job,foreign,parents)
   except AssertionError:count+=1
   else:raise AssertionError('foreign PR supplier authority accepted')
+  fork=copy.deepcopy(event)
+  fork['pull_request']['head']['repo']=dict(id=1459959585,full_name='ztcebuck/gesher')
+  contributor=dict(e,GITHUB_ACTOR='ztcebuck',GITHUB_TRIGGERING_ACTOR='palmoni5')
+  assert c.context(contributor,job,fork,parents)['GITHUB_SHA']==source
+  for key in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR'):
+   bad=dict(contributor);bad[key]=''
+   try:c.context(bad,job,fork,parents)
+   except AssertionError:count+=1
+   else:raise AssertionError('missing contributor identity accepted')
+  for key in ('base','head'):
+   bad=copy.deepcopy(fork);bad['pull_request'][key]['sha']='f'*40
+   try:c.context(contributor,job,bad,parents)
+   except AssertionError:count+=1
+   else:raise AssertionError('different fork merge parents accepted')
  print('COHERENT_TCP_CONTEXT_PURE_PASS roles=4 arbitrary_actor_pairs=2 events=3 negatives='+str(count)+' actual_authority=false')
 
 if __name__=='__main__':main()

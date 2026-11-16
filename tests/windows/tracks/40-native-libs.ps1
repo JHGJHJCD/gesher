@@ -118,6 +118,15 @@ Check 'native libs: memfd final-page bytes survive remapping without extending t
   & "$Dir/elf_load_test.exe" (NoDrive "$Dir/memfd_tail_test.so")
 } @('memfd_tail: all passed', 'elf_load_test all passed')
 
+# ADR 0086: a packer's shell (Ijiami) finds libart.so in /proc/self/maps and
+# hooks ClassLinker::LoadClass by its symbol. art_hook_test.so does what the
+# shell does to Gesher's stand-in libart.so, then ART's call reaches the hook.
+Check 'native libs: a stand-in libart.so a packer finds in /proc/self/maps and hooks by symbol' {
+  & "$Dir/art_shim_test.exe" (NoDrive "$Dir/art_hook_test.so") (NoDrive (Join-Path ([IO.Path]::GetTempPath()) 'gesher-art-shim-test'))
+} @('PASS  /proc/self/maps names the stand-in at its base',
+    'PASS  LoadClass through DT_GNU_HASH', 'PASS  LoadClass through the file''s .symtab',
+    'PASS  the hook reads ClassDef::class_data_off_ at 0x18', 'art_shim_test all passed')
+
 Check 'bionic shim: ftruncate rights, cursor and same-size final-page invalidation' {
   & "$Dir/bionic_ftruncate_test.exe"
 } @('bionic_ftruncate_test all passed')

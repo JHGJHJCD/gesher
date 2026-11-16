@@ -45,6 +45,11 @@
       "en": "Gesher permission request",
       "he": "גשר — בקשת הרשאה"
     },
+    "permission_heading": {"en": "Allow app access?", "he": "לאפשר גישה ליישום?"},
+    "permission_app": {"en": "Android application", "he": "יישום Android"},
+    "permission_requested": {"en": "This app is requesting the following permissions:", "he": "היישום מבקש את ההרשאות הבאות:"},
+    "permission_allow": {"en": "Allow", "he": "לאפשר"},
+    "permission_deny": {"en": "Don't allow", "he": "לא לאפשר"},
     "permission_prefix": {
       "en": "Allow the Android application ",
       "he": "לאפשר ליישום Android ‏"
@@ -124,6 +129,10 @@
     "install_bad_split_signature": {
       "en": "The parts of ⁨{0}⁩ are not all signed with the same key.",
       "he": "חלקי היישום ⁨{0}⁩ אינם חתומים כולם באותו מפתח."
+    },
+    "install_missing_split": {
+      "en": "The application ⁨{0}⁩ is a base split APK and requires companion split APKs (such as ABI or density splits) to be installed.\n\nInstall the full bundle (.xapk or .apks), or place its split APKs (split_*.apk / config.*.apk) in the same folder.",
+      "he": "היישום ⁨{0}⁩ הוא קובץ בסיס חלקי (Split APK) שדורש גם את חלקי ההתקנה הנלווים (כגון ספריות מעבד או משאבי מסך).\n\nיש להתקין את החבילה המלאה (.xapk או .apks), או להציב את קובצי החלקים הנלווים (split_*.apk / config.*.apk) באותה תיקייה."
     },
     "uninstalled": {
       "en": "uninstalled {0}",

@@ -22,10 +22,20 @@ jobs:
         with:
           sparse-checkout: |
             tools/boot-image
+            tools/process_memory.py
+            tools/test_process_memory.py
+            tests/windows/shell/BootImageFormatChecks.ps1
             tools/ci
             tools/surface
             tools/symbolize.py
             aosp.lock
+
+      - name: Memory measurement and image format contracts
+        shell: pwsh
+        run: |
+          python tools/test_process_memory.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & tests/windows/shell/BootImageFormatChecks.ps1
 
       - name: Strict current windows-x64 artifact
         env:
