@@ -1,5 +1,6 @@
 // The production graph walk with observing symbol tables. Real ELF parsing,
 // relocations and Android guest calls are exercised by lookup_graph.c in CI.
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <map>

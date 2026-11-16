@@ -141,6 +141,8 @@ public final class UiMessages {
             case "cp_app_info_close": value = lang.equals("he") ? "\u05e1\u05d2\u05d9\u05e8\u05d4" : "Close"; break;
             case "cp_uninstall_failed": value = lang.equals("he") ? "\u05d4\u05e1\u05e8\u05ea {0} \u05e0\u05db\u05e9\u05dc\u05d4." : "Failed to uninstall {0}."; break;
             case "cp_install_failed": value = lang.equals("he") ? "\u05d4\u05ea\u05e7\u05e0\u05ea {0} \u05e0\u05db\u05e9\u05dc\u05d4." : "Failed to install {0}."; break;
+            case "cp_action_failed": value = lang.equals("he") ? "\u05d4\u05e4\u05e2\u05d5\u05dc\u05d4 \u05e0\u05db\u05e9\u05dc\u05d4 (\u05e7\u05d5\u05d3 \u05d9\u05e6\u05d9\u05d0\u05d4 {0})." : "The operation failed (exit code {0})."; break;
+            case "cp_action_finish": value = lang.equals("he") ? "\u05d9\u05e9 \u05dc\u05d4\u05de\u05ea\u05d9\u05df \u05dc\u05e1\u05d9\u05d5\u05dd \u05d4\u05e4\u05e2\u05d5\u05dc\u05d4 \u05d4\u05e0\u05d5\u05db\u05d7\u05d9\u05ea \u05dc\u05e4\u05e0\u05d9 \u05d4\u05e1\u05d2\u05d9\u05e8\u05d4." : "Wait for the current operation to finish before closing."; break;
             case "cp_dialog_ok": value = lang.equals("he") ? "\u05d0\u05d9\u05e9\u05d5\u05e8" : "OK"; break;
             case "cp_status_ready": value = lang.equals("he") ? "\u05de\u05d5\u05db\u05df" : "Ready"; break;
             case "cp_status_working": value = lang.equals("he") ? "\u05de\u05e2\u05d1\u05d3, \u05e0\u05d0 \u05dc\u05d4\u05de\u05ea\u05d9\u05df\u2026" : "Working, please wait\u2026"; break;

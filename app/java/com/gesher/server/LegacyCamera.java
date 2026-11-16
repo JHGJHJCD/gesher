@@ -11,6 +11,7 @@ import android.view.Surface;
 
 import java.lang.reflect.Method;
 import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -355,12 +356,19 @@ public final class LegacyCamera {
     private static void previewLoop(Session s, WindowsCamera.Capture capture, Size size) {
         byte[] nv12 = new byte[capture.width * capture.height * 3 / 2];
         boolean surfaceFailed = false;
-        while (s.previewing) {
+        while (true) {
+            synchronized (s) {
+                if (!s.previewing || s.capture != capture) break;
+            }
             int hr = capture.read(nv12);
-            if (!s.previewing) break;
+            synchronized (s) {
+                // A blocked read can outlive stop's bounded join and a restart.
+                // Its old capture must not publish into the replacement preview.
+                if (!s.previewing || s.capture != capture) break;
+                if (hr != 0) post(s, MSG_ERROR, 1 /* CAMERA_ERROR_UNKNOWN */, 0, null);
+            }
             if (hr != 0) {
                 log(String.format("reading a frame: 0x%08x", hr));
-                post(s, MSG_ERROR, 1 /* CAMERA_ERROR_UNKNOWN */, 0, null);
                 break;
             }
             int w = size.getWidth();
@@ -369,6 +377,7 @@ public final class LegacyCamera {
             boolean callback;
             boolean manual;
             synchronized (s) {
+                if (!s.previewing || s.capture != capture) break;
                 surface = s.previewSurface;
                 callback = s.callback;
                 manual = s.manualBuffers;
@@ -381,36 +390,57 @@ public final class LegacyCamera {
                     log("the preview surface takes no frames (no native window)");
                 }
             }
+            synchronized (s) {
+                // Native surface delivery can also outlive the bounded stop join.
+                if (!s.previewing || s.capture != capture) break;
+            }
             if (callback) {
-                byte[] frame = frame(s, nv12, capture.width, capture.height, w, h);
-                if (manual) {
-                    byte[] buffer;
+                byte[] frame = frame(s, nv12, capture.width, capture.height, w, h, manual, capture);
+                if (frame != null) {
                     synchronized (s) {
-                        buffer = s.buffers.poll();
+                        if (!s.previewing || s.capture != capture) break;
+                        // Camera.postEventFromNative only enqueues a Handler message;
+                        // keep admission atomic with stop/restart, never conversion.
+                        post(s, MSG_PREVIEW_FRAME, 0, 0, frame);
                     }
-                    if (buffer == null || buffer.length < frame.length) continue;  // dropped
-                    System.arraycopy(frame, 0, buffer, 0, frame.length);
-                    frame = buffer;
                 }
-                post(s, MSG_PREVIEW_FRAME, 0, 0, frame);
             }
         }
     }
 
     /** A preview frame in the preview format: NV21 (yuv420sp) or YV12 (yuv420p). */
-    private static byte[] frame(Session s, byte[] nv12, int cw, int ch, int w, int h) {
-        byte[] nv21 = CameraFrames.nv21(nv12, cw, ch, w, h);
+    private static byte[] frame(Session s, byte[] nv12, int cw, int ch, int w, int h,
+            boolean manual, WindowsCamera.Capture capture) {
         String format;
+        byte[] buffer;
         synchronized (s) {
+            // Recheck while reserving a buffer, including a restart immediately
+            // after the post-delivery check above.
+            if (!s.previewing || s.capture != capture) return null;
             format = s.params.get("preview-format");
+            buffer = manual ? s.buffers.poll() : null;
         }
-        if (!"yuv420p".equals(format)) return nv21;
         // YV12: Y (stride aligned to 16), then V, then U (strides aligned to 16).
         int yStride = (w + 15) / 16 * 16;
         int cStride = (yStride / 2 + 15) / 16 * 16;
         int ch2 = h / 2;
-        byte[] out = new byte[yStride * h + 2 * cStride * ch2];
-        for (int y = 0; y < h; y++) System.arraycopy(nv21, y * w, out, y * yStride, w);
+        boolean planar = "yuv420p".equals(format);
+        int required = planar ? yStride * h + 2 * cStride * ch2 : w * h * 3 / 2;
+        // An absent/undersized caller buffer drops the frame, including conversion.
+        // Surface delivery above remains independent of callback-buffer availability.
+        if (manual && (buffer == null || buffer.length < required)) return null;
+        byte[] nv21 = CameraFrames.nv21(nv12, cw, ch, w, h);
+        if (!planar) {
+            if (!manual) return nv21;
+            System.arraycopy(nv21, 0, buffer, 0, required);
+            return buffer;
+        }
+        byte[] out = manual ? buffer : new byte[required];
+        // Clear only padding in a reused buffer, preserving bytes beyond the frame.
+        for (int y = 0; y < h; y++) {
+            System.arraycopy(nv21, y * w, out, y * yStride, w);
+            if (manual) Arrays.fill(out, y * yStride + w, (y + 1) * yStride, (byte) 0);
+        }
         int vAt = yStride * h;
         int uAt = vAt + cStride * ch2;
         for (int y = 0; y < ch2; y++) {
@@ -418,6 +448,10 @@ public final class LegacyCamera {
                 int at = w * h + y * w + x * 2;
                 out[vAt + y * cStride + x] = nv21[at];
                 out[uAt + y * cStride + x] = nv21[at + 1];
+            }
+            if (manual) {
+                Arrays.fill(out, vAt + y * cStride + w / 2, vAt + (y + 1) * cStride, (byte) 0);
+                Arrays.fill(out, uAt + y * cStride + w / 2, uAt + (y + 1) * cStride, (byte) 0);
             }
         }
         return out;

@@ -15,6 +15,13 @@ FD_SHA256='7e2fed5465160602f7f01f29c5d93c4d3d04ec6c9139eaf5e54e205317305d4d'
 # published checkpoint independently; all other socket bytes and supplier
 # inputs remain exact. Use the published commit, not local recovery history.
 SOCKET_BASE='d5ad9aa318583ae3c3cca2d062ee964680e99e32'
+# Independently reviewed bounded Poll scratch, with no descriptor/completion
+# transport changes. Pin the published checkpoint and full bytes; additionally
+# keep every byte outside the exact native-Poll region at the original epoch.
+# tools/test_native_poll_allocations.py covers reentry, retirement, UDP retry,
+# pending flags, wake sockets, bounded retention and thread-exit destruction.
+WINSOCK_BASE='eb652ece90f327622d1971867ab1730ae71ea786'
+WINSOCK_SHA256='190b659777f3df317e4dc90f9df322a95bd2c840ea00ad2976f9dbf56935b02d'
 # The reviewed file repairs change only statvfs/fstatvfs volume queries,
 # sched_getaffinity capacity validation, posix_fallocate, its limits header and
 # memfd_create, the virtual-descriptor writev route and fcntl argument selection.
@@ -118,10 +125,19 @@ def check():
  for path in paths:
   epoch=(FD_BASE if path=='compat/posix/src/fd.cc' else
          SOCKET_BASE if path=='compat/posix/src/socket.cc' else
+         WINSOCK_BASE if path=='compat/posix/src/winsock.cc' else
          CONTROL_BASE if path=='tools/windows4/test-tsf-job-supervisor.ps1' else BASE)
   expected=subprocess.check_output(['git','-C',str(ROOT),'show',epoch+':'+path])
   actual=(ROOT/path).read_bytes()
-  if path=='compat/posix/src/fd.cc':
+  if path=='compat/posix/src/winsock.cc':
+   assert actual==expected and hashlib.sha256(actual).hexdigest()==WINSOCK_SHA256,path
+   original=old(path)
+   start=b"namespace {\n// Winsock's WSAPOLLFD"
+   end=b'// --- names --------------------------------------------------------------------'
+   assert expected.count(start)==original.count(start)==1 and expected.count(end)==original.count(end)==1,path
+   assert expected[:expected.index(start)]==original[:original.index(start)],path
+   assert expected[expected.index(end):]==original[original.index(end):],path
+  elif path=='compat/posix/src/fd.cc':
    assert actual.count(FD_DEVICE_LOOKUP)==1 and FD_DEVICE_LOOKUP not in expected,path
    assert actual.replace(FD_DEVICE_LOOKUP,b'',1)==expected,path
    assert hashlib.sha256(actual).hexdigest()==FD_SHA256,path

@@ -1523,16 +1523,33 @@ void* Lookup(Library* library, const char* name) {
   // Bionic searches the complete DT_NEEDED graph breadth first: a direct
   // dependency wins over a grandchild even when that child's parent was
   // loaded first. A shared descendant or dependency cycle is visited once.
+  // Most handles have a small dependency graph. Keep its queue and visited
+  // identities on this invocation's stack; nothing is cached across lookups
+  // or IFUNC callbacks. Larger graphs retain the vector/set traversal below.
+  constexpr size_t kInlineDependencies = 16;
+  Library* inline_pending[kInlineDependencies];
+  size_t inline_count = 0;
   std::vector<Library*> pending;
-  std::set<Library*> seen{library};
+  std::set<Library*> seen;  // empty until the inline queue overflows
   auto enqueue = [&](Library* owner) {
     for (Library* dep : owner->dependencies) {
+      if (seen.empty()) {
+        if (dep == library || std::find(inline_pending, inline_pending + inline_count, dep) !=
+                                  inline_pending + inline_count) continue;
+        if (inline_count < kInlineDependencies) {
+          inline_pending[inline_count++] = dep;
+          continue;
+        }
+        seen.insert(library);
+        seen.insert(inline_pending, inline_pending + inline_count);
+        pending.assign(inline_pending, inline_pending + inline_count);
+      }
       if (seen.insert(dep).second) pending.push_back(dep);
     }
   };
   enqueue(library);
-  for (size_t i = 0; i < pending.size(); ++i) {
-    Library* dep = pending[i];
+  for (size_t i = 0; i < (seen.empty() ? inline_count : pending.size()); ++i) {
+    Library* dep = seen.empty() ? inline_pending[i] : pending[i];
     const Elf64_Sym* s = FindDefinedSymbol(dep, name, gh, sh);
     if (s != nullptr) return SymbolAddress(dep, s);
     enqueue(dep);

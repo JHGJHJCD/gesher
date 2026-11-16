@@ -26,6 +26,7 @@
 namespace gesher {
 
 class InputPane;
+class LayeredBitmap;
 using InputPaneFactory = void* (*)();
 
 struct WindowEvent {
@@ -202,8 +203,9 @@ class Window {
   bool translucent() const { return translucent_; }
   // Lifecycle track (docs/lifecycle.md): presents a frame drawn elsewhere (SkiaGL's
   // read-back of a translucent popup): `argb` premultiplied 0xAARRGGBB, rows
-  // top-down, width x height (cropped or padded to the client area).
-  void PresentPixels(const uint32_t* argb, int width, int height);
+  // top-down, width x height (cropped or padded to the client area). A nonzero
+  // sourceStride is the distance in pixels between rows of a cropped view.
+  void PresentPixels(const uint32_t* argb, int width, int height, int sourceStride = 0);
 
  private:
   Window() = default;
@@ -306,6 +308,9 @@ class Window {
   std::atomic<bool> no_activate_{false}, passthrough_{false};
   std::atomic<int> dim_{0};           // 0..255
   std::vector<uint8_t> dimmed_;       // buffer_mutex_
+  // Created, used and released by the window thread. Released when translucency
+  // is disabled, on display changes, and before the window thread exits.
+  std::unique_ptr<LayeredBitmap> layered_bitmap_;
 };
 
 }  // namespace gesher

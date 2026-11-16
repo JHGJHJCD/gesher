@@ -212,12 +212,10 @@ void Win32Surface::PresentPixels(const uint32_t* argb, int width, int height) {
   int cols = static_cast<int>(std::max<int64_t>(0, std::min<int64_t>(window_->width(),
       int64_t{width} - inset_left_ - inset_right_)));
   if (!argb || rows == 0 || cols == 0) return;
-  std::vector<uint32_t> cropped(static_cast<size_t>(cols) * rows);
-  for (int y = 0; y < rows; ++y) {
-    memcpy(cropped.data() + static_cast<size_t>(y) * cols,
-        argb + static_cast<size_t>(y + inset_top_) * width + inset_left_, static_cast<size_t>(cols) * 4);
-  }
-  window_->PresentPixels(cropped.data(), cols, rows);
+  // PresentPixels consumes the view synchronously under our mutex. The source
+  // remains owned by the caller; Window copies it into its own back buffer.
+  window_->PresentPixels(argb + static_cast<size_t>(inset_top_) * width + inset_left_,
+                         cols, rows, width);
 }
 
 int Win32Surface::dequeueBuffer(ANativeWindowBuffer** buffer, int* fence_fd) {

@@ -61,6 +61,8 @@ jobs:
           tests/windows/shell/PreferredLanguagesChecks.ps1
           tests/windows/shell/MicrogDefaultsChecks.ps1
           tests/windows/shell/ControlPanelRefreshChecks.ps1
+          tests/windows/shell/ControlPanelIconCacheChecks.ps1
+          tests/windows/shell/ControlPanelActionChecks.ps1
           tests/windows/shell/ControlPanelRequestChecks.ps1
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
@@ -115,6 +117,9 @@ jobs:
           python3 -m unittest discover -s tools/tests -p 'test_*api_inventory.py'
           python3 -m unittest discover -s tools/tests -p test_java_member_inventory.py
           python3 -m unittest discover -s tools/tests -p test_audit_services_jni.py
+          python3 -m unittest discover -s tools/tests -p test_host_bp_srcs.py
+          python3 -m unittest discover -s tools/tests -p test_soong_zip.py
+          python3 tools/fonts/test-standalone-link.py
 
       - name: Native allocation, directory, semaphore, file-lock and socket-control contracts
         run: |
@@ -148,6 +153,7 @@ jobs:
           python3 tools/test_elf_finalizers.py --sanitize
           python3 tools/test_elf_lookup_contracts.py --sanitize
           python3 tools/test_elf_lookup_contracts.py --linux-reference
+          python3 tools/test_elf_lookup_performance.py --sanitize
           python3 tools/test_media_api_contracts.py --sanitize
           python3 tools/test_aaudio_builder_contracts.py
 
@@ -166,8 +172,17 @@ jobs:
 
       - name: JNI and mixer allocation bounds and surface image-cache lifetime
         run: |
+          python3 tools/test_symbol_lookup_allocations.py
+          python3 tools/test_fnmatch_performance.py --sanitize
+          python3 tools/test_binder_reply_allocations.py --sanitize
+          python3 tools/test_camera_capture_allocations.py --sanitize
+          python3 tools/test_layered_bitmap_cache.py --sanitize
+          python3 tools/test_camera_conversion_allocations.py --sanitize
+          python3 tools/test_surface_present_allocations.py --sanitize
           python3 tools/test_jni_argument_storage.py --sanitize
           python3 tools/test_audio_mixer_allocations.py --sanitize
+          python3 tools/test_audio_capture_allocations.py --sanitize
+          python3 tools/test_audio_file_source.py --sanitize
           python3 tools/test_audio_rate_history.py --sanitize
           python3 tools/test_surface_image_cache.py --sanitize
 
@@ -230,9 +245,10 @@ jobs:
           python3 tools/test_audio_buffer_contracts.py
           python3 tools/test_media_callback_contracts.py --java-home "$JAVA_HOME"
 
-      - name: WebStorage origin and running-task contracts
+      - name: WebStorage origin, owned WebView responses and running-task contracts
         run: |
           python3 tools/test_webstorage_origin_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_webview_owned_responses.py --java-home "$JAVA_HOME"
           python3 tools/test_running_tasks_contracts.py
 
       - name: Bluetooth cancellation, notifications and scan retention contracts
@@ -259,6 +275,11 @@ jobs:
         run: |
           python3 tools/test_java_performance_contracts.py --java-home "$JAVA_HOME"
           python3 tools/test_launcher_log_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_launcher_tail_io.py --java-home "$JAVA_HOME"
+          python3 tools/test_launcher_log_bounds.py --java-home "$JAVA_HOME"
+          python3 tools/test_install_metadata_comparison.py --java-home "$JAVA_HOME"
+          python3 tools/test_legacy_camera_buffers.py --java-home "$JAVA_HOME"
+          python3 tools/test_camera_capture_lifetime.py --java-home "$JAVA_HOME"
 
       - name: Validate user interface translations
         run: |
@@ -356,6 +377,24 @@ jobs:
 
       - name: Build the separate bounded native teardown observer
         run: bash tools/web3/build-teardown-probe.sh "$GESHER_BUILD_LLVM"
+
+      - name: Cross-compile current-source Windows performance contracts
+        run: |
+          python3 tools/test_procfs_thread_lookup.py --compile-only \
+            --cxx "$GESHER_BUILD_LLVM/bin/x86_64-w64-mingw32-clang++" \
+            --output out/procfs_thread_lookup_test.exe
+          python3 tools/test_binder_reply_allocations.py --compile-only \
+            --cxx "$GESHER_BUILD_LLVM/bin/x86_64-w64-mingw32-clang++" \
+            --output out/binder_reply_allocations_test.exe
+          python3 tools/test_layered_bitmap_cache.py --compile-only \
+            --cxx "$GESHER_BUILD_LLVM/bin/x86_64-w64-mingw32-clang++" \
+            --output out/layered_bitmap_cache_test.exe
+          python3 tools/test_native_poll_allocations.py --compile-only \
+            --cxx "$GESHER_BUILD_LLVM/bin/x86_64-w64-mingw32-clang++" \
+            --output out/native_poll_allocations_test.exe
+          python3 tools/test_arm64_tls_lifecycle.py --compile-only \
+            --cxx "$GESHER_BUILD_LLVM/bin/x86_64-w64-mingw32-clang++" \
+            --output out/arm64_tls_lifecycle_test.exe
 
       - name: Build
         run: |
@@ -1576,6 +1615,20 @@ jobs:
           python tools/surface/assemble-artifacts.py --source ci-suppliers/windows_x64 --destination dist --ledger ci-owners.json --owner windows_x64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Real Windows thread, Binder, GDI and socket allocation contracts
+        if: matrix.suite == 'full'
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          & ./dist/procfs_thread_lookup_test.exe gate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./dist/binder_reply_allocations_test.exe gate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./dist/layered_bitmap_cache_test.exe gate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./dist/native_poll_allocations_test.exe gate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify and assemble framework artifact
         shell: pwsh
         run: |
@@ -1598,6 +1651,14 @@ jobs:
           python tools/ci/artifact_receipt.py --name arm64 --producer "arm64 / build" --destination ci-suppliers/arm64
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python tools/surface/assemble-artifacts.py --source ci-suppliers/arm64 --destination dist --ledger ci-owners.json --owner arm64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: ARM64 parked TLS, reuse and actual translator callbacks
+        if: matrix.suite == 'full'
+        timeout-minutes: 3
+        shell: pwsh
+        run: |
+          & ./dist/arm64_tls_lifecycle_test.exe gate ./dist/gesher_arm64.dll
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify and assemble libs-tests artifact

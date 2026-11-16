@@ -1240,15 +1240,58 @@ namespace {
 // keeps its instantiations apart.
 struct NativePollFd : WSAPOLLFD {};
 static_assert(sizeof(NativePollFd) == sizeof(WSAPOLLFD));
+
+struct PollScratch {
+  std::vector<NativePollFd> fds, active;
+  std::vector<bool> lifecycle_hup, owned_pending, closed;
+  std::vector<size_t> active_index;
+  bool busy = false;
+};
+
+// Cache only small POD scratch arrays, never socket descriptions or readiness.
+// Large calls and reentrant observers use per-invocation storage. The common
+// case retains roughly 11 KiB at most per polling thread, released at exit.
+class PollScratchLease {
+ public:
+  explicit PollScratchLease(size_t count) {
+    thread_local PollScratch cache;
+    if (count <= 256 && !cache.busy) {
+      cache.busy = true;
+      cached_ = &cache;
+      scratch_ = &cache;
+    }
+  }
+  ~PollScratchLease() { Release(); }
+  PollScratchLease(const PollScratchLease&) = delete;
+  PollScratchLease& operator=(const PollScratchLease&) = delete;
+  PollScratch& get() { return *scratch_; }
+  void Release() {
+    if (cached_ != nullptr) cached_->busy = false;
+    cached_ = nullptr;
+  }
+
+ private:
+  PollScratch local_;
+  PollScratch* scratch_ = &local_;
+  PollScratch* cached_ = nullptr;
+};
 }  // namespace
 
 int Poll(PollEntry* entries, size_t count, int timeout_ms, NativePollObserver observer, void* context,
          Socket wake, bool* woken) {
   if (woken != nullptr) *woken = false;
   const ULONGLONG sample_started = GetTickCount64();
-  std::vector<NativePollFd> fds(count);
-  std::vector<bool> lifecycle_hup(count, false);
-  std::vector<bool> owned_pending(count, false), closed(count, false);
+  PollScratchLease lease(count);
+  auto& scratch = lease.get();
+  auto& fds = scratch.fds;
+  auto& lifecycle_hup = scratch.lifecycle_hup;
+  auto& owned_pending = scratch.owned_pending;
+  auto& closed = scratch.closed;
+  fds.reserve(count);
+  fds.assign(count, NativePollFd{});
+  lifecycle_hup.assign(count, false);
+  owned_pending.assign(count, false);
+  closed.assign(count, false);
   bool has_lifecycle_hup = false;
   bool has_owned_pending = false;
   for (size_t i = 0; i < count; ++i) {
@@ -1309,8 +1352,12 @@ int Poll(PollEntry* entries, size_t count, int timeout_ms, NativePollObserver ob
   // An owned pending connection has no usable connected context yet. Its
   // completion is the readiness source; a native write wake could precede
   // context publication and otherwise spin or expose a premature success.
-  std::vector<NativePollFd> active;
-  std::vector<size_t> active_index;
+  auto& active = scratch.active;
+  auto& active_index = scratch.active_index;
+  active.clear();
+  active_index.clear();
+  active.reserve(count + (wake != kInvalidSocket ? 1 : 0));
+  active_index.reserve(count);
   for (size_t i = 0; i < count; ++i) {
     if (!owned_pending[i] && !closed[i]) { active.push_back(fds[i]); active_index.push_back(i); }
   }
@@ -1334,8 +1381,7 @@ int Poll(PollEntry* entries, size_t count, int timeout_ms, NativePollObserver ob
       // positively retired by their original description; arbitrary native
       // errors retain their original failure. Every retry removes an entry,
       // takes no further wait and never extends the caller's finite deadline.
-      std::vector<NativePollFd> remaining;
-      std::vector<size_t> remaining_index;
+      size_t kept = 0;
       for (size_t k = 0; k < active.size(); ++k) {
         const size_t i = active_index[k];
         bool retired = false;
@@ -1344,10 +1390,11 @@ int Poll(PollEntry* entries, size_t count, int timeout_ms, NativePollObserver ob
           retired = entries[i].description->native_closed || entries[i].description->native_closing;
         }
         if (retired) { fds[i].revents = POLLNVAL; closed[i] = true; }
-        else { remaining.push_back(active[k]); remaining_index.push_back(i); }
+        else { active[kept] = active[k]; active_index[kept++] = i; }
       }
-      if (remaining.size() == active.size()) return errno = ErrnoFromWsa(native_error), -1;
-      active = std::move(remaining); active_index = std::move(remaining_index);
+      if (kept == active.size()) return errno = ErrnoFromWsa(native_error), -1;
+      active.resize(kept);
+      active_index.resize(kept);
       if (active.empty()) break;
       sample_wait = 0;
     }
@@ -1412,6 +1459,9 @@ int Poll(PollEntry* entries, size_t count, int timeout_ms, NativePollObserver ob
     // Queued unrequested data must not spin, delay a different requested fd
     // for the whole timeout, or return an old zero after sleeping past a new
     // event. Re-sample every bounded slice, including at the final deadline.
+    // This invocation has finished using its scratch. Recursive samples can
+    // borrow the cache instead of allocating fresh local fallback arrays.
+    lease.Release();
     for (;;) {
       const ULONGLONG elapsed = GetTickCount64() - sample_started;
       DWORD pause = 10;

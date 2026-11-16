@@ -100,19 +100,31 @@ class FileSource : public PacedSource {
     size_t data_at = 0, data_size = 0;
     for (size_t o = 12; o + 8 <= bytes.size();) {
       const uint32_t size = u32(o + 4);
-      if (memcmp(bytes.data() + o, "fmt ", 4) == 0 && o + 8 + 16 <= bytes.size()) {
+      if (memcmp(bytes.data() + o, "fmt ", 4) == 0) {
+        if (size < 16 || size > bytes.size() - o - 8) {
+          *error = path + ": incomplete WAV format";
+          return false;
+        }
         fmt_tag = u16(o + 8);
         channels_ = u16(o + 10);
         rate_ = u32(o + 12);
         bits = u16(o + 22);
-        if (fmt_tag == 0xFFFE && size >= 40) fmt_tag = u16(o + 8 + 24);  // the subformat
+        if (fmt_tag == 0xFFFE) {
+          if (size < 40) {
+            *error = path + ": incomplete WAV extended format";
+            return false;
+          }
+          fmt_tag = u16(o + 8 + 24);  // the subformat
+        }
       } else if (memcmp(bytes.data() + o, "data", 4) == 0) {
         data_at = o + 8;
         data_size = std::min<size_t>(size, bytes.size() - data_at);
       }
-      o += 8 + size + (size & 1);
+      o += size_t{8} + size + (size & 1);
     }
-    if (data_at == 0 || channels_ == 0 || rate_ == 0 || (fmt_tag != 1 && fmt_tag != 3)) {
+    const bool supported = (fmt_tag == 1 && (bits == 8 || bits == 16 || bits == 24 || bits == 32)) ||
+                           (fmt_tag == 3 && bits == 32);
+    if (data_at == 0 || channels_ == 0 || rate_ == 0 || !supported) {
       *error = path + ": no PCM data";
       return false;
     }
@@ -129,7 +141,11 @@ class FileSource : public PacedSource {
       } else if (bits == 16) {
         v = static_cast<int16_t>(p[0] | (p[1] << 8)) / 32768.0f;
       } else if (bits == 24) {
-        int32_t s = (p[0] << 8) | (p[1] << 16) | (p[2] << 24);
+        const uint32_t encoded = (static_cast<uint32_t>(p[0]) << 8) |
+                                 (static_cast<uint32_t>(p[1]) << 16) |
+                                 (static_cast<uint32_t>(p[2]) << 24);
+        int32_t s;
+        memcpy(&s, &encoded, sizeof(s));
         v = static_cast<float>(s / 2147483648.0);
       } else if (bits == 32) {
         int32_t s;
@@ -407,7 +423,6 @@ void CaptureStream::Push(const float* src, size_t frames, uint32_t src_rate, uin
     // sources are copied to every channel, otherwise channel c takes c (or the
     // mean of the source for a mono stream).
     const double step = static_cast<double>(src_rate) / params_.sample_rate;
-    std::vector<float> in_frame(ch);
     auto source_frame = [&](size_t i, float* out) {
       const float* f = src + i * src_channels;
       for (uint32_t c = 0; c < ch; c++) {
@@ -428,14 +443,13 @@ void CaptureStream::Push(const float* src, size_t frames, uint32_t src_rate, uin
     }
     // phase_: the position of the next output frame, in source frames, relative
     // to the frame before src[0] (last_).
-    std::vector<float> cur(ch);
+    std::vector<float> cur(ch), prev(ch);
     while (true) {
       const double pos = phase_;
       const size_t i = static_cast<size_t>(pos);  // between frame i-1 (last_ when 0) and i
       if (i >= frames) break;
       const float t = static_cast<float>(pos - static_cast<double>(i));
       source_frame(i, cur.data());
-      std::vector<float> prev(ch);
       if (i == 0) {
         prev = last_;
       } else {
@@ -457,11 +471,13 @@ void CaptureStream::Push(const float* src, size_t frames, uint32_t src_rate, uin
     } else {
       was_overrun_ = false;
     }
-    std::vector<uint8_t> pcm(take * frame_size_);
-    FloatToPcm(out.data(), take * ch, params_.format, pcm.data());
-    for (size_t k = 0; k < take; k++) {
-      const size_t slot = static_cast<size_t>((written_ + k) % cap);
-      memcpy(ring_.data() + slot * frame_size_, pcm.data() + k * frame_size_, frame_size_);
+    if (take > 0) {
+      const size_t slot = static_cast<size_t>(written_ % cap);
+      const size_t first = std::min(take, cap - slot);
+      FloatToPcm(out.data(), first * ch, params_.format, ring_.data() + slot * frame_size_);
+      if (take > first) {
+        FloatToPcm(out.data() + first * ch, (take - first) * ch, params_.format, ring_.data());
+      }
     }
     const uint64_t before = written_;
     written_ += take;

@@ -51,11 +51,14 @@ def main() -> int:
         work = Path(temporary)
         # Copy exact source-ref headers too, so a historical control cannot silently
         # borrow newer decoding logic. These portable headers need no host adapters.
-        for relative, target in (
+        headers = [
             ('compat/bionic/shim_internal.h', 'shim_internal.h'),
             ('compat/bionic/abi_types.h', 'abi_types.h'),
             ('compat/arm64/include/gesher/arm64_va_list.h', 'gesher/arm64_va_list.h'),
-        ):
+        ]
+        if 'gesher/symbol_table.h' in read('compat/bionic/shim_internal.h'):
+            headers.append(('compat/arm64/include/gesher/symbol_table.h', 'gesher/symbol_table.h'))
+        for relative, target in headers:
             path = work / target
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(read(relative), encoding='utf-8')

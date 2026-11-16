@@ -4,8 +4,10 @@ Golden source: run41056309829/job124064608623, immutable compiled cd20.
 The old strict proof failed; these real rows do not qualify runtime behavior.
 """
 import importlib.util
+import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('font_link', Path(__file__).with_name('verify-standalone-link.py'))
 proof = importlib.util.module_from_spec(spec)
@@ -118,6 +120,49 @@ class ActualMapControls(unittest.TestCase):
                 proof.link_inputs(COMMAND.replace(' && python', addition+' && python'), Path('clang++'), Path.cwd())
         with self.assertRaises(AssertionError):
             proof.link_inputs(COMMAND+'\n'+COMMAND, Path('clang++'), Path.cwd())
+
+    def test_ninja_response_expansion_retains_input_checks(self):
+        base = Path.cwd()
+        raw = COMMAND.replace(' && python', ' @actual.rsp && python')
+        entry = {'directory': str(base), 'output': 'gesher-exec.exe', 'command': COMMAND}
+        with patch.object(proof.subprocess, 'check_output', side_effect=[raw, json.dumps([entry])]) as query:
+            _, archives, _ = proof.target_link_inputs(base / 'gesher-exec.exe', Path('clang++'), base)
+        self.assertEqual(base / 'libminikin.a', archives['libminikin.a'])
+        self.assertEqual(['ninja', '-t', 'compdb', '-x'], query.call_args.args[0])
+        for replacement in ('libhwui.a libart_runtime.a', 'libhwui.a @unexpanded.rsp',
+                            'libhwui.a other/libminikin.a'):
+            invalid = dict(entry, command=COMMAND.replace('libhwui.a', replacement))
+            with self.subTest(replacement=replacement), patch.object(proof.subprocess, 'check_output',
+                    side_effect=[raw, json.dumps([invalid])]), self.assertRaises(AssertionError):
+                proof.target_link_inputs(base / 'gesher-exec.exe', Path('clang++'), base)
+
+    def test_ninja_expanded_target_must_be_unique(self):
+        base = Path.cwd()
+        raw = COMMAND.replace(' && python', ' @actual.rsp && python')
+        entry = {'directory': str(base), 'output': 'gesher-exec.exe', 'command': COMMAND}
+        for entries in ([], [entry, entry], [dict(entry, output='another.exe')]):
+            with self.subTest(entries=entries), patch.object(proof.subprocess, 'check_output',
+                    side_effect=[raw, json.dumps(entries)]), self.assertRaises(AssertionError):
+                proof.target_link_inputs(base / 'gesher-exec.exe', Path('clang++'), base)
+
+    def test_ninja_expansion_rejects_different_build_directory(self):
+        base = Path.cwd()
+        raw = COMMAND.replace(' && python', ' @actual.rsp && python')
+        entry = {'directory': str(base / 'other'), 'output': '../gesher-exec.exe', 'command': COMMAND}
+        with patch.object(proof.subprocess, 'check_output', side_effect=[raw, json.dumps([entry])]), \
+                self.assertRaisesRegex(AssertionError, 'another build directory'):
+            proof.target_link_inputs(base / 'gesher-exec.exe', Path('clang++'), base)
+
+    def test_ninja_expansion_is_only_for_unresolved_response_files(self):
+        base = Path.cwd()
+        with patch.object(proof.subprocess, 'check_output', return_value=COMMAND) as query:
+            proof.target_link_inputs(base / 'gesher-exec.exe', Path('clang++'), base)
+        self.assertEqual(1, query.call_count)
+        for raw in (COMMAND + '\n' + COMMAND, COMMAND.replace('libhwui.a', 'libhwui.a libart_runtime.a')):
+            with self.subTest(raw=raw), patch.object(proof.subprocess, 'check_output', return_value=raw) as query:
+                with self.assertRaises(AssertionError):
+                    proof.target_link_inputs(base / 'gesher-exec.exe', Path('clang++'), base)
+                self.assertEqual(1, query.call_count)
 
     def test_actual_member_uniqueness(self):
         target=Path('libminikin.a'); other=Path('libother.a'); member='FontCollection.cpp.obj'

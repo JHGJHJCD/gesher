@@ -1073,6 +1073,16 @@ struct Out {
   }
 };
 
+// Only complete pipe replies own the length prefix. Nested command streams
+// stay plain Out values so their offsets and command-replacement rules do not
+// change. Reserve room for the small status/handshake headers in one allocation.
+struct WireReply : Out {
+  WireReply() {
+    bytes.reserve(32);
+    bytes.resize(sizeof(uint32_t));
+  }
+};
+
 // binder_thread_write. Returns 0 or -errno; *consumed counts commands.
 int ThreadWrite(Proc* proc, Thread* thread, In in, uint32_t* consumed) {
   *consumed = 0;
@@ -1505,12 +1515,10 @@ bool ReadMessage(HANDLE pipe, std::vector<uint8_t>* msg) {
   return ReadExact(pipe, msg->data(), len);
 }
 
-bool WriteMessage(HANDLE pipe, const Out& out) {
-  uint32_t len = static_cast<uint32_t>(out.bytes.size());
-  std::vector<uint8_t> buf(sizeof(len) + out.bytes.size());
-  memcpy(buf.data(), &len, sizeof(len));
-  if (!out.bytes.empty()) memcpy(buf.data() + sizeof(len), out.bytes.data(), out.bytes.size());
-  return WriteExact(pipe, buf.data(), buf.size());
+bool WriteMessage(HANDLE pipe, WireReply& out) {
+  uint32_t len = static_cast<uint32_t>(out.bytes.size() - sizeof(uint32_t));
+  memcpy(out.bytes.data(), &len, sizeof(len));
+  return WriteExact(pipe, out.bytes.data(), out.bytes.size());
 }
 
 uint64_t RandomKey() {
@@ -1537,7 +1545,7 @@ void ServeProc(HANDLE pipe, In in) {
     g_procs[proc->id] = proc;
   }
   TRACE("proc %u: pid %u opened the device", proc->id, pid);
-  Out reply;
+  WireReply reply;
   reply.Put<int32_t>(0);
   reply.Put<uint32_t>(proc->id);
   reply.Put<uint64_t>(proc->key);
@@ -1616,7 +1624,7 @@ void ServeThread(HANDLE pipe, In in) {
       proc->threads.push_back(thread);
     }
   }
-  Out hello;
+  WireReply hello;
   hello.Put<int32_t>(thread != nullptr ? 0 : -ESRCH);
   if (!WriteMessage(pipe, hello) || thread == nullptr) return;
 
@@ -1625,7 +1633,7 @@ void ServeThread(HANDLE pipe, In in) {
     In req{msg.data(), msg.data() + msg.size()};
     uint32_t op;
     if (!req.Get(&op)) break;
-    Out reply;
+    WireReply reply;
     std::unique_lock<std::mutex> lock(g_lock);
     if (thread->is_dead || proc->is_dead) {
       lock.unlock();

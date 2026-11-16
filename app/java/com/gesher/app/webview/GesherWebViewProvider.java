@@ -91,6 +91,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * One android.webkit.WebView on WebView2 (docs/webview.md, ADR 0041): its
@@ -303,10 +304,19 @@ final class GesherWebViewProvider implements WebViewProvider, WebViewProvider.Vi
         return rules.clone();
     }
 
-    /** loadDataWithBaseURL: the data the next main document at this URL gets. */
-    private volatile String mDataUrl;
-    private volatile byte[] mData;
-    private volatile String mDataMime;
+    /** loadDataWithBaseURL: one unclaimed document, with its own body and metadata. */
+    private static final class PendingData {
+        final String url;
+        final String mime;
+        final byte[] body;
+
+        PendingData(String url, String mime, byte[] body) {
+            this.url = url;
+            this.mime = mime;
+            this.body = body;
+        }
+    }
+    private final AtomicReference<PendingData> mPendingData = new AtomicReference<>();
 
     // Bounds (the WebView's Looper).
     private boolean mAttached;
@@ -617,9 +627,7 @@ final class GesherWebViewProvider implements WebViewProvider, WebViewProvider.Vi
         }
         // The base URL is loaded, and its main document is answered with the data.
         String url = FileUrls.toWebView2(baseUrl);
-        mDataUrl = url;
-        mData = bytes;
-        mDataMime = mimeType;
+        mPendingData.set(new PendingData(url, mimeType, bytes));
         mOriginalUrl = baseUrl;
         navigate(url, "");
     }
@@ -1862,14 +1870,18 @@ final class GesherWebViewProvider implements WebViewProvider, WebViewProvider.Vi
         WebView2Host host = mHost;
         if (host == null) return;
         WebResourceResponse response = null;
+        byte[] ownedBody = null;
         try {
             String appUrl = FileUrls.fromWebView2(url);
-            byte[] data = mData;
-            if (data != null && context == CONTEXT_DOCUMENT && url.equals(mDataUrl)) {
-                mData = null;
-                mDataUrl = null;
-                response = new WebResourceResponse(mDataMime, "UTF-8",
-                        new java.io.ByteArrayInputStream(data));
+            PendingData data = mPendingData.get();
+            if (data != null && context == CONTEXT_DOCUMENT && url.equals(data.url)
+                    && mPendingData.compareAndSet(data, null)) {
+                // Only this private response owns the array. App-supplied streams
+                // still take the read/close path below, even ByteArrayInputStreams.
+                // A failed claim leaves a replacement for its next request and
+                // falls through to the ordinary interception/file/network path.
+                ownedBody = data.body;
+                response = new WebResourceResponse(data.mime, "UTF-8", null);
             }
             if (response == null && mInterceptsRequests) {
                 response = mClient.shouldInterceptRequest(mView,
@@ -1907,7 +1919,8 @@ final class GesherWebViewProvider implements WebViewProvider, WebViewProvider.Vi
                 h.append(e.getKey()).append(": ").append(e.getValue()).append("\r\n");
             }
         }
-        host.respond(id, status, reason, h.toString(), readAll(response.getData()));
+        host.respond(id, status, reason, h.toString(),
+                ownedBody != null ? ownedBody : readAll(response.getData()));
     }
 
     private boolean blocked(String url, int context) {

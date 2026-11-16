@@ -12,7 +12,13 @@ function Get-GesherUiLanguage([string] $Tags) {
   return 'en'
 }
 
-if (-not ('Gesher.UiLanguages' -as [type])) {
+# A background panel helper receives an already selected display language.
+# This private override does not change GESHER_LOCALES or Android app locales.
+$script:GesherPanelUiLanguage = $env:GESHER_PANEL_UI_LANGUAGE
+if ($script:GesherUiCatalog.languages.PSObject.Properties.Name -notcontains $script:GesherPanelUiLanguage) {
+  $script:GesherPanelUiLanguage = $null
+}
+if (-not $script:GesherPanelUiLanguage -and -not ('Gesher.UiLanguages' -as [type])) {
   Add-Type -TypeDefinition @'
 using System;
 using System.Collections.Generic;
@@ -95,7 +101,9 @@ namespace Gesher {
 }
 '@
 }
-$script:GesherUiTags = if ([string]::IsNullOrWhiteSpace($env:GESHER_LOCALES)) { [Gesher.UiLanguages]::Read() } else { $env:GESHER_LOCALES }
+$script:GesherUiTags = if ($script:GesherPanelUiLanguage) { $script:GesherPanelUiLanguage }
+  elseif ([string]::IsNullOrWhiteSpace($env:GESHER_LOCALES)) { [Gesher.UiLanguages]::Read() }
+  else { $env:GESHER_LOCALES }
 $script:GesherUiLanguage = Get-GesherUiLanguage $script:GesherUiTags
 
 function Get-GesherText([string] $Key, [object[]] $Values = @()) {

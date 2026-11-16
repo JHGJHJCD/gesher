@@ -349,21 +349,31 @@ jobject Image_getHardwareBuffer(JNIEnv* env, jobject thiz) {
 
 // --- frames into a reader ----------------------------------------------------------------
 
-// NV12 (w x h) to I420 (tw x th), nearest neighbour.
+// NV12 (w x h) to planar or interleaved 4:2:0 (tw x th), nearest neighbour.
+// A chroma pixel stride of two writes NV21 directly with u = chroma + 1,
+// v = chroma, without temporary planes or a second interleaving pass.
 void Nv12ToI420(const uint8_t* src, int w, int h, uint8_t* y, uint8_t* u, uint8_t* v, int tw,
-                int th) {
+                int th, int chromaPixelStride = 1) {
   const uint8_t* uv = src + static_cast<size_t>(w) * h;
-  for (int ty = 0; ty < th; ++ty) {
-    int sy = ty * h / th;
-    for (int tx = 0; tx < tw; ++tx) y[ty * tw + tx] = src[sy * w + tx * w / tw];
+  if (w == tw && h == th) {
+    memcpy(y, src, static_cast<size_t>(w) * h);
+  } else {
+    for (int ty = 0; ty < th; ++ty) {
+      int sy = static_cast<int>(static_cast<int64_t>(ty) * h / th);
+      for (int tx = 0; tx < tw; ++tx)
+        y[static_cast<size_t>(ty) * tw + tx] =
+            src[static_cast<size_t>(sy) * w + static_cast<int64_t>(tx) * w / tw];
+    }
   }
   int cw = (tw + 1) / 2, ch = (th + 1) / 2, scw = w / 2, sch = h / 2;
   for (int cy = 0; cy < ch; ++cy) {
-    int sy = std::min(cy * sch / ch, sch - 1);
+    int sy = std::min(static_cast<int>(static_cast<int64_t>(cy) * sch / ch), sch - 1);
     for (int cx = 0; cx < cw; ++cx) {
-      int sx = std::min(cx * scw / cw, scw - 1);
-      u[cy * cw + cx] = uv[sy * w + sx * 2];
-      v[cy * cw + cx] = uv[sy * w + sx * 2 + 1];
+      int sx = std::min(static_cast<int>(static_cast<int64_t>(cx) * scw / cw), scw - 1);
+      size_t dst = (static_cast<size_t>(cy) * cw + cx) * chromaPixelStride;
+      size_t source = static_cast<size_t>(sy) * w + sx * 2;
+      u[dst] = uv[source];
+      v[dst] = uv[source + 1];
     }
   }
 }
@@ -486,21 +496,25 @@ jint CameraFrames_deliver(JNIEnv* env, jclass, jobject surface, jbyteArray nv12,
 // CameraFrames.nativeToNv21: NV12 (w x h) as NV21 (tw x th), for YuvImage's JPEG encoder.
 jbyteArray CameraFrames_toNv21(JNIEnv* env, jclass, jbyteArray nv12, jint w, jint h, jint tw,
                                jint th) {
-  if (nv12 == nullptr || env->GetArrayLength(nv12) < w * h * 3 / 2 || tw <= 0 || th <= 0 ||
-      tw % 2 != 0 || th % 2 != 0) {
+  // NV12 requires complete 2x2 chroma blocks. Check in 64 bits before any
+  // allocation or pin, including the Java array size limit for the output.
+  int64_t inputSize = static_cast<int64_t>(w) * h;
+  int64_t outputSize = static_cast<int64_t>(tw) * th;
+  constexpr int64_t kMaxYuvPixels = INT32_MAX / 3 * 2;
+  if (nv12 == nullptr || w <= 0 || h <= 0 || w % 2 != 0 || h % 2 != 0 ||
+      tw <= 0 || th <= 0 || tw % 2 != 0 || th % 2 != 0 ||
+      inputSize > kMaxYuvPixels || outputSize > kMaxYuvPixels ||
+      env->GetArrayLength(nv12) < inputSize * 3 / 2) {
     jniThrowException(env, "java/lang/IllegalArgumentException", "bad frame");
     return nullptr;
   }
-  std::vector<uint8_t> out(static_cast<size_t>(tw) * th * 3 / 2);
-  size_t ySize = static_cast<size_t>(tw) * th;
-  std::vector<uint8_t> u(ySize / 4), v(ySize / 4);
+  std::vector<uint8_t> out(static_cast<size_t>(outputSize * 3 / 2));
+  size_t ySize = static_cast<size_t>(outputSize);
   jbyte* frame = env->GetByteArrayElements(nv12, nullptr);
-  Nv12ToI420(reinterpret_cast<uint8_t*>(frame), w, h, out.data(), u.data(), v.data(), tw, th);
+  if (frame == nullptr) return nullptr;
+  Nv12ToI420(reinterpret_cast<uint8_t*>(frame), w, h, out.data(), out.data() + ySize + 1,
+             out.data() + ySize, tw, th, 2);
   env->ReleaseByteArrayElements(nv12, frame, JNI_ABORT);
-  for (size_t i = 0; i < u.size(); ++i) {
-    out[ySize + 2 * i] = v[i];
-    out[ySize + 2 * i + 1] = u[i];
-  }
   jbyteArray result = env->NewByteArray(static_cast<jsize>(out.size()));
   if (result != nullptr) {
     env->SetByteArrayRegion(result, 0, static_cast<jsize>(out.size()),

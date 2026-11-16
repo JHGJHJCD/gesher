@@ -31,7 +31,11 @@ the Linux kernel:
 
 Full design: [docs/architecture.md](docs/architecture.md).
 
-The [runtime performance audit](docs/research/runtime-performance-audit-2026-11-14.md)
+The [November 16 performance audit](docs/research/runtime-performance-audit-2026-11-16.md)
+records subsequent allocation, polling, camera, graphics, logging and desktop
+improvements, independent QA, actual Windows/ART checks and remaining limits.
+
+The [earlier runtime performance audit](docs/research/runtime-performance-audit-2026-11-14.md)
 maps execution paths and records measured allocation, file-I/O and archive-scan
 reductions, frame-cache lifetime repairs, regression coverage and remaining work.
 
