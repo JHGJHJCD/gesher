@@ -72,4 +72,9 @@ public final class WindowsBluetooth {
         session.events.add(new int[]{EVENT_NOTIFICATION,2,0});
         session.events.add(new int[]{EVENT_SERVICES_CHANGED,0,0});
     }
+    public static void mtuAndBarrier(int mtu){
+        Session session=sessions.get(lastHandle);
+        session.events.add(new int[]{EVENT_MTU,0,mtu});
+        session.events.add(new int[]{EVENT_SERVICES_CHANGED,0,0});
+    }
 }
