@@ -3,21 +3,32 @@ Checks of one line of work each, run by `run-tests.ps1` in its own scope
 `$root` and `$bcp` from there. Keeping them apart lets branches add checks
 without touching each other's lines.
 
-For earlier framework and service feedback from the same build output, run:
+CI runs four isolated shards on each of Windows 2022 and Windows 2025:
+
+- `native`: core libraries, POSIX, native libraries, processes, ARM64 and native networking.
+- `desktop`: graphics, windows, input, WebView, surfaces, locale and process-helper controls.
+- `services`: media, device services, shell, framework and compatibility contracts.
+- `compilation`: boot images, AOT policies, profiles and shared libraries.
+
+`../test-shards.json` assigns every `.ps1` file in this directory to one owner.
+A new, missing or multiply assigned track fails preflight rather than silently
+losing coverage. Each shard preserves name order and runs the common VM/framework
+smoke checks. Tracks 30 and 32 also run in each shard to prepare the graphics
+helper and the actual system fonts. Shared process helpers are loaded from their
+original function definitions without running their owner track's tests.
 
 ```powershell
-pwsh -NoProfile -File tests/windows/run-tests.ps1 dist -FrameworkContractsOnly
+pwsh -NoProfile -File tests/windows/run-tests.ps1 dist -Shard native
+pwsh -NoProfile -File tests/windows/run-tests.ps1 dist -Shard native -ListTracks
+pwsh -NoProfile -File tests/windows/test-test-shards.ps1
 ```
 
-This keeps the runner's initial VM, native/framework and application lifecycle
-checks, then runs the existing `30-graphics.ps1`, `32-fonts.ps1`,
-`50-services.ps1` and `94-framework-fixes.ps1` in that order. The graphics track
-provides the font-test runner; the font track installs and checks the actual
-system fonts used by the service applications. Each selected track runs all its
-existing checks, with the same failure counters, process exit checks and expected
-markers. A missing required track fails the invocation. This mode does not
-replace the full suite: omitting the switch still discovers and runs every track
-in name order.
+Without `-Shard`, the complete suite still runs in name order. The existing
+`-FrameworkContractsOnly` local mode also remains available. CI includes those
+contracts in the services shard, and preserves `test (windows-2022)` and
+`test (windows-2025)` as summary checks: neither can pass if any of the eight
+shards fails, is skipped or is cancelled. Each shard uploads its own results;
+`TRACK_START` and `TRACK_END` record durations for subsequent balancing.
 
 ### Runtime file contracts
 
@@ -29,5 +40,4 @@ removes the share and files in `finally`. It restores `TMPDIR`, `TMP`, `TEMP` an
 the Server service if it started that service. These checks require elevated
 Windows test privileges and the SMB server cmdlets/service, as available on the
 Windows 2022/2025 CI runners. Setup, operation and cleanup failures fail the
-check; they are not treated as absent-feature passes. The framework-contracts
-leg runs these same assertions before the complete suite finishes.
+check; they are not treated as absent-feature passes. The services shard runs these same assertions with the graphics/font prerequisites.

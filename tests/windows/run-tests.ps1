@@ -1,10 +1,24 @@
 # Runs on a Windows machine against the CI build output.
 #   pwsh tests/windows/run-tests.ps1 <dir with *.exe, hello.dex, hello.apk>
 param([Parameter(Mandatory)] [string] $Dir, [string] $Web3Observer = '',
-  [switch] $FrameworkContractsOnly)
+  [switch] $FrameworkContractsOnly,
+  [ValidateSet('all', 'native', 'desktop', 'services', 'compilation')]
+  [string] $Shard = 'all', [switch] $ListTracks)
 
 $ErrorActionPreference = 'Stop'
 $failed = 0
+if ($FrameworkContractsOnly -and $Shard -ne 'all') {
+  throw 'FrameworkContractsOnly cannot be combined with Shard'
+}
+$trackPlan = if ($Shard -ne 'all') {
+  & "$PSScriptRoot/helpers/Get-TestTrackPlan.ps1" -Shard $Shard
+}
+if ($ListTracks) {
+  if ($FrameworkContractsOnly) { throw 'ListTracks does not support FrameworkContractsOnly' }
+  if ($trackPlan) { $trackPlan.Tracks.Name }
+  else { (Get-ChildItem "$PSScriptRoot/tracks" -Filter *.ps1 | Sort-Object Name).Name }
+  exit 0
+}
 
 if ($Web3Observer) {
   $script:web3Observer = (Resolve-Path -LiteralPath $Web3Observer).Path
@@ -188,10 +202,21 @@ if ($code -eq 0 -and -not $missing) {
   $failed++
 }
 
+# Load original helper definitions without executing another shard's tests.
+if ($trackPlan) {
+  . "$PSScriptRoot/helpers/CloseProcessReaders.ps1"
+  . "$PSScriptRoot/helpers/GtestProcess.ps1"
+  foreach ($definition in $trackPlan.Helpers) {
+    . ([scriptblock]::Create($definition))
+  }
+}
+
 # Each line of work keeps its checks in a file of its own (graphics, native
 # libraries, services, ...), run here in this script's scope: Check, RunDex,
 # NoDrive, $root, $bcp and $failed are theirs to use.
-$testTracks = if ($FrameworkContractsOnly) {
+$testTracks = if ($trackPlan) {
+  $trackPlan.Tracks
+} elseif ($FrameworkContractsOnly) {
   # Keep the existing graphics/font prerequisites: services use the installed
   # system fonts, and 32-fonts uses GraphicsDex from 30-graphics.
   foreach ($name in '30-graphics.ps1', '32-fonts.ps1', '50-services.ps1', '94-framework-fixes.ps1', '95-compatibility-followup.ps1', '96-deep-compatibility.ps1') {
@@ -212,7 +237,10 @@ if ($FrameworkContractsOnly) {
 }
 foreach ($t in $testTracks) {
   try {
+    $trackClock = [Diagnostics.Stopwatch]::StartNew()
+    Write-Host "TRACK_START shard=$Shard track=$($t.Name)"
     . $t.FullName
+    Write-Host "TRACK_END shard=$Shard track=$($t.Name) elapsedMs=$($trackClock.ElapsedMilliseconds)"
   } catch {
     Write-Host "FAIL  test script $($t.Name): $_"
     Write-Host $_.InvocationInfo.PositionMessage
