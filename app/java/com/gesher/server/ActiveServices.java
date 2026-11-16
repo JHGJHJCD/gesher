@@ -461,7 +461,7 @@ final class ActiveServices {
                     || !connection.binding.connections.contains(connection)
                     || connection.binding.unbindPending) return;
         }
-        if (!connection.lifetime.getAsBoolean() || service != null && !serviceCurrent(r)) return;
+        if (!connection.lifetime.getAsBoolean() || !serviceCurrent(r)) return;
         try {
             connection.conn.connected(r.name, service, null /* session */, false /* dead */);
         } catch (RemoteException e) {
