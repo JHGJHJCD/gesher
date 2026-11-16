@@ -81,6 +81,7 @@ public final class ApkPackage {
     private long mInstallTime = System.currentTimeMillis();
     private long mUpdateTime = mInstallTime;
     private String mDataDir;
+    private AppDataStorage mDataStorage;
     private String mNativeLibraryDir;  // null: <data dir>/lib
     private String mPrimaryCpuAbi;     // null: no native code (NativeLibs.abiFor)
     private final boolean mHasCode;
@@ -138,7 +139,8 @@ public final class ApkPackage {
                 }
             }
         }
-        setDataDir(env("ANDROID_DATA", "/data") + "/data/" + packageName);
+        mDataStorage = AppDataStorage.installed(new File(Device.dataDir()), packageName);
+        mDataDir = mDataStorage.credential.toString();
     }
 
     /** PackageParser2's callback outside system_server: no compat change is enabled. */
@@ -312,13 +314,43 @@ public final class ApkPackage {
                 + parsed.getTargetSdkVersion();
     }
 
-    /** The app's data directory (default {@code $ANDROID_DATA/data/<package>}). */
+    /** An explicit CE directory override; its separate DE directory is a sibling. */
     public void setDataDir(String dataDir) {
-        mDataDir = dataDir;
+        mDataStorage = AppDataStorage.custom(dataDir);
+        mDataDir = mDataStorage.credential.toString();
     }
 
+    /** The manifest's default area, which may be device-protected storage. */
     public String dataDir() {
+        return parsed.isDefaultToDeviceProtectedStorage() ? deviceProtectedDataDir() : mDataDir;
+    }
+
+    public String credentialProtectedDataDir() {
         return mDataDir;
+    }
+
+    public String deviceProtectedDataDir() {
+        return mDataStorage != null ? mDataStorage.device.toString()
+                : mDataDir == null ? null : AppDataStorage.custom(mDataDir).device.toString();
+    }
+
+    /** Prepare a launch/new install, without guessing which manifest created legacy data. */
+    public void prepareDataDirectories() throws IOException {
+        storage().prepare(parsed.isDefaultToDeviceProtectedStorage(), false);
+    }
+
+    /** Only the already committed installed manifest may authorize legacy default-DE migration. */
+    void prepareInstalledDataDirectories() throws IOException {
+        storage().prepare(parsed.isDefaultToDeviceProtectedStorage(), true);
+    }
+
+    void prepareInstallDataDirectories(boolean replacing) throws IOException {
+        if (replacing) storage().prepareUpdate(parsed.isDefaultToDeviceProtectedStorage());
+        else prepareDataDirectories();
+    }
+
+    private AppDataStorage storage() {
+        return mDataStorage != null ? mDataStorage : AppDataStorage.custom(mDataDir);
     }
 
     /**
@@ -849,9 +881,9 @@ public final class ApkPackage {
         ai.privateFlagsExt |= AppInfoUtils.appInfoPrivateFlagsExt(parsed,
                 false /* not allowlisted for hidden APIs */)
                 & ~ApplicationInfo.PRIVATE_FLAG_EXT_ATTRIBUTIONS_ARE_USER_VISIBLE;
-        ai.dataDir = mDataDir;
-        ai.credentialProtectedDataDir = mDataDir;
-        ai.deviceProtectedDataDir = mDataDir;
+        ai.dataDir = dataDir();
+        ai.credentialProtectedDataDir = credentialProtectedDataDir();
+        ai.deviceProtectedDataDir = deviceProtectedDataDir();
         ai.nativeLibraryDir = nativeLibraryDir();
         ai.primaryCpuAbi = mPrimaryCpuAbi;
 

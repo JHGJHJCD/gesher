@@ -157,10 +157,12 @@ final class Installer {
         }
         for (Entry e : entries.values()) {
             try {
-                result.add(open(e));
+                ApkPackage loaded = open(e);
+                loaded.prepareInstalledDataDirectories();
+                result.add(loaded);
             } catch (Exception ex) {
                 SystemServer.log("installed package " + e.packageName + " at " + e.codePath
-                        + " does not parse: " + ex);
+                        + " could not be loaded or prepared: " + ex);
             }
         }
         return result;
@@ -260,7 +262,6 @@ final class Installer {
         if (!p.packageName.equals(e.packageName)) {
             throw new IllegalStateException("base.apk is " + p.packageName);
         }
-        p.setDataDir(Device.dataDir() + "/data/" + p.packageName);
         // lib/x86_64, or lib/arm64 for an arm64-v8a-only package (docs/arm64.md); its
         // splits count (an .xapk's libraries are in config.arm64_v8a.apk).
         String[] apks = apksOf(e.codePath);
@@ -269,7 +270,6 @@ final class Installer {
                 + NativeLibs.instructionSetDir(abi != null ? abi : NativeLibs.ABI));
         p.setPrimaryCpuAbi(abi);
         p.setInstallTimes(e.firstInstallTime, e.lastUpdateTime);
-        new File(p.dataDir()).mkdirs();
         return p;
     }
 
@@ -462,6 +462,10 @@ final class Installer {
                 }
                 installed.setSystemAddon(true);
             }
+            // The incoming manifest cannot authorize moving an older app's data.
+            // Boot preparation used the committed manifest before any update;
+            // changing defaultToDeviceProtectedStorage later does not migrate CE.
+            installed.prepareInstallDataDirectories(old != null || previous != null);
             mEntries.put(pkg, entry);
             writeRegistry();
             mPm.add(installed);
@@ -493,7 +497,9 @@ final class Installer {
                 SystemServer.log("install " + pkg + ": shared-library context/content changed");
             }
             Dexopt.onInstall(pkg, old.codePath, parsed.sharedLibraries);
-            mPm.add(open(old));
+            ApkPackage installed = open(old);
+            installed.prepareInstalledDataDirectories();
+            mPm.add(installed);
         }
         return new String[] {pkg, "unchanged", old.codePath,
                 String.valueOf(parsed.versionCode())};

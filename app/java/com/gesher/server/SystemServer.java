@@ -158,7 +158,7 @@ public final class SystemServer {
                     }
                 }
                 packages.removeIf(old -> name.equals(old.packageName));
-                new File(p.dataDir()).mkdirs();
+                p.prepareDataDirectories();
                 packages.add(p);
                 log("microg addon: " + p.describe());
             }
@@ -173,7 +173,7 @@ public final class SystemServer {
                     p.setSystemAddon(true);
                 }
             }
-            new File(p.dataDir()).mkdirs();
+            p.prepareDataDirectories();
             packages.removeIf(old -> p.packageName.equals(old.packageName));
             packages.add(p);
             log(p.describe());

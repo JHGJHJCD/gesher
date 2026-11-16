@@ -54,7 +54,10 @@ public final class PackageManifestFlagsTest {
         installed.setAccessible(true);
         installed.invoke(apk, info);
         require(info.uid == 12345 && "/fixture/base.apk".equals(info.sourceDir)
-                && "/fixture/data".equals(info.dataDir)
+                && (parsed.isDefaultToDeviceProtectedStorage() ? "/fixture/data.device-protected"
+                        : "/fixture/data").equals(info.dataDir)
+                && "/fixture/data".equals(info.credentialProtectedDataDir)
+                && "/fixture/data.device-protected".equals(info.deviceProtectedDataDir)
                 && "/fixture/data/lib".equals(info.nativeLibraryDir),
                 "Manifest projection replaced installed identity or paths");
         flag("installed", info.flags, ApplicationInfo.FLAG_INSTALLED, true);

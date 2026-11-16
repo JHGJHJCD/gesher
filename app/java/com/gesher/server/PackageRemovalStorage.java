@@ -41,6 +41,10 @@ final class PackageRemovalStorage {
         for (String kind : new String[]{"data", "obb", "media"}) {
             add(root.resolve("media/0/Android").resolve(kind).resolve(name));
         }
+        // Keep the original item-0..4 mapping forever. Named additions remain
+        // unambiguous when different runtime versions recover the same journal.
+        add(root.resolve("user_de/0").resolve(name), "device-protected-data");
+        add(root.resolve("system/app-data-layout").resolve(name), "storage-layout");
         if (recovered == null) {
             Properties journal = new Properties();
             journal.setProperty("package", name); journal.setProperty("code", code);
@@ -50,8 +54,11 @@ final class PackageRemovalStorage {
         }
     }
     private void add(Path original) throws IOException {
+        add(original, "item-" + paths.size());
+    }
+    private void add(Path original, String slot) throws IOException {
         checkParents(original);
-        paths.put(original, directory.resolve("item-" + paths.size()));
+        paths.put(original, directory.resolve(slot));
     }
     private void checkParents(Path original) throws IOException {
         Path parent = original.getParent();
