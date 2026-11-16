@@ -619,8 +619,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             Intent member = new Intent(intents[i]);
             ActivityRecord[] created = new ActivityRecord[1];
             StackLaunch previous = mStackLaunch.get();
-            if (parent != null) mStackLaunch.set(new StackLaunch(member, parent));
-            else mStackLaunch.remove();
+            mStackLaunch.set(new StackLaunch(member, parent));
             try {
                 result = start(caller, member, resolvedTypes == null ? null : resolvedTypes[i],
                         callingPackage, i == 0 ? resultTo : null, null, -1, taskId,
@@ -1274,7 +1273,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 r.accountCompletion = mAccountCompletion.get();
                 r.inheritedWindowMode = sourceWindowMode;
                 r.translucent = translucent;
-                r.batchCreated = stackParent != null;
+                r.batchCreated = stack != null && stack.intent == intent;
                 // A start in a task moved to the back brings it to the front.
                 mHiddenTasks.remove(taskId);
                 // The activity in front in its task is paused first; other tasks' stay
