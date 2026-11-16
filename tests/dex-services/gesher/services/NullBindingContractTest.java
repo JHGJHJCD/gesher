@@ -89,19 +89,25 @@ public final class NullBindingContractTest {
     }
     private static final class Bind {
         final IBinder service, binding;
-        Bind(IBinder service, IBinder binding) { this.service = service; this.binding = binding; }
+        final boolean rebind;
+        Bind(IBinder service, IBinder binding, boolean rebind) {
+            this.service = service; this.binding = binding; this.rebind = rebind;
+        }
     }
     private static final class AppThread extends IApplicationThread.Default {
         final IBinder binder = new Binder();
         final List<Bind> binds = new ArrayList<>();
+        final List<Bind> unbinds = new ArrayList<>();
         int creates, stops, exits;
         @Override public IBinder asBinder() { return binder; }
         @Override public void scheduleCreateService(IBinder token, ServiceInfo info,
                 CompatibilityInfo compatibility, int processState) { creates++; }
         @Override public void scheduleBindService(IBinder token, IBinder bindToken, Intent intent,
                 boolean rebind, int processState, long sequence) {
-            check(!rebind, "Initial bind unexpectedly became a rebind");
-            binds.add(new Bind(token, bindToken));
+            binds.add(new Bind(token, bindToken, rebind));
+        }
+        @Override public void scheduleUnbindService(IBinder token, IBinder bindToken, Intent intent) {
+            unbinds.add(new Bind(token, bindToken, false));
         }
         @Override public void scheduleStopService(IBinder token) { stops++; }
         @Override public void scheduleExit() { exits++; }
@@ -176,6 +182,22 @@ public final class NullBindingContractTest {
             asApp(() -> check(am.bindService(thread, null, new Intent(action).setComponent(SERVICE), null,
                     connection.callback, flags, OWNER, 0) == 1, "Binding failed to resolve its real parsed service"));
         }
+        void start(String action) throws Exception {
+            asApp(() -> check(SERVICE.equals(am.startService(thread,
+                    new Intent(action).setComponent(SERVICE), null, false, OWNER, null, 0)),
+                    "Started service was not resolved through the real ActivityManager"));
+        }
+        void stop(String action) throws Exception {
+            asApp(() -> check(am.stopService(thread,
+                    new Intent(action).setComponent(SERVICE), null, 0) == 1,
+                    "Started service did not accept its stop request"));
+        }
+        void completedTrue(Bind attempt) throws Exception {
+            asApp(() -> am.unbindFinished(attempt.service, attempt.binding));
+        }
+        void completedFalse(Bind attempt) throws Exception {
+            asApp(() -> am.serviceDoneExecuting(attempt.service, 4 /* UNBIND */, 0, 0));
+        }
         void publish(int index, IBinder value) throws Exception {
             Bind bind = thread.binds.get(index);
             asApp(() -> am.publishService(bind.service, bind.binding, value));
@@ -228,9 +250,105 @@ public final class NullBindingContractTest {
                 "Another intent's published binding completed a new pending intent");
         nonnull.publish(1, null); distinct.nullOnce();
         nonnull.unbind(one); nonnull.unbind(two); nonnull.unbind(distinct);
-        System.out.println("Null binding contracts passed: " + checks + " checks; real LoadedApk onNullBinding, late clients, executor, reentry, cleanup and non-null controls");
+        rebindContracts();
+        System.out.println("Null binding contracts passed: " + checks + " checks; real LoadedApk onNullBinding, late clients, executor, reentry, cached Binder/onRebind, stale-token and false-unbind lifecycle");
         return checks;
     }
+    /** Started services keep one Binder across true/unbind cycles; false requests onBind anew. */
+    private static void rebindContracts() throws Exception {
+        Harness h = new Harness();
+        h.start("cycle");
+        Connection first = new Connection(Runnable::run);
+        h.bind(first, "cycle", Context.BIND_AUTO_CREATE);
+        check(h.thread.creates == 1 && h.thread.binds.size() == 1
+                        && !h.thread.binds.get(0).rebind,
+                "First bind did not schedule exactly one onBind");
+        IBinder published = new Binder();
+        h.publish(0, published);
+        check(first.connected == 1 && first.value == published,
+                "First client did not receive the published Binder");
+        h.unbind(first);
+        check(h.thread.unbinds.size() == 1 && h.thread.stops == 0,
+                "Started service did not retain a live onUnbind request");
+        Bind originalUnbind = h.thread.unbinds.get(0);
+        h.completedTrue(originalUnbind);
+        check(h.thread.binds.size() == 1, "onUnbind(true) with no clients rebound prematurely");
+        Connection returned = new Connection(Runnable::run);
+        h.bind(returned, "cycle", Context.BIND_AUTO_CREATE);
+        check(returned.connected == 1 && returned.value == published
+                        && h.thread.binds.size() == 2 && h.thread.binds.get(1).rebind,
+                "Returned client did not retain the Binder and schedule onRebind");
+        Connection additional = new Connection(Runnable::run);
+        h.bind(additional, "cycle", Context.BIND_AUTO_CREATE);
+        check(additional.connected == 1 && additional.value == published
+                        && h.thread.binds.size() == 2,
+                "A second client duplicated an onRebind callback");
+
+        h.unbind(returned);
+        check(h.thread.unbinds.size() == 1, "Removing one of two clients ran onUnbind");
+        h.unbind(additional);
+        check(h.thread.unbinds.size() == 2, "Last client did not request the next onUnbind");
+        Bind secondUnbind = h.thread.unbinds.get(1);
+        Connection duringFalse = new Connection(Runnable::run);
+        h.bind(duringFalse, "cycle", Context.BIND_AUTO_CREATE);
+        check(duringFalse.connected == 0 && h.thread.binds.size() == 2,
+                "Bind while onUnbind is unresolved consumed a stale publication");
+        h.completedTrue(originalUnbind);
+        check(duringFalse.connected == 0 && h.thread.binds.size() == 2,
+                "An old unbind token completed a new unbind generation");
+        h.completedFalse(secondUnbind);
+        check(h.thread.binds.size() == 3 && !h.thread.binds.get(2).rebind
+                        && duringFalse.connected == 0,
+                "onUnbind(false) did not schedule fresh onBind");
+        IBinder replacement = new Binder();
+        h.publish(2, replacement);
+        check(duringFalse.connected == 1 && duringFalse.value == replacement
+                        && replacement != published,
+                "Fresh onBind did not publish the replacement Binder");
+        h.unbind(duringFalse);
+        check(h.thread.unbinds.size() == 3, "Third unbind was not scheduled");
+        Bind thirdUnbind = h.thread.unbinds.get(2);
+        Connection duringTrue = new Connection(Runnable::run);
+        h.bind(duringTrue, "cycle", Context.BIND_AUTO_CREATE);
+        check(duringTrue.connected == 0, "Pending onUnbind returned a Binder before its result");
+        h.completedTrue(thirdUnbind);
+        check(duringTrue.connected == 1 && duringTrue.value == replacement
+                        && h.thread.binds.size() == 4 && h.thread.binds.get(3).rebind,
+                "Client waiting through onUnbind(true) did not rebind to the cached Binder");
+        h.completedTrue(thirdUnbind);
+        check(h.thread.binds.size() == 4, "Duplicate unbind completion requested two rebinds");
+
+        Connection differentIntent = new Connection(Runnable::run);
+        h.bind(differentIntent, "other", Context.BIND_AUTO_CREATE);
+        check(h.thread.binds.size() == 5 && !h.thread.binds.get(4).rebind,
+                "Distinct intent shared another intent's Binder/rebind state");
+        h.publish(4, null);
+        differentIntent.nullOnce();
+        h.stop("cycle");
+        check(h.thread.stops == 0, "Stopping a started service killed its live clients");
+        h.unbind(duringTrue);
+        check(h.thread.stops == 0, "One intent's last unbind destroyed another bound intent");
+        h.unbind(differentIntent);
+        check(h.thread.stops == 1 && h.connections() == 0,
+                "Last client did not retire the stopped service");
+        h.completedTrue(thirdUnbind);
+        check(h.thread.binds.size() == 5, "Late callback revived a destroyed service");
+
+        Harness nullService = new Harness();
+        nullService.start("null");
+        Connection before = new Connection(Runnable::run);
+        nullService.bind(before, "null", Context.BIND_AUTO_CREATE);
+        nullService.publish(0, null); before.nullOnce();
+        nullService.unbind(before);
+        nullService.completedTrue(nullService.thread.unbinds.get(0));
+        Connection after = new Connection(Runnable::run);
+        nullService.bind(after, "null", Context.BIND_AUTO_CREATE);
+        after.nullOnce();
+        check(nullService.thread.binds.size() == 2 && nullService.thread.binds.get(1).rebind,
+                "Published null Binder lost its onRebind(true) lifecycle");
+        nullService.stop("null"); nullService.unbind(after);
+    }
+
     public static void main(String[] args) throws Exception {
         System.loadLibrary("android_runtime"); contracts(true);
     }
