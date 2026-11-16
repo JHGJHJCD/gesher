@@ -85,6 +85,22 @@ for before, after in policy.TCP_DIAGNOSTIC_REPLACEMENTS:
 rejected('TCP fixture missing required diagnostics', without_diagnostics, target=fixture_path)
 print('TCP diagnostic source policy: six negative controls passed')
 
+rejected('thread census equality relaxation',
+         fixture.replace(b'actual.threads == baseline.threads',
+                         b'actual.threads >= baseline.threads', 1), target=fixture_path)
+rejected('thread census observer forced on successful modes',
+         fixture.replace(b'ObserveOwnerThreads(mode, actual.handles != baseline.handles || actual.threads != baseline.threads)',
+                         b'ObserveOwnerThreads(mode, true)', 1), target=fixture_path)
+thread_diagnostic = ROOT / policy.OWNER_THREAD_DIAGNOSTIC_PATH
+thread_source = thread_diagnostic.read_bytes()
+rejected('thread observer querying a reused foreign-process TID',
+         thread_source.replace(b'if (owner == GetCurrentProcessId()) {', b'if (true) {', 1),
+         target=thread_diagnostic)
+rejected('thread observer leaking its diagnostic handles',
+         thread_source.replace(b'if (CloseHandle(thread)) ++closed;', b'if (true) ++closed;', 1),
+         target=thread_diagnostic)
+print('thread diagnostic source policy: four negative controls passed')
+
 receipt_path = ROOT / 'tools/ci/receipt-diagnostics.ps1'
 receipt = receipt_path.read_bytes()
 receipt_controls = (

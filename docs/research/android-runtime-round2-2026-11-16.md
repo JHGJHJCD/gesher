@@ -79,4 +79,43 @@ The following are concrete follow-up boundaries, not additional repairs claimed 
 
 The [native report](native-sleep-contracts-2026-11-16.md), [service report](android-service-rebinding-2026-11-16.md), [MediaStore report](mediastore-access-contracts-2026-11-16.md) and [window report](native-window-dispatch-2026-11-16.md) link source contracts and narrow the evidence for each boundary. Adding a success-returning stub would not close these gaps.
 
-The refreshed [PR overlap evidence](round2/pr-overlap.json) verifies open PRs **#52 and draft #55**. PR #53 merged into main during final preparation and its three controller/documentation/test changes were integrated unchanged; #54 is closed and unmerged. PR #52's shared native file changes pthread attributes, while this round changes separate sleep logic. PR #53 supplied the merged CI approval-policy changes; #55 owns ANGLE activation. Shared CI/test files were inspected, and pairwise textual merges were clean at the recorded heads. This avoids duplicate implementation while preserving each PR's scope. Pairwise merge success does not establish combined runtime compatibility, and the recorded heads require refresh if another PR advances.
+The initial [PR overlap evidence](round2/pr-overlap.json) records the pre-publication state: #52 and draft #55 were open, #53 had merged, and #54 was closed and unmerged. PR #52's shared native file changes pthread attributes, while this round changes separate sleep logic. PR #53 supplied the merged CI approval-policy changes; #55 owns ANGLE activation. Shared CI/test files were inspected, and pairwise textual merges were clean at the recorded heads. Pairwise merge success does not establish combined runtime compatibility. The following update supersedes those PR states.
+
+## Integration and parallel work discovered during publication
+
+After PR #58 opened at `55209626556c0a712534b8cf157a46ba7160325b`, main advanced to
+`7a5e49359e04272bac5e9595b8209e5239053ff7` by merging #52. That main is integrated
+without conflicts. The native sleep functions remain identical to their reviewed
+implementation, while the upstream pthread helpers remain identical to merged
+main. Both sets of CI and Windows fixture gates are retained. The
+[integration receipt](round2/integration-update.json) records the exact merged
+tree and its path delta from the initial map; together they describe all 3,328
+paths in that merged snapshot, before this receipt is added. The original
+inventories and build hashes continue to describe their explicitly pinned local
+inputs. Hosted CI must qualify the new integration head.
+
+Draft [#57](https://github.com/gesher-runtime/gesher/pull/57), created at 20:12:14
+UTC, and this PR, created at 20:16:10 UTC, independently developed overlapping
+service fixes. At inspected head `f7504837c2e4825b841beb21ae055f8d67e28908`, its
+retained true-rebind flow passes the existing 38-check positive control. Five
+other existing scenarios fail against its actual `ActiveServices` source:
+false-result Binder retention, immediate cached delivery during pending unbind,
+submission ordering, destruction during an in-flight bind, and last external
+client death. These are assertion failures after successful compilation and
+fixture setup. The first two expectations were checked against pinned AOSP;
+the integration receipt preserves the control results, source links and log
+hashes. The complete branches conflict in `ActiveServices.java`.
+
+This PR retains its validated service implementation and 431-check suite.
+Avoid combining the two competing service implementations. #57's task-stack
+implementation, test and Track 99 invocation are a separable three-path change;
+that extracted scope applies cleanly here but still requires its own behavioral
+QA. No task-stack code from #57 is included. Its unique true-acknowledgement
+token is compatible with ActivityThread's echo path and may be evaluated as a
+separate improvement; it does not justify changing retained-publication
+semantics. The false-result callback still lacks a binding/cycle token.
+
+PR #54 has reopened at its unchanged `07bcd38f` head and remains outside this
+implementation scope. Draft #55's renderer-selection work also remains separate.
+These observations are timestamped evidence, not a claim that other branches
+cannot subsequently advance.

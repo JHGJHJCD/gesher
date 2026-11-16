@@ -55,6 +55,7 @@ def main() -> None:
         cpp.write_text(template, encoding="utf-8")
         command = shlex.split(args.cxx) + ["-std=c++20", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
                                          "-fno-exceptions", "-static", "-pthread", "-I", str(ROOT / "compat/arm64/include"),
+                                         "-I", str(ROOT / "compat/arm64/dll"),
                                          str(cpp), "-o", str(executable), "-lpsapi"]
         subprocess.run(command, check=True, timeout=120)
         if args.compile_only:

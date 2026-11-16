@@ -204,13 +204,25 @@ int BIONIC_SYSV PthreadAttrGetscope(const bionic_pthread_attr_t*, int* scope) {
   *scope = 0;  // PTHREAD_SCOPE_SYSTEM
   return 0;
 }
-int BIONIC_SYSV PthreadAttrGetinheritsched(const bionic_pthread_attr_t*, int* v) {
-  *v = 0;  // PTHREAD_INHERIT_SCHED
+int BIONIC_SYSV PthreadAttrGetinheritsched(const bionic_pthread_attr_t* attr, int* v) {
+  // Android's constants differ from glibc: EXPLICIT=0, INHERIT=1. Before
+  // Android P there was no setter; preserve its policy-dependent default.
+  if ((attr->flags & 4) != 0) *v = 1;
+  else if ((attr->flags & 8) != 0) *v = 0;
+  else *v = attr->sched_policy == 0 ? 1 : 0;
   return 0;
 }
-int BIONIC_SYSV PthreadAttrSetinheritsched(bionic_pthread_attr_t*, int) { return 0; }
+int BIONIC_SYSV PthreadAttrSetinheritsched(bionic_pthread_attr_t* attr, int value) {
+  if (value == 0) attr->flags = (attr->flags & ~uint32_t{4}) | 8;
+  else if (value == 1) attr->flags = (attr->flags & ~uint32_t{8}) | 4;
+  else return kEINVAL;
+  return 0;
+}
 int BIONIC_SYSV PthreadAttrSetstack(bionic_pthread_attr_t* a, void* base, size_t size) {
-  if (size < 16384) return kEINVAL;
+  // Match the pinned bionic contract and the guest's 4096-byte page size.
+  // This validates the attribute; CreateThread still owns the actual stack.
+  if (size < 16384 || (size & 4095) != 0 ||
+      (reinterpret_cast<uintptr_t>(base) & 4095) != 0) return kEINVAL;
   a->stack_base = base;
   a->stack_size = size;
   return 0;

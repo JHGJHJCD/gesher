@@ -19,6 +19,7 @@ constexpr int32_t kErrorInternal = -896;
 constexpr int32_t kErrorInvalidState = -895;
 constexpr int32_t kErrorNull = -886;
 constexpr int32_t kErrorTimeout = -885;
+constexpr int32_t kStateClosing = 11, kStateClosed = 12;
 
 int64_t clock_now = 123000000;
 int clock_calls = 0;
