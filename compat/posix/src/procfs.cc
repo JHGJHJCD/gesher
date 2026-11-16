@@ -34,15 +34,28 @@
 #include <dirent.h>
 
 #include <algorithm>
+#include <mutex>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "internal.h"
 
+#include <gesher/process_name.h>
+
 namespace gesher {
 namespace procfs {
 namespace {
+
+// The name android.os.Process.setArgV0 gave this process (gesher/process_name.h),
+// or empty: /proc/self/cmdline is then the Windows command line.
+std::mutex g_argv0_mutex;
+std::string g_argv0;
+
+std::string Argv0() {
+  std::lock_guard<std::mutex> lock(g_argv0_mutex);
+  return g_argv0;
+}
 
 constexpr unsigned kNone = 0;
 constexpr unsigned kFile = S_IFREG;
@@ -128,6 +141,16 @@ bool IsOwnThread(unsigned long tid) {
 // The executable's name without its extension, at most 15 bytes (Linux's
 // TASK_COMM_LEN).
 std::string ProcessComm() {
+  // An app process: the name setArgV0 gave it, as Android's SetThreadName
+  // shortens it (its last 15 bytes when it has a '.' and no '@').
+  const std::string argv0 = Argv0();
+  if (!argv0.empty()) {
+    if (argv0.size() < 15 || argv0.find('@') != std::string::npos ||
+        argv0.find('.') == std::string::npos) {
+      return argv0.substr(0, 15);
+    }
+    return argv0.substr(argv0.size() - 15);
+  }
   wchar_t path[MAX_PATH];
   DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
   std::wstring name(path, n);
@@ -209,6 +232,9 @@ Memory ProcessMemory() {
 }
 
 std::string Cmdline() {
+  // An app process: its name alone, as the zygote leaves argv on a device.
+  const std::string argv0 = Argv0();
+  if (!argv0.empty()) return argv0 + std::string(1, '\0');
   int argc = 0;
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   std::string content;
@@ -782,3 +808,8 @@ int Open(const std::wstring& name, int flags) {
 
 }  // namespace procfs
 }  // namespace gesher
+
+extern "C" void gesher_set_process_argv0(const char* name) {
+  std::lock_guard<std::mutex> lock(gesher::procfs::g_argv0_mutex);
+  gesher::procfs::g_argv0 = name != nullptr ? name : "";
+}

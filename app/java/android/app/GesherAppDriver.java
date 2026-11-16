@@ -112,6 +112,9 @@ public final class GesherAppDriver {
         ActivityThread.AppBindData data = new ActivityThread.AppBindData();
         data.appInfo = appInfo;
         data.processName = appInfo.processName;
+        // As handleBindApplication: /proc/self/cmdline names the app's process, which
+        // libraries compare with the package name to tell its main process.
+        android.os.Process.setArgV0(data.processName);
         data.config = config;
         data.compatInfo = compat;
         data.disabledCompatChanges = disabledChanges;

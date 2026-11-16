@@ -1791,36 +1791,10 @@ void* EmitGuestCode(const uint32_t* insns, size_t count) {
   return p;
 }
 
-[[noreturn]] void GuestCrash(int signo, int code, const char* code_name, uint64_t fault_addr,
-                             const char* detail) {
-  static std::atomic<int> crashing{0};
-  if (crashing.fetch_add(1) != 0) {
-    // Another thread is already reporting; let it finish.
-    Sleep(INFINITE);
-  }
-  const char* name = signo == kSigSegv ? "SIGSEGV"
-                     : signo == kSigIll ? "SIGILL"
-                     : signo == kSigTrap ? "SIGTRAP"
-                     : signo == kSigSys ? "SIGSYS"
-                                       : "SIGABRT";
-  std::fprintf(stderr,
-               "Fatal signal %d (%s), code %d (%s), fault addr 0x%llx in tid %lu (arm64 guest)\n",
-               signo, name, code, code_name, static_cast<unsigned long long>(fault_addr),
-               GetCurrentThreadId());
-  std::fprintf(stderr, "    Cause: %s\n", detail);
-  if (signo == kSigSegv) {
-    // What is at the fault address: which allocation, and how it is protected.
-    MEMORY_BASIC_INFORMATION mbi;
-    if (VirtualQuery(reinterpret_cast<void*>(fault_addr), &mbi, sizeof(mbi)) != 0) {
-      std::fprintf(stderr,
-                   "    memory: allocation %p (protect 0x%lx), region %p+0x%llx, state 0x%lx, "
-                   "protect 0x%lx, type 0x%lx\n",
-                   mbi.AllocationBase, mbi.AllocationProtect, mbi.BaseAddress,
-                   static_cast<unsigned long long>(mbi.RegionSize), mbi.State, mbi.Protect,
-                   mbi.Type);
-    }
-  }
-  std::fflush(stderr);
+// The calling thread's guest state, as a crash report prints it: the host
+// function it is in (if it called out of guest code), the registers and an
+// approximate backtrace.
+void PrintGuestState() {
   Env* env = t_env_raw;
   if (env != nullptr && env->host_fn() != nullptr && !t_guest_running) {
     PrintWhere("    in host function ", reinterpret_cast<uint64_t>(env->host_fn()));
@@ -1878,6 +1852,39 @@ void* EmitGuestCode(const uint32_t* insns, size_t count) {
       }
     }
   }
+}
+
+[[noreturn]] void GuestCrash(int signo, int code, const char* code_name, uint64_t fault_addr,
+                             const char* detail) {
+  static std::atomic<int> crashing{0};
+  if (crashing.fetch_add(1) != 0) {
+    // Another thread is already reporting; let it finish.
+    Sleep(INFINITE);
+  }
+  const char* name = signo == kSigSegv ? "SIGSEGV"
+                     : signo == kSigIll ? "SIGILL"
+                     : signo == kSigTrap ? "SIGTRAP"
+                     : signo == kSigSys ? "SIGSYS"
+                                       : "SIGABRT";
+  std::fprintf(stderr,
+               "Fatal signal %d (%s), code %d (%s), fault addr 0x%llx in tid %lu (arm64 guest)\n",
+               signo, name, code, code_name, static_cast<unsigned long long>(fault_addr),
+               GetCurrentThreadId());
+  std::fprintf(stderr, "    Cause: %s\n", detail);
+  if (signo == kSigSegv) {
+    // What is at the fault address: which allocation, and how it is protected.
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery(reinterpret_cast<void*>(fault_addr), &mbi, sizeof(mbi)) != 0) {
+      std::fprintf(stderr,
+                   "    memory: allocation %p (protect 0x%lx), region %p+0x%llx, state 0x%lx, "
+                   "protect 0x%lx, type 0x%lx\n",
+                   mbi.AllocationBase, mbi.AllocationProtect, mbi.BaseAddress,
+                   static_cast<unsigned long long>(mbi.RegionSize), mbi.State, mbi.Protect,
+                   mbi.Type);
+    }
+  }
+  std::fflush(stderr);
+  PrintGuestState();
   std::fflush(stderr);
   std::fflush(stdout);
   TerminateProcess(GetCurrentProcess(), 128 + signo);
@@ -1951,6 +1958,10 @@ extern "C" uint64_t gesher_guest_entry_trampoline(const void* fn, EntryFrame* fr
 // A guest trampoline (guest code) that calls host function `fn`; the loader
 // binds a guest import's GOT entry to this address.
 extern "C" __declspec(dllexport) void* gesher_arm64_bind(void* fn) { return BindHost(fn); }
+
+// For the host's abort report (signal_bionic.cc): the calling thread's guest
+// state, if it is a guest thread.
+extern "C" __declspec(dllexport) void gesher_arm64_print_guest_state() { PrintGuestState(); }
 
 extern "C" __declspec(dllexport) const gesher_arm64_api* gesher_arm64_init(
     const gesher_arm64_host* host) {

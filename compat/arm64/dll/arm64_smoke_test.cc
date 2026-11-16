@@ -134,6 +134,17 @@ int main(int argc, char** argv) {
           "missing ARM64 DNS bridge must fail with ENOSYS");
   }
 
+  // The guest's process state cannot be cloned by the host's vfork-style shim.
+  // Call the actual guest bindings: both must return pid_t(-1), set EAGAIN and
+  // leave the caller running. This host supplies no fallback fork function.
+  for (const char* name : {"fork", "vfork"}) {
+    void* fn = api->guest_symbol(name);
+    g_test_errno = 0;
+    uint64_t result = fn ? api->call(fn, nullptr, 0) : 0;
+    Check(name, fn && static_cast<int32_t>(result) == -1 && g_test_errno == 11,
+          "guest process cloning must fail with EAGAIN");
+  }
+
   // `arm64_smoke_test crash-segv|crash-ill|crash-jump`: a faulting guest, which
   // must end the process with an Android-style "Fatal signal" report rather
   // than hang (tracks/47-arm64.ps1 runs these with a timeout).
@@ -193,6 +204,16 @@ int main(int argc, char** argv) {
     Check("CNTPCT is within the sampled advertised-clock bounds",
           counter >= GuestCounterValue(static_cast<uint64_t>(before.QuadPart), host_frequency) &&
           counter <= GuestCounterValue(static_cast<uint64_t>(after.QuadPart), host_frequency));
+    // CNTVCT_EL0, the count Linux user space reads (SQLCipher), is the same clock.
+    uint32_t virtual_code[] = {0xD53BE040u, kRet};    // mrs x0, cntvct_el0
+    void* virtual_fn = GuestPage(virtual_code, 2);
+    api->add_code(virtual_fn, sizeof(virtual_code), "counter_virtual");
+    RequireHarness(QueryPerformanceCounter(&before) != 0, "read QPC lower bound");
+    const uint64_t virtual_counter = api->call(virtual_fn, nullptr, 0);
+    RequireHarness(QueryPerformanceCounter(&after) != 0, "read QPC upper bound");
+    Check("CNTVCT reads the same clock within the sampled bounds",
+          virtual_counter >= GuestCounterValue(static_cast<uint64_t>(before.QuadPart), host_frequency) &&
+          virtual_counter <= GuestCounterValue(static_cast<uint64_t>(after.QuadPart), host_frequency));
   }
 
   // 1. host -> guest: a guest function returning 42.

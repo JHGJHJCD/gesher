@@ -85,6 +85,14 @@ AInputQueue, AChoreographer). It builds in steps, each verified in CI
   first execution, which rewrites the code reachable from there. Ijiami's
   `libexec_x86.so` is such an object.
 
+- **A stand-in libart.so for packers that hook ART by symbol**
+  ([0086](decisions/0086-packer-art-hooks.md)). Ijiami's shell finds
+  `libart.so` in `/proc/self/maps` and hooks `ClassLinker::LoadClass` to write
+  the method bodies it left out of the dex file back in. When an app loads such
+  a shell (`libexec*.so`), `compat/bionic/art_shim.cc` writes and loads a small
+  ELF `libart.so` exporting that symbol, and ART's `LoadClass`
+  (`patches/art/0800`) calls it first. `GESHER_ART_SHIM=0` turns it off.
+
 - **The bionic shim** (`compat/bionic/`, CMake target `gesher_bionic`,
   `gesher/bionic_shim.h`): the libc/libm/libdl/liblog/pthread symbols an app
   `.so` imports, as System V entry points over gesher-base and the CRT, with
