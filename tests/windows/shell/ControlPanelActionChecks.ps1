@@ -154,7 +154,7 @@ exit $cfg.MicrogExit
     Assert-Action ($script:PumpTicks -ge 3) 'WPF dispatcher did not keep ticking during helper execution'
     Assert-Action ($worker.Disposed -and -not $script:ActionState.Worker -and -not $script:IsBusy) 'Completed worker was retained or busy state stuck'
     Assert-Action ($btnToggleDevice.IsEnabled -and $servicesCards.IsEnabled -and $applicationsSection.IsEnabled -and $window.AllowDrop) 'Controls did not recover after completion'
-    Assert-Action ($script:Refreshes -eq 1 -and $script:Messages.Count -eq 0) 'Successful action did not complete once'
+    Assert-Action ($script:Refreshes -eq 1 -and $script:Messages.Count -eq 0) "Successful action did not complete once (refreshes=$script:Refreshes errors=$($script:Messages | ConvertTo-Json -Compress))"
     Complete-PanelAction
     Assert-Action ($script:Refreshes -eq 1) 'Completion executed twice'
     $calls = Read-ActionCalls
