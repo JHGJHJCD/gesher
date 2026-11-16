@@ -7,16 +7,28 @@
 
 #define EGL_NO_PLATFORM_SPECIFIC_TYPES 1
 #include "egl_child_surface.h"
+#include "egl_readback_layout.h"
 
 #include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+
+#ifndef GL_PACK_REVERSE_ROW_ORDER_ANGLE
+#define GL_PACK_REVERSE_ROW_ORDER_ANGLE 0x93A4
+#endif
+#ifndef GL_BGRA_EXT
+#define GL_BGRA_EXT 0x80E1
+#endif
 
 #include <gesher/egl_angle.h>
 
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
+#include <utility>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -37,6 +49,7 @@ struct Angle {
   EGLBoolean(EGLAPIENTRY* query_surface)(EGLDisplay, EGLSurface, EGLint, EGLint*);
   EGLBoolean(EGLAPIENTRY* query_context)(EGLDisplay, EGLContext, EGLint, EGLint*);
   void(GL_APIENTRY* get_integerv)(GLenum, GLint*);
+  const GLubyte*(GL_APIENTRY* get_string)(GLenum);
   void(GL_APIENTRY* pixel_storei)(GLenum, GLint);
   void(GL_APIENTRY* bind_framebuffer)(GLenum, GLuint);
   void(GL_APIENTRY* bind_buffer)(GLenum, GLuint);
@@ -51,14 +64,15 @@ const Angle* GetAngle() {
     a->query_surface = Proc<decltype(a->query_surface)>("eglQuerySurface");
     a->query_context = Proc<decltype(a->query_context)>("eglQueryContext");
     a->get_integerv = Proc<decltype(a->get_integerv)>("glGetIntegerv");
+    a->get_string = Proc<decltype(a->get_string)>("glGetString");
     a->pixel_storei = Proc<decltype(a->pixel_storei)>("glPixelStorei");
     a->bind_framebuffer = Proc<decltype(a->bind_framebuffer)>("glBindFramebuffer");
     a->bind_buffer = Proc<decltype(a->bind_buffer)>("glBindBuffer");
     a->read_pixels = Proc<decltype(a->read_pixels)>("glReadPixels");
     if (a->get_current_surface == nullptr || a->get_current_context == nullptr ||
         a->query_surface == nullptr || a->query_context == nullptr || a->get_integerv == nullptr ||
-        a->pixel_storei == nullptr || a->bind_framebuffer == nullptr || a->bind_buffer == nullptr ||
-        a->read_pixels == nullptr) {
+        a->get_string == nullptr || a->pixel_storei == nullptr || a->bind_framebuffer == nullptr ||
+        a->bind_buffer == nullptr || a->read_pixels == nullptr) {
       std::fprintf(stderr, "gesher EGL: child surfaces: ANGLE lacks a function they need\n");
       std::fflush(stderr);
       delete a;
@@ -136,7 +150,12 @@ struct Child {
   std::thread* thread = nullptr;
   int helper_width = 0, helper_height = 0;
   std::chrono::steady_clock::time_point last_post{};
-  std::vector<uint32_t> pixels;
+  EGLContext last_context = EGL_NO_CONTEXT;
+  bool reverse_rows = false;
+  bool bgra_read = false;
+  bool force_copy = false;
+  std::vector<uint32_t> pixels;  // scratch retained for conversion fallbacks
+  ~Child();
 };
 
 std::mutex g_mutex;
@@ -144,8 +163,8 @@ std::unordered_map<HWND, std::thread*>& Threads() {
   static auto* map = new std::unordered_map<HWND, std::thread*>();
   return *map;
 }
-std::unordered_map<EGLSurface, Child*>& Children() {
-  static auto* map = new std::unordered_map<EGLSurface, Child*>();
+std::unordered_map<EGLSurface, std::shared_ptr<Child>>& Children() {
+  static auto* map = new std::unordered_map<EGLSurface, std::shared_ptr<Child>>();
   return *map;
 }
 
@@ -164,45 +183,12 @@ void DestroyHelperWindow(HWND hwnd, std::thread* thread) {
   }
 }
 
-// Android's HAL pixel formats (system/graphics.h).
-constexpr int HAL_PIXEL_FORMAT_RGBX_8888 = 2;
-constexpr int HAL_PIXEL_FORMAT_RGB_565 = 4;
-constexpr int HAL_PIXEL_FORMAT_BGRA_8888 = 5;
-
-// RGBA (R in the low byte) to the buffer's pixel format.
-void PutRow(const uint32_t* src, void* dst, int count, int format) {
-  switch (format) {
-    case HAL_PIXEL_FORMAT_BGRA_8888: {
-      auto* d = static_cast<uint32_t*>(dst);
-      for (int x = 0; x < count; x++) {
-        uint32_t p = src[x];
-        d[x] = (p & 0xff00ff00u) | ((p & 0xffu) << 16) | ((p >> 16) & 0xffu);
-      }
-      break;
-    }
-    case HAL_PIXEL_FORMAT_RGB_565: {
-      auto* d = static_cast<uint16_t*>(dst);
-      for (int x = 0; x < count; x++) {
-        uint32_t p = src[x];
-        uint32_t r = p & 0xffu, g = (p >> 8) & 0xffu, b = (p >> 16) & 0xffu;
-        d[x] = static_cast<uint16_t>(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
-      }
-      break;
-    }
-    case HAL_PIXEL_FORMAT_RGBX_8888: {
-      auto* d = static_cast<uint32_t*>(dst);
-      for (int x = 0; x < count; x++) d[x] = src[x] | 0xff000000u;
-      break;
-    }
-    default:  // RGBA_8888
-      std::memcpy(dst, src, static_cast<size_t>(count) * 4);
-      break;
-  }
+Child::~Child() {
+  // An in-flight swap retains this object even if DestroySurface retires it.
+  DestroyHelperWindow(helper, thread);
+  if (window != nullptr) ANativeWindow_release(window);
 }
 
-int BytesPerPixel(int format) {
-  return format == HAL_PIXEL_FORMAT_RGB_565 ? 2 : 4;
-}
 
 }  // namespace
 
@@ -243,9 +229,14 @@ void DestroyChildHelper(HWND helper) {
 }
 
 void ChildSurfaceCreated(EGLSurface surface, ANativeWindow* window, HWND helper) {
-  auto* c = new Child();
+  auto c = std::make_shared<Child>();
   c->window = window;
+  // The EGL wrapper owns its original reference; this one survives retirement
+  // while an in-flight swap is still reading the target.
+  ANativeWindow_acquire(window);
   c->helper = helper;
+  const char* direct = std::getenv("GESHER_EGL_DIRECT_READBACK");
+  c->force_copy = direct != nullptr && std::strcmp(direct, "0") == 0;
   WindowSize(window, &c->helper_width, &c->helper_height);
   std::fprintf(stderr,
                "gesher EGL: window surface on a %dx%d surface without a window of its own "
@@ -268,21 +259,20 @@ ANativeWindow* ChildSurfaceWindow(EGLSurface surface) {
 }
 
 bool ChildSurfaceDestroyed(EGLSurface surface) {
-  Child* c = nullptr;
+  std::shared_ptr<Child> c;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto it = Children().find(surface);
     if (it == Children().end()) return false;
-    c = it->second;
+    c = std::move(it->second);
     Children().erase(it);
   }
-  DestroyHelperWindow(c->helper, c->thread);
-  delete c;
+  // Release of the last frame reader closes the helper and its window ref.
   return true;
 }
 
 void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
-  Child* c = nullptr;
+  std::shared_ptr<Child> c;
   {
     std::lock_guard<std::mutex> lock(g_mutex);
     auto it = Children().find(surface);
@@ -307,51 +297,72 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
   gl->query_surface(display, surface, EGL_WIDTH, &w);
   gl->query_surface(display, surface, EGL_HEIGHT, &h);
   if (w > 0 && h > 0) {
-    EGLint version = 0;
-    gl->query_context(display, gl->get_current_context(), EGL_CONTEXT_CLIENT_VERSION, &version);
-    // Read the default framebuffer, leaving the app's GL state as it was.
-    GLint alignment = 4, framebuffer = 0, pack_buffer = 0, row_length = 0, skip_rows = 0,
-          skip_pixels = 0;
-    gl->get_integerv(GL_PACK_ALIGNMENT, &alignment);
-    const GLenum fb_target = version >= 3 ? GL_READ_FRAMEBUFFER : GL_FRAMEBUFFER;
-    if (version >= 3) {
-      gl->get_integerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
-      gl->get_integerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
-      gl->get_integerv(GL_PACK_ROW_LENGTH, &row_length);
-      gl->get_integerv(GL_PACK_SKIP_ROWS, &skip_rows);
-      gl->get_integerv(GL_PACK_SKIP_PIXELS, &skip_pixels);
-    } else if (version == 2) {
-      gl->get_integerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
-    }
-    if (framebuffer != 0) gl->bind_framebuffer(fb_target, 0);
-    if (version >= 3) {
-      if (pack_buffer != 0) gl->bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
-      if (row_length != 0) gl->pixel_storei(GL_PACK_ROW_LENGTH, 0);
-      if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, 0);
-      if (skip_pixels != 0) gl->pixel_storei(GL_PACK_SKIP_PIXELS, 0);
-    }
-    if (alignment != 4) gl->pixel_storei(GL_PACK_ALIGNMENT, 4);
-    c->pixels.resize(static_cast<size_t>(w) * h);
-    gl->read_pixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, c->pixels.data());
-    if (alignment != 4) gl->pixel_storei(GL_PACK_ALIGNMENT, alignment);
-    if (version >= 3) {
-      if (skip_pixels != 0) gl->pixel_storei(GL_PACK_SKIP_PIXELS, skip_pixels);
-      if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, skip_rows);
-      if (row_length != 0) gl->pixel_storei(GL_PACK_ROW_LENGTH, row_length);
-      if (pack_buffer != 0) gl->bind_buffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
-    }
-    if (framebuffer != 0) gl->bind_framebuffer(fb_target, static_cast<GLuint>(framebuffer));
-
-    // Post it: GL's rows are bottom-up.
-    ANativeWindow_Buffer b;
+    // Check the consumer before issuing a synchronous GPU readback.
+    ANativeWindow_Buffer b = {};
     if (ANativeWindow_lock(c->window, &b, nullptr) == 0) {
-      int rows = h < b.height ? h : b.height;
-      int cols = w < b.width ? w : b.width;
-      int bpp = BytesPerPixel(b.format);
-      for (int y = 0; y < rows; y++) {
-        PutRow(&c->pixels[static_cast<size_t>(h - 1 - y) * w],
-               static_cast<uint8_t*>(b.bits) + static_cast<size_t>(y) * b.stride * bpp, cols,
-               b.format);
+      const EGLContext context = gl->get_current_context();
+      EGLint version = 0;
+      gl->query_context(display, context, EGL_CONTEXT_CLIENT_VERSION, &version);
+      if (context != c->last_context) {
+        c->last_context = context;
+        const char* extensions = reinterpret_cast<const char*>(gl->get_string(GL_EXTENSIONS));
+        c->reverse_rows = HasGlExtension(extensions, "GL_ANGLE_pack_reverse_row_order");
+        c->bgra_read = HasGlExtension(extensions, "GL_EXT_read_format_bgra");
+      }
+      ReadbackLayout plan = PlanChildReadback(
+          w, h, b.width, b.height, b.stride, b.format,
+          c->reverse_rows && !c->force_copy, c->bgra_read, version >= 3);
+      if (plan.valid() && b.bits != nullptr) {
+        // Preserve all client pack state including reversed rows and PBOs.
+        GLint alignment = 4, framebuffer = 0, pack_buffer = 0, row_length = 0, skip_rows = 0,
+              skip_pixels = 0, reverse_order = 0;
+        gl->get_integerv(GL_PACK_ALIGNMENT, &alignment);
+        const GLenum fb_target = version >= 3 ? GL_READ_FRAMEBUFFER : GL_FRAMEBUFFER;
+        if (version >= 3) {
+          gl->get_integerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
+          gl->get_integerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+          gl->get_integerv(GL_PACK_ROW_LENGTH, &row_length);
+          gl->get_integerv(GL_PACK_SKIP_ROWS, &skip_rows);
+          gl->get_integerv(GL_PACK_SKIP_PIXELS, &skip_pixels);
+        } else if (version == 2) {
+          gl->get_integerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+        }
+        if (c->reverse_rows) gl->get_integerv(GL_PACK_REVERSE_ROW_ORDER_ANGLE, &reverse_order);
+        const bool direct = plan.direct != DirectReadFormat::kNone;
+        const GLint desired_reverse = direct ? GL_TRUE : GL_FALSE;
+        const GLint desired_row_length = direct ? b.stride : 0;
+        if (framebuffer != 0) gl->bind_framebuffer(fb_target, 0);
+        if (version >= 3) {
+          if (pack_buffer != 0) gl->bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
+          if (row_length != desired_row_length)
+            gl->pixel_storei(GL_PACK_ROW_LENGTH, desired_row_length);
+          if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, 0);
+          if (skip_pixels != 0) gl->pixel_storei(GL_PACK_SKIP_PIXELS, 0);
+        }
+        if (alignment != 4) gl->pixel_storei(GL_PACK_ALIGNMENT, 4);
+        if (c->reverse_rows && reverse_order != desired_reverse)
+          gl->pixel_storei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, desired_reverse);
+        if (direct) {
+          const GLenum format = plan.direct == DirectReadFormat::kBgra ? GL_BGRA_EXT : GL_RGBA;
+          gl->read_pixels(0, plan.source_y, plan.width, plan.height,
+                          format, GL_UNSIGNED_BYTE, b.bits);
+        } else {
+          c->pixels.resize(plan.pixels);
+          gl->read_pixels(0, plan.source_y, plan.width, plan.height, GL_RGBA,
+                          GL_UNSIGNED_BYTE, c->pixels.data());
+        }
+        if (c->reverse_rows && reverse_order != desired_reverse)
+          gl->pixel_storei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, reverse_order);
+        if (alignment != 4) gl->pixel_storei(GL_PACK_ALIGNMENT, alignment);
+        if (version >= 3) {
+          if (skip_pixels != 0) gl->pixel_storei(GL_PACK_SKIP_PIXELS, skip_pixels);
+          if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, skip_rows);
+          if (row_length != desired_row_length) gl->pixel_storei(GL_PACK_ROW_LENGTH, row_length);
+          if (pack_buffer != 0)
+            gl->bind_buffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
+        }
+        if (framebuffer != 0) gl->bind_framebuffer(fb_target, static_cast<GLuint>(framebuffer));
+        if (!direct) CopyChildReadback(c->pixels.data(), b.bits, plan);
       }
       ANativeWindow_unlockAndPost(c->window);
     }
