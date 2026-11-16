@@ -23,3 +23,14 @@ Check 'services: app and channel notification settings open Windows controls; un
   & "$Dir/dalvikvm.exe" "-Xbootclasspath:$bcpBrowser" "-Ximage:$(NoDrive "$root/system")/framework/boot.art" `
     -Xint '-Xusejit:false' -cp (NoDrive "$Dir/services-tests.dex") gesher.services.NotificationSettingsIntentTest
 } @('NotificationSettingsIntentTest all passed')
+
+# Android Settings screens (ADR 0087): an app's "App info" opens the Control Center on it,
+# device screens a fixed Windows Settings page (both openers replaced: nothing opens), and
+# the stand-in answers that were wrong (component states, storage stats, memory info).
+Check 'services: Settings screens reach the Control Center or Windows Settings; component states, storage stats and memory info answer as Android' {
+  & "$Dir/dalvikvm.exe" "-Xbootclasspath:$bcpBrowser" "-Ximage:$(NoDrive "$root/system")/framework/boot.art" `
+    -Xint '-Xusejit:false' -cp (NoDrive "$Dir/services-tests.dex") gesher.services.SettingsIntentsTest (NoDrive "$Dir/components.apk")
+} @('SettingsIntentsTest: Settings screens reach the Control Center or Windows Settings',
+  'SettingsIntentsTest: component enabled states are kept and applied',
+  'SettingsIntentsTest: storage stats measure the app''s files',
+  'SettingsIntentsTest all passed:')

@@ -124,6 +124,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     /** Windows owns the toasts' per-app controls; Android's Settings APK is not installed. */
     static volatile java.util.function.Predicate<String> sOpenNotificationSettings = WindowsHost::openUrl;
 
+    /** A fixed ms-settings: page for an Android Settings screen (SettingsIntents). */
+    static volatile java.util.function.Predicate<String> sOpenSettingsPage = WindowsHost::openUrl;
+
     /** STARTED: made visible again without being resumed (StartActivityItem). */
     enum State { INITIALIZING, LAUNCHING, RESUMING, RESUMED, PAUSING, PAUSED, STARTED, STOPPING,
             STOPPED, DESTROYING, DESTROYED }
@@ -1016,6 +1019,29 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                             + ": Windows notification settings " + (opened ? "opened" : "unavailable"));
                     return opened ? ActivityManager.START_SUCCESS
                             : ActivityManager.START_INTENT_NOT_RESOLVED;
+                }
+                // Other Settings screens (SettingsIntents): an app's details in Gesher's
+                // Control Center, a device page in Windows Settings. Without this every
+                // "App info" was ActivityNotFoundException ("Application not found").
+                SettingsIntents.Target settings;
+                synchronized (mPm) {
+                    settings = SettingsIntents.resolve(intent, pkg -> mPm.get(pkg) != null);
+                }
+                if (settings != null) {
+                    boolean opened = settings.controlCenter
+                            ? ControlCenter.open(settings.packageName)
+                            : sOpenSettingsPage.test(settings.windowsUri);
+                    SystemServer.log("startActivity: " + action + ": " + settings
+                            + (opened ? " opened" : " unavailable"));
+                    if (!opened) return ActivityManager.START_INTENT_NOT_RESOLVED;
+                    // Settings answers a startActivityForResult when the user leaves it;
+                    // Windows' page reports nothing, so the request is not left waiting.
+                    ActivityRecord source = resultToToken != null ? forToken(resultToToken) : null;
+                    if (source != null && requestCode >= 0) {
+                        deliverResult(source, resultWho, requestCode,
+                                android.app.Activity.RESULT_CANCELED, null);
+                    }
+                    return ActivityManager.START_SUCCESS;
                 }
                 if (Intent.ACTION_VIEW.equals(action)) {
                     Uri data = intent.getData();

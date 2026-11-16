@@ -667,6 +667,42 @@ public final class ApkPackage {
         return null;
     }
 
+    /**
+     * The content providers whose intent filters match {@code intent}
+     * (PackageManager.queryIntentContentProviders: DocumentsProvider discovery, for one).
+     */
+    public List<ResolveInfo> queryIntentContentProviders(Intent intent, String resolvedType,
+            long flags) {
+        List<ResolveInfo> result = new ArrayList<>();
+        if (intent.getPackage() != null && !intent.getPackage().equals(packageName)) {
+            return result;
+        }
+        ComponentName component = intent.getComponent();
+        List<ProviderInfo> providers = providers(flags);
+        if (component != null) {
+            if (component.getPackageName().equals(packageName)) {
+                for (ProviderInfo p : providers) {
+                    if (p.name.equals(component.getClassName())) {
+                        ResolveInfo ri = new ResolveInfo();
+                        ri.providerInfo = p;
+                        result.add(ri);
+                    }
+                }
+            }
+            return result;
+        }
+        for (Match m : match(parsed.getProviders(), intent, resolvedType, flags)) {
+            for (ProviderInfo p : providers) {
+                if (!p.name.equals(m.name)) continue;
+                ResolveInfo ri = m.resolveInfo(flags, null, null);
+                ri.providerInfo = p;
+                result.add(ri);
+                break;
+            }
+        }
+        return result;
+    }
+
     /** The content providers the manifest declares. */
     public List<ProviderInfo> providers(long flags) {
         PackageInfo pi = packageInfo(flags | PackageManager.GET_PROVIDERS);

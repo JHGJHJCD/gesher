@@ -429,6 +429,26 @@
       "en": "This application and its local data will be removed from Gesher.",
       "he": "היישום וכל הנתונים המקומיים שלו יוסרו מגשר."
     },
+    "cp_app_info_title": {
+      "en": "App info",
+      "he": "פרטי היישום"
+    },
+    "cp_app_info_installed": {
+      "en": "Installed: {0}",
+      "he": "הותקן: {0}"
+    },
+    "cp_app_info_updated": {
+      "en": "Last updated: {0}",
+      "he": "עודכן לאחרונה: {0}"
+    },
+    "cp_app_info_detail": {
+      "en": "An app asked to open this application's settings. Here you can launch or uninstall it.",
+      "he": "יישום ביקש לפתוח את ההגדרות של היישום הזה. כאן אפשר להפעיל אותו או להסיר אותו."
+    },
+    "cp_app_info_close": {
+      "en": "Close",
+      "he": "סגירה"
+    },
     "cp_uninstall_failed": {
       "en": "Failed to uninstall {0}.",
       "he": "הסרת {0} נכשלה."

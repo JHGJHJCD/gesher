@@ -140,7 +140,10 @@ public final class PackageManagerService extends IPackageManager.Default {
         Map<String, ApkPackage> map = new LinkedHashMap<>(mPackages);
         ApkPackage p = map.remove(packageName);
         mPackages = map;
-        if (p != null) PackageManager.invalidatePackageInfoCache();
+        if (p != null) {
+            forgetComponentStates(packageName);
+            PackageManager.invalidatePackageInfoCache();
+        }
         return p;
     }
 
@@ -345,7 +348,7 @@ public final class PackageManagerService extends IPackageManager.Default {
             result.addAll(BrowserPackageSupport.queryIntentActivities(intent, resolvedType,
                     flags));
         }
-        return result;
+        return withoutDisabled(result, flags);
     }
 
     /** The services {@code intent} resolves to, in every package. */
@@ -355,6 +358,7 @@ public final class PackageManagerService extends IPackageManager.Default {
             if (isRemovalPending(p.packageName)) continue;
             result.addAll(p.queryIntentServices(intent, resolvedType, flags));
         }
+        withoutDisabled(result, flags);
         if (result.isEmpty() && intent != null && get(GmsPackageSupport.PACKAGE_GMS) == null) {
             result.addAll(GmsPackageSupport.querySyntheticServices(intent, resolvedType, flags));
         }
@@ -368,7 +372,7 @@ public final class PackageManagerService extends IPackageManager.Default {
             if (isRemovalPending(p.packageName)) continue;
             result.addAll(p.queryIntentReceivers(intent, resolvedType, flags));
         }
-        return result;
+        return withoutDisabled(result, flags);
     }
 
     /** The provider with authority {@code authority} (one of its authorities), or null. */
@@ -402,6 +406,29 @@ public final class PackageManagerService extends IPackageManager.Default {
     public ParceledListSlice queryIntentReceivers(Intent intent, String resolvedType,
             long flags, int userId) {
         return new ParceledListSlice<>(receivers(intent, resolvedType, flags));
+    }
+
+    /** No mainline (APEX/module) packages: Gesher's framework is not updated by modules. */
+    @Override
+    public List<android.content.pm.ModuleInfo> getInstalledModules(int flags) {
+        return new ArrayList<>();
+    }
+
+    /** Usage hints for dexopt scheduling; Gesher compiles on install, not by use. */
+    @Override
+    public void notifyPackageUse(String packageName, int reason) {
+    }
+
+    @Override
+    public ParceledListSlice queryIntentContentProviders(Intent intent, String resolvedType,
+            long flags, int userId) {
+        List<ResolveInfo> result = new ArrayList<>();
+        if (intent == null || userId != 0) return new ParceledListSlice<>(result);
+        for (ApkPackage p : mPackages.values()) {
+            if (isRemovalPending(p.packageName)) continue;
+            result.addAll(p.queryIntentContentProviders(intent, resolvedType, flags));
+        }
+        return new ParceledListSlice<>(withoutDisabled(result, flags));
     }
 
     @Override
@@ -492,9 +519,131 @@ public final class PackageManagerService extends IPackageManager.Default {
         return new ParceledListSlice<>(result);
     }
 
+    /**
+     * Components an app enabled or disabled at run time (setComponentEnabledSetting): a
+     * launcher alias it hides, a boot receiver it turns on once set up. Kept for the
+     * device's lifetime and dropped with the package; a disabled component no longer
+     * resolves (unless MATCH_DISABLED_COMPONENTS), as on Android. Not persisted across
+     * device restarts: apps that toggle components set them again as they start.
+     */
+    private final java.util.concurrent.ConcurrentHashMap<ComponentName, Integer> mComponentStates =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
     @Override
     public int getComponentEnabledSetting(ComponentName componentName, int userId) {
+        if (componentName == null) throw new IllegalArgumentException("componentName is null");
+        Integer state = mComponentStates.get(componentName);
+        if (state != null) return state;
+        if (!hasComponent(componentName)) {
+            throw new IllegalArgumentException("Unknown component: " + componentName);
+        }
         return PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+    }
+
+    @Override
+    public void setComponentEnabledSetting(ComponentName componentName, int newState, int flags,
+            int userId, String callingPackage) {
+        setComponentState(componentName, newState);
+    }
+
+    @Override
+    public void setComponentEnabledSettings(
+            List<PackageManager.ComponentEnabledSetting> settings, int userId,
+            String callingPackage) {
+        if (settings == null) throw new IllegalArgumentException("settings is null");
+        // Android checks every entry before changing any of them.
+        for (PackageManager.ComponentEnabledSetting setting : settings) {
+            if (setting.isComponent()) checkComponentState(setting.getComponentName(),
+                    setting.getEnabledState());
+        }
+        for (PackageManager.ComponentEnabledSetting setting : settings) {
+            if (setting.isComponent()) {
+                setComponentState(setting.getComponentName(), setting.getEnabledState());
+            }
+        }
+    }
+
+    private void setComponentState(ComponentName component, int state) {
+        checkComponentState(component, state);
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT) {
+            mComponentStates.remove(component);
+        } else {
+            mComponentStates.put(component, state);
+        }
+        PackageManager.invalidatePackageInfoCache();
+    }
+
+    /** Android's checks: a known state, a component of the package, its own app or the system. */
+    private void checkComponentState(ComponentName component, int state) {
+        if (component == null) throw new IllegalArgumentException("componentName is null");
+        if (state != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                && state != PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+                && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
+            throw new IllegalArgumentException("Invalid new component state: " + state);
+        }
+        ApkPackage p = get(component.getPackageName());
+        if (p == null || isRemovalPending(p.packageName)) {
+            throw new IllegalArgumentException("Unknown package: " + component.getPackageName());
+        }
+        int callingUid = Binder.getCallingUid();
+        if (callingUid != p.uid() && callingUid != android.os.Process.SYSTEM_UID
+                && callingUid != android.os.Process.ROOT_UID
+                && callingUid != android.os.Process.myUid()
+                && mPermissions.checkProcessPermission(
+                        "android.permission.CHANGE_COMPONENT_ENABLED_STATE",
+                        Binder.getCallingPid(), callingUid) != PackageManager.PERMISSION_GRANTED) {
+            throw new SecurityException("Attempt to change component state; pid="
+                    + Binder.getCallingPid() + ", uid=" + callingUid
+                    + ", package=" + component.getPackageName());
+        }
+        if (!hasComponent(component)) {
+            throw new IllegalArgumentException("Component class " + component.getClassName()
+                    + " does not exist in " + component.getPackageName());
+        }
+    }
+
+    /** Whether the package declares the component (activity or alias, service, receiver, provider). */
+    private boolean hasComponent(ComponentName component) {
+        ApkPackage p = get(component.getPackageName());
+        if (p == null) return false;
+        long all = PackageManager.MATCH_DISABLED_COMPONENTS;
+        String name = component.getClassName();
+        if (p.activityInfo(name, all) != null || p.serviceInfo(name, all) != null
+                || p.receiverInfo(name, all) != null) {
+            return true;
+        }
+        for (ProviderInfo info : p.providers(all)) {
+            if (name.equals(info.name)) return true;
+        }
+        return false;
+    }
+
+    /** Whether a run-time setting disabled the component. */
+    boolean componentDisabled(String packageName, String className) {
+        if (mComponentStates.isEmpty() || packageName == null || className == null) return false;
+        Integer state = mComponentStates.get(new ComponentName(packageName, className));
+        return state != null && state != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                && state != PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
+    }
+
+    /** Drops what a run-time setting disabled, unless the query asks for disabled components. */
+    private List<ResolveInfo> withoutDisabled(List<ResolveInfo> result, long flags) {
+        if (mComponentStates.isEmpty()
+                || (flags & PackageManager.MATCH_DISABLED_COMPONENTS) != 0) {
+            return result;
+        }
+        result.removeIf(ri -> {
+            android.content.pm.ComponentInfo ci = ri.activityInfo != null ? ri.activityInfo
+                    : ri.serviceInfo != null ? ri.serviceInfo : ri.providerInfo;
+            return ci != null && componentDisabled(ci.packageName, ci.name);
+        });
+        return result;
+    }
+
+    private void forgetComponentStates(String packageName) {
+        mComponentStates.keySet().removeIf(c -> c.getPackageName().equals(packageName));
     }
 
     @Override

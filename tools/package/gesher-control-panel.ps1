@@ -17,6 +17,29 @@ $here = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Pat
 $root = Join-Path $env:LOCALAPPDATA 'Gesher'
 $script:UpdateDirectory = Join-Path $root 'updates'
 
+# An app's "App info" (Android Settings, which Gesher answers with this window): the
+# system server writes the package here and opens the panel (ControlCenter.java). A panel
+# already open takes the request on its live-refresh timer, so this second one leaves it
+# there and exits. Every panel keeps the named mutex open (never owned): "Reopen" after an
+# update starts a panel while the old one closes, and that start carries no request.
+$script:PanelRequestFile = Join-Path $root 'data/system/control-panel-request'
+$script:PanelRequestTaken = "$($script:PanelRequestFile).taken"
+function Test-PanelRequestRecent {
+    # The open panel may take the request before this one has started (it polls every
+    # 500 ms; PowerShell takes longer). A request taken in the last seconds was this
+    # start's, so it must not open a second window either.
+    if (Test-Path -LiteralPath $script:PanelRequestFile) { return $true }
+    try {
+        $taken = [System.IO.FileInfo]::new($script:PanelRequestTaken)
+        return $taken.Exists -and ([DateTime]::UtcNow - $taken.LastWriteTimeUtc).TotalSeconds -lt 15
+    } catch { return $false }
+}
+$script:PanelInstanceCreated = $false
+$script:PanelInstance = [System.Threading.Mutex]::new($false, 'Local\Gesher.ControlPanel', [ref] $script:PanelInstanceCreated)
+if (-not $script:PanelInstanceCreated -and (Test-PanelRequestRecent)) {
+    exit 0
+}
+
 $isHe = ($script:GesherUiLanguage -eq 'he')
 $flowDirection = if ($isHe) { 'RightToLeft' } else { 'LeftToRight' }
 
@@ -585,6 +608,82 @@ function Invoke-LiveRefreshTick {
     }
     if ($live.PendingSince -and ($now - $live.PendingSince).TotalMilliseconds -ge $script:LiveRefreshDebounceMs) {
         Refresh-Dashboard
+    }
+}
+
+# Takes the system server's request (one line: a package, or empty for the panel itself).
+# Moving it aside first means one panel shows it once, even with two panels open; the
+# moved file keeps the request's time for Test-PanelRequestRecent.
+function Read-PanelRequest {
+    $file = $script:PanelRequestFile
+    if (-not (Test-Path -LiteralPath $file)) { return $null }
+    try { Move-Item -LiteralPath $file -Destination $script:PanelRequestTaken -Force -ErrorAction Stop } catch { return $null }
+    try { $text = [System.IO.File]::ReadAllText($script:PanelRequestTaken) } catch { return $null }
+    return $text.Trim()
+}
+
+# packages.list's install and update times (milliseconds since 1970, UTC), as local dates.
+function Get-AppInstallTimes([string] $pkg) {
+    $packagesFile = Join-Path $root 'data/system/packages.list'
+    if (-not (Test-Path -LiteralPath $packagesFile)) { return $null }
+    foreach ($line in Get-Content -LiteralPath $packagesFile) {
+        $parts = $line -split "`t"
+        if ($parts.Count -lt 4 -or $parts[0].Trim() -ne $pkg) { continue }
+        $times = @()
+        foreach ($value in $parts[2], $parts[3]) {
+            $ms = 0L
+            if ([long]::TryParse($value.Trim(), [ref] $ms) -and $ms -gt 0) {
+                $times += [DateTimeOffset]::FromUnixTimeMilliseconds($ms).LocalDateTime.ToString('g')
+            } else { $times += $null }
+        }
+        return $times
+    }
+    return $null
+}
+
+function Show-AppInfoDialog([string] $pkg) {
+    $item = $appsList.ItemsSource | Where-Object { $_.Package -eq $pkg } | Select-Object -First 1
+    if (-not $item) {
+        Refresh-Dashboard
+        $item = $appsList.ItemsSource | Where-Object { $_.Package -eq $pkg } | Select-Object -First 1
+    }
+    if (-not $item) { return }
+    $label = if ($item.Label) { [string]$item.Label } else { $pkg }
+    $lines = @()
+    $times = Get-AppInstallTimes $pkg
+    if ($times) {
+        if ($times[0]) { $lines += Get-GesherText 'cp_app_info_installed' @($times[0]) }
+        if ($times[1] -and $times[1] -ne $times[0]) { $lines += Get-GesherText 'cp_app_info_updated' @($times[1]) }
+    }
+    $message = if ($lines.Count -gt 0) { $lines -join "`n" } else { $label }
+    $uninstall = Show-ModernConfirmDialog `
+        -Title $label `
+        -SubTitle $pkg `
+        -Message $message `
+        -Detail (Get-GesherText 'cp_app_info_detail') `
+        -ConfirmText (Get-GesherText 'cp_btn_uninstall') `
+        -CancelText (Get-GesherText 'cp_app_info_close') `
+        -IconImage $item.IconImage
+    if ($uninstall) { & $script:OnAppUninstall $pkg }
+}
+
+# Shows a pending request: brings the panel to the front and, for a package, its details.
+$script:ShowingAppInfo = $false
+function Invoke-PanelRequest {
+    # The dialog runs a nested message loop in which this timer keeps ticking.
+    if ($script:IsBusy -or $script:ShowingAppInfo) { return }
+    $request = Read-PanelRequest
+    if ($null -eq $request) { return }
+    if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) {
+        $window.WindowState = [System.Windows.WindowState]::Normal
+    }
+    # Topmost on and off: Windows lets a background process raise its own window that way.
+    $window.Topmost = $true
+    $window.Topmost = $false
+    $null = $window.Activate()
+    if ($request -match '^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$') {
+        $script:ShowingAppInfo = $true
+        try { Show-AppInfoDialog $request } finally { $script:ShowingAppInfo = $false }
     }
 }
 
@@ -1225,7 +1324,11 @@ $btnReopenPanel.Add_Click({
     } catch { Set-PanelUpdateStatus 'cp_update_reopen_failed' @() $_.Exception.Message; Update-PanelUpdateView }
 })
 $window.Add_SizeChanged({ Update-PanelWindowLayout })
-$window.Add_ContentRendered({ Update-PanelWindowLayout; Start-PanelUpdateCheck -Automatic })
+$window.Add_ContentRendered({
+    Update-PanelWindowLayout
+    Start-PanelUpdateCheck -Automatic
+    try { Invoke-PanelRequest } catch { }
+})
 
 # Toggle device handler
 $btnToggleDevice.Add_Click({
@@ -1416,6 +1519,7 @@ $script:LiveTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:LiveTimer.Interval = [TimeSpan]::FromMilliseconds($script:LiveRefreshIntervalMs)
 $script:LiveTimer.Add_Tick({
     try { Invoke-LiveRefreshTick } catch { }
+    try { Invoke-PanelRequest } catch { }
     try { Invoke-PanelUpdateTick } catch {
         Set-PanelUpdateStatus 'cp_update_check_failed' @() $_.Exception.Message
         Update-PanelUpdateView

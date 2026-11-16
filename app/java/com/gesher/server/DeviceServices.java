@@ -259,6 +259,14 @@ final class DeviceServices {
      * and returns safe fallbacks for device ID / network info.
      */
     static final class TelephonyService extends ITelephony.Default {
+        /**
+         * No SIM: TelephonyManager.getSimState's answer on a phone with an empty slot.
+         * Default's 0 is SIM_STATE_UNKNOWN, "still loading", which apps wait on.
+         */
+        @Override
+        public int getSimStateForSlotIndex(int slotIndex) {
+            return android.telephony.TelephonyManager.SIM_STATE_ABSENT;
+        }
     }
 
     /**
@@ -332,6 +340,27 @@ final class DeviceServices {
      * {@code telephony.registry}: TelephonyRegistry service stand-in for event callbacks.
      */
     static final class TelephonyRegistryService extends ITelephonyRegistry.Default {
+        /**
+         * TelephonyRegistry tells a new listener the current subscriptions at once (they
+         * were published at boot); SubscriptionManager users wait for that first call.
+         * There is no SIM, so nothing changes after it.
+         */
+        @Override
+        public void addOnSubscriptionsChangedListener(String callingPackage,
+                String callingFeatureId,
+                com.android.internal.telephony.IOnSubscriptionsChangedListener callback) {
+            if (callback == null) return;
+            try {
+                callback.onSubscriptionsChanged();
+            } catch (android.os.RemoteException | RuntimeException e) {
+                // The listener's process is gone: as TelephonyRegistry drops such a record.
+            }
+        }
+
+        @Override
+        public void removeOnSubscriptionsChangedListener(String callingPackage,
+                com.android.internal.telephony.IOnSubscriptionsChangedListener callback) {
+        }
     }
 
     /**
