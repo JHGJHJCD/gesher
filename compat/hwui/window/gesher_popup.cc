@@ -26,6 +26,7 @@
 #include <unordered_set>
 
 #include "gesher_window.h"
+#include "layered_bitmap.h"
 
 namespace gesher {
 namespace {
@@ -308,14 +309,15 @@ void Window::SetScreenPosition(int x, int y) {
                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-void Window::PresentPixels(const uint32_t* argb, int width, int height) {
+void Window::PresentPixels(const uint32_t* argb, int width, int height, int sourceStride) {
+  if (sourceStride == 0) sourceStride = width;
   int w = 0, h = 0, stride = 0;
   // BGRA bytes are 0xAARRGGBB little-endian words: the rows copy as they are.
   auto* dst = reinterpret_cast<uint32_t*>(Lock(&w, &h, &stride));
   for (int y = 0; y < h; y++) {
     uint32_t* row = dst + static_cast<size_t>(y) * stride;
     const int n = y < height ? std::min(w, width) : 0;
-    if (n > 0) std::memcpy(row, argb + static_cast<size_t>(y) * width, static_cast<size_t>(n) * 4);
+    if (n > 0) std::memcpy(row, argb + static_cast<size_t>(y) * sourceStride, static_cast<size_t>(n) * 4);
     if (n < w) std::memset(row + n, 0, static_cast<size_t>(w - n) * 4);
   }
   UnlockAndPost();
@@ -324,6 +326,7 @@ void Window::PresentPixels(const uint32_t* argb, int width, int height) {
 void Window::PresentLayered() {
   HWND hwnd = static_cast<HWND>(hwnd_);
   if (!translucent_) {
+    layered_bitmap_.reset();
     if (layered_) {
       layered_ = false;
       ApplyExStyle();
@@ -338,30 +341,14 @@ void Window::PresentLayered() {
   std::lock_guard<std::mutex> lock(buffer_mutex_);
   const int w = buffer_width_, h = buffer_height_;
   if (w < 1 || h < 1) return;
+  if (layered_bitmap_ == nullptr) layered_bitmap_ = std::make_unique<LayeredBitmap>();
+  // The buffer is premultiplied BGRA, what UpdateLayeredWindow takes.
+  if (!layered_bitmap_->Copy(DimmedPixels(), w, h)) return;
   HDC screen = GetDC(nullptr);
-  HDC dc = CreateCompatibleDC(screen);
-  BITMAPINFO bmi = {};
-  bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-  bmi.bmiHeader.biWidth = w;
-  bmi.bmiHeader.biHeight = -h;  // top-down
-  bmi.bmiHeader.biPlanes = 1;
-  bmi.bmiHeader.biBitCount = 32;
-  bmi.bmiHeader.biCompression = BI_RGB;
-  void* bits = nullptr;
-  HBITMAP bmp = CreateDIBSection(dc, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
-  if (bmp != nullptr) {
-    // The buffer is premultiplied BGRA, what UpdateLayeredWindow takes.
-    std::memcpy(bits, DimmedPixels(), static_cast<size_t>(w) * h * 4);
-    GdiFlush();
-    HGDIOBJ old = SelectObject(dc, bmp);
-    SIZE size = {w, h};
-    POINT src = {0, 0};
-    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    UpdateLayeredWindow(hwnd, screen, nullptr, &size, dc, &src, 0, &blend, ULW_ALPHA);
-    SelectObject(dc, old);
-    DeleteObject(bmp);
-  }
-  DeleteDC(dc);
+  SIZE size = {w, h};
+  POINT src = {0, 0};
+  BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+  UpdateLayeredWindow(hwnd, screen, nullptr, &size, layered_bitmap_->dc(), &src, 0, &blend, ULW_ALPHA);
   ReleaseDC(nullptr, screen);
 }
 
@@ -369,6 +356,9 @@ bool Window::HandlePopupMessage(unsigned msg, uintptr_t wparam, intptr_t lparam,
                                 intptr_t* result) {
   (void)wparam;
   switch (msg) {
+    case WM_DISPLAYCHANGE:
+      layered_bitmap_.reset();
+      return false;
     case kMsgPresentLayered: {
       // Coalesce: one update for the frames queued meanwhile.
       MSG pending;

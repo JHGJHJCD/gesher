@@ -1,0 +1,128 @@
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <tlhelp32.h>
+#include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <vector>
+
+static size_t snapshots = 0;
+static size_t opens = 0;
+HANDLE CountSnapshot(DWORD flags, DWORD pid) {
+  ++snapshots;
+  return CreateToolhelp32Snapshot(flags, pid);
+}
+HANDLE CountOpenThread(DWORD access, BOOL inherit, DWORD tid) {
+  ++opens;
+  return OpenThread(access, inherit, tid);
+}
+#define CreateToolhelp32Snapshot CountSnapshot
+#define OpenThread CountOpenThread
+@IMPLEMENTATION@
+#undef CreateToolhelp32Snapshot
+#undef OpenThread
+
+static unsigned checks = 0;
+static void Check(bool ok) {
+  ++checks;
+  if (!ok) {
+    std::fprintf(stderr, "procfs thread check %u failed, Win32=%lu\n", checks, GetLastError());
+    std::exit(1);
+  }
+}
+DWORD WINAPI Wait(void* event) {
+  WaitForSingleObject(static_cast<HANDLE>(event), INFINITE);
+  return STILL_ACTIVE;  // An exit code alone cannot distinguish a live thread.
+}
+DWORD WINAPI Exit(void*) { return STILL_ACTIVE; }
+
+int main(int argc, char** argv) {
+  if (argc > 1 && std::strcmp(argv[1], "child") == 0) {
+    Sleep(30000);
+    return 0;
+  }
+  const bool enforce = argc < 2 || std::strcmp(argv[1], "measure") != 0;
+  HANDLE event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  Check(event != nullptr);
+  DWORD tid = 0;
+  HANDLE thread = CreateThread(nullptr, 0, Wait, event, 0, &tid);
+  Check(thread != nullptr);
+  const DWORD current = GetCurrentThreadId();
+  Check(IsOwnThread(current));
+  Check(IsOwnThread(tid));
+  Check(!IsOwnThread(0));
+  Check(!IsOwnThread(0xffffffff));
+  // Enumeration must still find an own thread whose DACL denies OpenThread.
+  ACL denied_acl;
+  SECURITY_DESCRIPTOR security;
+  Check(InitializeAcl(&denied_acl, sizeof(denied_acl), ACL_REVISION));
+  Check(InitializeSecurityDescriptor(&security, SECURITY_DESCRIPTOR_REVISION));
+  Check(SetSecurityDescriptorDacl(&security, TRUE, &denied_acl, FALSE));
+  SECURITY_ATTRIBUTES attributes = {sizeof(attributes), &security, FALSE};
+  DWORD denied_tid = 0;
+  HANDLE denied = CreateThread(&attributes, 0, Wait, event, 0, &denied_tid);
+  Check(denied != nullptr);
+  HANDLE denied_query = OpenThread(THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, denied_tid);
+  Check(denied_query == nullptr && GetLastError() == ERROR_ACCESS_DENIED);
+  Check(IsOwnThread(denied_tid));
+  auto ids = ThreadIds();
+  Check(std::is_sorted(ids.begin(), ids.end()));
+  Check(std::find(ids.begin(), ids.end(), current) != ids.end());
+  Check(std::find(ids.begin(), ids.end(), tid) != ids.end());
+
+  wchar_t executable[32768];
+  Check(GetModuleFileNameW(nullptr, executable, 32768) != 0);
+  wchar_t command[] = L"procfs-fixture child";
+  STARTUPINFOW startup = {};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION foreign = {};
+  Check(CreateProcessW(executable, command, nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
+                       nullptr, nullptr, &startup, &foreign));
+  Check(!IsOwnThread(foreign.dwThreadId));
+  DWORD dead_tid = 0;
+  HANDLE dead = CreateThread(nullptr, 0, Exit, nullptr, 0, &dead_tid);
+  Check(dead != nullptr);
+  Check(WaitForSingleObject(dead, 5000) == WAIT_OBJECT_0);
+  DWORD code = 0;
+  Check(GetExitCodeThread(dead, &code) && code == STILL_ACTIVE);
+  // The retained thread HANDLE keeps its ID and owner valid after exit.
+  Check(GetProcessIdOfThread(dead) == GetCurrentProcessId());
+  Check(!IsOwnThread(dead_tid));
+
+  DWORD handles_before = 0, handles_after = 0;
+  Check(GetProcessHandleCount(GetCurrentProcess(), &handles_before));
+  snapshots = 0;
+  opens = 0;
+  const auto start = std::chrono::steady_clock::now();
+  for (int i = 0; i < 128; ++i) {
+    Check(IsOwnThread(current));
+    Check(IsOwnThread(tid));
+    Check(!IsOwnThread(dead_tid));
+    Check(!IsOwnThread(foreign.dwThreadId));
+  }
+  const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - start).count();
+  std::printf("procfs task lookups=512 snapshots=%zu OpenThread=%zu elapsed_us=%lld\n",
+              snapshots, opens, static_cast<long long>(elapsed));
+  if (enforce) {
+    Check(snapshots == 0);
+    Check(opens == 384);
+  }
+  Check(GetProcessHandleCount(GetCurrentProcess(), &handles_after));
+  Check(handles_after == handles_before);
+  Check(TerminateProcess(foreign.hProcess, 0));
+  Check(WaitForSingleObject(foreign.hProcess, 5000) == WAIT_OBJECT_0);
+  CloseHandle(foreign.hProcess);
+  CloseHandle(foreign.hThread);
+  Check(SetEvent(event));
+  Check(WaitForSingleObject(thread, 5000) == WAIT_OBJECT_0);
+  Check(WaitForSingleObject(denied, 5000) == WAIT_OBJECT_0);
+  Check(!IsOwnThread(denied_tid));
+  CloseHandle(dead);
+  CloseHandle(denied);
+  CloseHandle(thread);
+  CloseHandle(event);
+  std::printf("procfs thread contracts: %u PASS\n", checks);
+}

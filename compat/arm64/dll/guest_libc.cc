@@ -23,6 +23,7 @@
 // The loader asks guest_symbol(name) before binding a guest import to the shim.
 
 #include "translator.h"
+#include <gesher/symbol_table.h>
 
 #include <windows.h>
 
@@ -40,7 +41,7 @@ namespace {
 
 using HostFn6 = int64_t(GESHER_SYSV*)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
 
-std::unordered_map<std::string, void*> g_overrides;
+gesher::SymbolTable g_overrides;
 
 void* Host(const char* name) {
   return g_host != nullptr && g_host->resolve != nullptr ? g_host->resolve(name) : nullptr;

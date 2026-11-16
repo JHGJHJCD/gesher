@@ -104,6 +104,26 @@ def inventory_members(archives, tools):
             for path in archives.values()}
 
 
+def target_link_inputs(exe, compiler, base, command=None):
+    if command is None:
+        command = subprocess.check_output(['ninja', '-t', 'commands', '-s', exe.name], text=True)
+    try:
+        return link_inputs(command, compiler, base)
+    except AssertionError as error:
+        if error.args != ('Unresolved response file',):
+            raise
+    # Native Windows links need response files to stay within cmd.exe's limit.
+    # Ask Ninja to expand its actual rule, rather than interpreting arbitrary
+    # @files or weakening any of the input/owner/collision checks above.
+    database = json.loads(subprocess.check_output(['ninja', '-t', 'compdb', '-x'], text=True))
+    matches = [entry for entry in database
+               if (Path(entry['directory']) / entry['output']).resolve() == exe.resolve()]
+    assert len(matches) == 1, 'Missing or ambiguous expanded target command'
+    entry = matches[0]
+    assert Path(entry['directory']).resolve() == base.resolve(), 'Expanded command has another build directory'
+    return link_inputs(entry['command'], compiler, base)
+
+
 def require_unique_member(inventories, objects, archive, member):
     matches = [(path, name) for path, names in inventories.items() for name in names
                if Path(name.replace('\\', '/')).name == member]
@@ -163,7 +183,7 @@ def main():
           for word in ('native_fonts.cc.obj', 'FontCollection.cpp.obj', 'MinikinSkia.cpp.obj'))][:12]}), flush=True)
     rows = check_map(mapping)
     command = subprocess.check_output(['ninja', '-t', 'commands', '-s', exe.name], text=True)
-    argv, archives, objects = link_inputs(command, compiler, Path.cwd())
+    argv, archives, objects = target_link_inputs(exe, compiler, Path.cwd(), command=command)
     tools = compiler.parent
     linker = tools / ('ld.lld.exe' if os.name == 'nt' else 'ld.lld')
     inventories = inventory_members(archives, tools)

@@ -77,54 +77,58 @@ bool LeadingPeriod(const char* s, const char* start, int flags) {
   return s == start || ((flags & FNM_PATHNAME) != 0 && s[-1] == '/');
 }
 
-int Match(const char* p, const char* s, const char* start, int flags, int depth) {
-  if (depth > 64) return FNM_NOMATCH;  // pathological patterns
+int Match(const char* p, const char* s, const char* start, int flags) {
+  // A later star can absorb any extra suffix bytes that earlier stars could
+  // have consumed. Retry only this most recent star, advancing one string
+  // byte each time. This avoids an exponential suffix tree and uses constant
+  // auxiliary storage, without a recursive pattern-depth limit.
+  const char* retry_pattern = nullptr;
+  const char* retry_string = nullptr;
   for (;;) {
     int pc = static_cast<unsigned char>(*p++);
+    bool matched = true;
     switch (pc) {
       case '\0':
         if (*s == '\0') return 0;
         if ((flags & FNM_LEADING_DIR) != 0 && *s == '/') return 0;
-        return FNM_NOMATCH;
+        matched = false;
+        break;
       case '?':
-        if (*s == '\0') return FNM_NOMATCH;
-        if (*s == '/' && (flags & FNM_PATHNAME) != 0) return FNM_NOMATCH;
-        if (LeadingPeriod(s, start, flags)) return FNM_NOMATCH;
-        ++s;
+        matched = *s != '\0' && !(*s == '/' && (flags & FNM_PATHNAME) != 0) &&
+                  !LeadingPeriod(s, start, flags);
+        if (matched) ++s;
         break;
       case '*': {
         while (*p == '*') ++p;
-        if (LeadingPeriod(s, start, flags)) return FNM_NOMATCH;
+        if (LeadingPeriod(s, start, flags)) {
+          matched = false;
+          break;
+        }
         if (*p == '\0') {
           if ((flags & FNM_PATHNAME) == 0 || (flags & FNM_LEADING_DIR) != 0) return 0;
           return strchr(s, '/') == nullptr ? 0 : FNM_NOMATCH;
         }
-        if (*p == '/' && (flags & FNM_PATHNAME) != 0) {
-          s = strchr(s, '/');
-          if (s == nullptr) return FNM_NOMATCH;
-          break;
-        }
-        for (; *s != '\0'; ++s) {
-          if (Match(p, s, start, flags, depth + 1) == 0) return 0;
-          if (*s == '/' && (flags & FNM_PATHNAME) != 0) break;
-        }
-        return Match(p, s, start, flags, depth + 1);
+        retry_pattern = p;
+        retry_string = s;
+        break;
       }
       case '[': {
-        if (*s == '\0') return FNM_NOMATCH;
-        if (*s == '/' && (flags & FNM_PATHNAME) != 0) return FNM_NOMATCH;
-        if (LeadingPeriod(s, start, flags)) return FNM_NOMATCH;
+        if (*s == '\0' || (*s == '/' && (flags & FNM_PATHNAME) != 0) ||
+            LeadingPeriod(s, start, flags)) {
+          matched = false;
+          break;
+        }
         const char* q = p;
         int r = MatchBracket(&q, static_cast<unsigned char>(*s), flags);
         if (r < 0) {
           // An unclosed '[' matches itself.
-          if (*s != '[') return FNM_NOMATCH;
+          matched = *s == '[';
         } else if (r == 0) {
-          return FNM_NOMATCH;
+          matched = false;
         } else {
           p = q;
         }
-        ++s;
+        if (matched) ++s;
         break;
       }
       case '\\':
@@ -137,15 +141,20 @@ int Match(const char* p, const char* s, const char* start, int flags, int depth)
         }
         [[fallthrough]];
       default:
-        if (Fold(pc, flags) != Fold(static_cast<unsigned char>(*s), flags)) return FNM_NOMATCH;
-        ++s;
+        matched = Fold(pc, flags) == Fold(static_cast<unsigned char>(*s), flags);
+        if (matched) ++s;
         break;
     }
+    if (matched) continue;
+    if (retry_pattern == nullptr || *retry_string == '\0' ||
+        (*retry_string == '/' && (flags & FNM_PATHNAME) != 0)) return FNM_NOMATCH;
+    s = ++retry_string;
+    p = retry_pattern;
   }
 }
 
 }  // namespace
 
 extern "C" int fnmatch(const char* pattern, const char* string, int flags) {
-  return Match(pattern, string, string, flags, 0);
+  return Match(pattern, string, string, flags);
 }

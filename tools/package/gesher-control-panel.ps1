@@ -23,7 +23,8 @@ $flowDirection = if ($isHe) { 'RightToLeft' } else { 'LeftToRight' }
 # What the dashboard currently shows ($null = never drawn) and the live-refresh bookkeeping.
 # Hashtables are mutated in place so event handlers never need to assign script-scope variables.
 $script:IsBusy = $false
-$script:ViewState = @{ Device = $null; Microg = $null; Store = $null; AppsSignature = $null; AppFiles = @() }
+$script:ActionState = @{ Worker = $null; Completing = $false; Closed = $false }
+$script:ViewState = @{ Device = $null; Microg = $null; Store = $null; AppsSignature = $null; AppFiles = @(); Icons = @{} }
 $script:LiveState = @{ Stamp = $null; AppsStamp = $null; PendingSince = $null; Tick = 0 }
 
 # Helper to query device running state
@@ -423,6 +424,12 @@ function Set-Busy([bool] $busy, [string] $msg = '') {
     # While an action runs (including its nested MessageBox loops) live refresh stays out of the way;
     # every action ends with a full Refresh-Dashboard before it clears the busy state.
     $script:IsBusy = $busy
+    $btnToggleDevice.IsEnabled = -not $busy
+    $servicesCards.IsEnabled = -not $busy
+    $applicationsSection.IsEnabled = -not $busy
+    $window.AllowDrop = -not $busy
+    $btnInstallUpdate.IsEnabled = -not $busy
+    $btnReopenPanel.IsEnabled = -not $busy
     if ($busy) {
         $activityBar.Visibility = [System.Windows.Visibility]::Visible
         $activityBar.IsIndeterminate = $true
@@ -490,35 +497,58 @@ function Update-StoreView($installed) {
     }
 }
 
-# Rebuilds the list (and reloads icons) only when packages, labels, icon paths or icon files changed,
-# so a refresh with nothing new neither flickers nor resets the scroll position.
+# Share frozen decoded images within the current view and across unchanged refreshes.
+function Get-PanelAppIcon([string] $path, [string] $stamp, [hashtable] $icons) {
+    if ($icons.ContainsKey($path)) { return $icons[$path].Image }
+    $previous = $script:ViewState.Icons[$path]
+    if ($previous -and $previous.Stamp -ceq $stamp) {
+        $image = $previous.Image
+    } else {
+        $image = [System.Windows.Media.Imaging.BitmapImage]::new()
+        $image.BeginInit()
+        $image.UriSource = [System.Uri]::new($path)
+        # WPF's process-wide URI cache can otherwise return the old icon even
+        # after its write-time/length stamp changed. OnLoad releases the file.
+        $image.CreateOptions = [System.Windows.Media.Imaging.BitmapCreateOptions]::IgnoreImageCache
+        $image.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
+        $image.EndInit()
+        $image.Freeze()
+    }
+    $icons[$path] = @{ Stamp = $stamp; Image = $image }
+    return $image
+}
+
+# Rebuild the list only when its contents change, keeping unchanged icons decoded.
 function Update-AppsView($installed) {
     $appFiles = [System.Collections.Generic.List[string]]::new()
+    $watched = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $iconStamps = @{}
+    $defaultIco = if (Test-Path -LiteralPath $icoFile) { $icoFile } else { $null }
+    $iconStamps[$icoFile] = Get-FileStamp $icoFile
+    $appFiles.Add($icoFile)
+    [void]$watched.Add($icoFile)
     $signature = @(foreach ($app in $installed) {
         $shell = Join-Path $root "data/data/$($app.Package)/gesher-shell"
-        $appFiles.Add((Join-Path $shell 'shortcut.properties'))
-        $appFiles.Add((Join-Path $shell 'icon.ico'))
-        if ($app.IconPath) { $appFiles.Add([string]$app.IconPath) }
-        "$($app.Package)`t$($app.Label)`t$($app.IconPath)`t$(if ($app.IconPath) { Get-FileStamp $app.IconPath })"
+        foreach ($path in @((Join-Path $shell 'shortcut.properties'), (Join-Path $shell 'icon.ico'), $app.IconPath)) {
+            if ($path -and $watched.Add([string]$path)) { $appFiles.Add([string]$path) }
+        }
+        if ($app.IconPath -and -not $iconStamps.ContainsKey($app.IconPath)) {
+            $iconStamps[$app.IconPath] = Get-FileStamp $app.IconPath
+        }
+        "$($app.Package)`t$($app.Label)`t$($app.IconPath)`t$(if ($app.IconPath) { $iconStamps[$app.IconPath] })"
     }) -join "`n"
+    $signature += "`n$($iconStamps[$icoFile])"
     $script:ViewState.AppFiles = $appFiles.ToArray()
     if ($script:ViewState.AppsSignature -ceq $signature) { return }
-    $script:ViewState.AppsSignature = $signature
 
     $items = [System.Collections.Generic.List[PSObject]]::new()
-    $defaultIco = if (Test-Path -LiteralPath $icoFile) { $icoFile } else { $null }
+    $icons = @{}
     foreach ($app in $installed) {
         $imgSource = $null
         $resolvedIco = if ($app.IconPath -and (Test-Path -LiteralPath $app.IconPath)) { $app.IconPath } else { $defaultIco }
         if ($resolvedIco) {
             try {
-                $bmp = [System.Windows.Media.Imaging.BitmapImage]::new()
-                $bmp.BeginInit()
-                $bmp.UriSource = [System.Uri]::new($resolvedIco)
-                $bmp.CacheOption = [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad
-                $bmp.EndInit()
-                $bmp.Freeze()
-                $imgSource = $bmp
+                $imgSource = Get-PanelAppIcon $resolvedIco $iconStamps[$resolvedIco] $icons
             } catch { }
         }
         $items.Add([PSCustomObject]@{
@@ -528,6 +558,9 @@ function Update-AppsView($installed) {
         })
     }
     $appsList.ItemsSource = $items
+    # Retain only icons used by the current view; removed apps release their entries.
+    $script:ViewState.Icons = $icons
+    $script:ViewState.AppsSignature = $signature
 }
 
 # Full re-evaluation; used at load, after every panel action and when live refresh sees a change.
@@ -616,6 +649,7 @@ function Update-PanelUpdateView {
     $installing = $state.Phase -in 'Confirming', 'Installing'
     $btnCheckUpdate.IsEnabled = -not ($working -or $installing -or $state.Phase -eq 'Completed')
     $btnInstallUpdate.Visibility = if ($state.Phase -in 'Available', 'Ready') { 'Visible' } else { 'Collapsed' }
+    $btnInstallUpdate.IsEnabled = -not $script:IsBusy
     $btnInstallUpdate.Content = if ($state.Download) { Get-GesherText 'cp_update_install' } else { Get-GesherText 'cp_update_download_install' }
     $cancellable = $working -and $state.Worker.Operation -ne 'Install'
     $btnCancelUpdate.Visibility = if ($cancellable -or $state.Phase -eq 'Ready') { 'Visible' } else { 'Collapsed' }
@@ -1071,7 +1105,9 @@ function Show-ModernMessageDialog {
                 <Border Grid.Column="0" Width="40" Height="40" CornerRadius="20" Background="$badgeBg" VerticalAlignment="Top">
                     <TextBlock Text="$(if ($IsError) { '!' } else { 'i' })" FontWeight="Bold" FontSize="18" Foreground="$badgeFg" HorizontalAlignment="Center" VerticalAlignment="Center"/>
                 </Border>
-                <TextBlock Name="DialogMessage" Grid.Column="2" FontSize="13" Foreground="#344054" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                <ScrollViewer Name="DialogMessageScroll" Grid.Column="2" MaxHeight="400" VerticalScrollBarVisibility="Auto">
+                    <TextBlock Name="DialogMessage" FontSize="13" Foreground="#344054" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                </ScrollViewer>
             </Grid>
             <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
                 <Button Name="BtnOk" IsDefault="True" IsCancel="True" MinWidth="85"/>
@@ -1229,50 +1265,28 @@ $window.Add_ContentRendered({ Update-PanelWindowLayout; Start-PanelUpdateCheck -
 
 # Toggle device handler
 $btnToggleDevice.Add_Click({
-    Set-Busy $true
-    try {
-        if (Get-DeviceStatus) {
-            & (Join-Path $here 'gesher-app.ps1') shutdown
-        } else {
-            & (Join-Path $here 'gesher-app.ps1') start
-        }
-    } finally {
-        Complete-DashboardAction
-    }
+    if ($script:IsBusy) { return }
+    $command = if (Get-DeviceStatus) { 'shutdown' } else { 'start' }
+    [void](Start-PanelAction 'Device' @{ Command = $command })
 })
 
 # microG Handlers
 $btnEnableMicrog.Add_Click({
-    Set-Busy $true (Get-GesherText 'cp_staging')
-    $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
-    try {
-        & (Join-Path $here 'gesher-app.ps1') shutdown
-        & (Join-Path $here 'gesher-app-microg.ps1') -AutoDownload
-        & (Join-Path $here 'gesher-app.ps1') start
-    } catch {
-        Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
-    } finally {
-        Complete-DashboardAction
-    }
+    [void](Start-PanelAction 'Microg' @{ Enable = $true } (Get-GesherText 'cp_staging'))
 })
 
 $btnGoogleLogin.Add_Click({
+    if ($script:IsBusy) { return }
     Start-Process -FilePath (Join-Path $here 'gesher-launch.exe') -ArgumentList 'launch', 'com.google.android.gms' -WindowStyle Hidden
 })
 
 $btnMicrogSettings.Add_Click({
+    if ($script:IsBusy) { return }
     Start-Process -FilePath (Join-Path $here 'gesher-launch.exe') -ArgumentList 'launch', 'com.google.android.gms' -WindowStyle Hidden
 })
 
 $btnDisableMicrog.Add_Click({
-    Set-Busy $true
-    try {
-        & (Join-Path $here 'gesher-app.ps1') shutdown
-        & (Join-Path $here 'gesher-app-microg.ps1') -Disable
-        & (Join-Path $here 'gesher-app.ps1') start
-    } finally {
-        Complete-DashboardAction
-    }
+    [void](Start-PanelAction 'Microg' @{ Enable = $false })
 })
 
 # Installs an APK through gesher-app.ps1; on failure throws the panel's message with the
@@ -1304,68 +1318,295 @@ function Install-PanelApk([string] $file, [string] $displayName) {
     }
 }
 
+# One background owner runs profile mutations. Arguments are data and no WPF
+# objects enter its runspace. Existing helper scripts retain their own process
+# lifetimes; the panel never aborts a possibly committing install on close.
+function New-PanelActionWorker([string] $operation, $request) {
+    $powerShell = [PowerShell]::Create()
+    try {
+        $work = {
+            param($here, $operation, $request, $installDefinition, $language)
+            $ErrorActionPreference = 'Stop'
+            $ProgressPreference = 'SilentlyContinue'
+            # Includes nested microG staging helpers. Bound transport waits;
+            # committing an installation is deliberately never force-stopped.
+            $PSDefaultParameterValues = @{ 'Invoke-WebRequest:TimeoutSec' = 120 }
+            . (Join-Path $here 'gesher-ui.ps1')
+            $script:GesherUiLanguage = $language
+            # Trusted source from this panel, shared with the synchronous helper
+            # contracts. No path, label or package is interpolated into source.
+            . ([scriptblock]::Create("function Install-PanelApk {`n$installDefinition`n}"))
+            function Invoke-PanelApp([string[]] $arguments) {
+                $global:LASTEXITCODE = 0
+                & (Join-Path $here 'gesher-app.ps1') @arguments 6>$null | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw (Get-GesherText 'cp_action_failed' @($LASTEXITCODE)) }
+            }
+            $failures = [Collections.Generic.List[string]]::new()
+            try {
+                switch ($operation) {
+                    'Device' { Invoke-PanelApp @([string]$request.Command) }
+                    'Microg' {
+                        Invoke-PanelApp @('shutdown')
+                        $global:LASTEXITCODE = 0
+                        if ($request.Enable) {
+                            & (Join-Path $here 'gesher-app-microg.ps1') -AutoDownload 6>$null | Out-Null
+                        } else {
+                            & (Join-Path $here 'gesher-app-microg.ps1') -Disable 6>$null | Out-Null
+                        }
+                        if ($LASTEXITCODE -ne 0) { throw (Get-GesherText 'cp_action_failed' @($LASTEXITCODE)) }
+                        Invoke-PanelApp @('start')
+                    }
+                    'Install' {
+                        foreach ($file in $request.Files) {
+                            try {
+                                Install-PanelApk ([string]$file) ([IO.Path]::GetFileName([string]$file)) 6>$null | Out-Null
+                            } catch { $failures.Add($_.Exception.Message) }
+                        }
+                    }
+                    'Store' {
+                        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                        $storeApk = Join-Path ([IO.Path]::GetTempPath()) 'AuroraStore.apk'
+                        if (-not (Test-Path -LiteralPath $storeApk)) {
+                            $temporary = [IO.Path]::GetTempFileName()
+                            try {
+                                Invoke-WebRequest -Uri 'https://auroraoss.com/downloads/AuroraStore/Release/AuroraStore-4.6.1.apk' -OutFile $temporary -UseBasicParsing -TimeoutSec 120
+                                Move-Item -LiteralPath $temporary -Destination $storeApk -Force
+                            } finally {
+                                if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
+                            }
+                        }
+                        Install-PanelApk $storeApk 'Aurora Store' 6>$null | Out-Null
+                    }
+                    'Uninstall' {
+                        $global:LASTEXITCODE = 0
+                        & (Join-Path $here 'gesher-app.ps1') uninstall ([string]$request.Package) 6>$null | Out-Null
+                        if ($LASTEXITCODE -ne 0) { throw (Get-GesherText 'cp_uninstall_failed' @([string]$request.Label)) }
+                    }
+                    default { throw 'Unknown dashboard operation.' }
+                }
+            } catch { $failures.Add($_.Exception.Message) }
+            [PSCustomObject]@{ Errors = $failures.ToArray() }
+        }
+        $owner = {
+            param($body, $here, $operation, $request, $installDefinition, $language)
+            $ErrorActionPreference = 'Stop'
+            # ConsoleHost preserves the packaged helpers' native stderr semantics.
+            # A bare PowerShell API runspace turns even successful ART diagnostics
+            # into terminating errors under ErrorActionPreference=Stop.
+            if (-not ('Gesher.PanelActionHost' -as [type])) {
+                Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+namespace Gesher {
+  public static class PanelActionHost {
+    [StructLayout(LayoutKind.Sequential)] struct Security {
+      public int length; public IntPtr descriptor; [MarshalAs(UnmanagedType.Bool)] public bool inherit;
+    }
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct Startup {
+      public int size; public IntPtr reserved, desktop, title;
+      public int x,y,width,height,charsX,charsY,fill,flags;
+      public short show,reservedSize;
+      public IntPtr reservedBytes,input,output,error;
+    }
+    [StructLayout(LayoutKind.Sequential)] struct ExtendedStartup { public Startup startup; public IntPtr attributes; }
+    [StructLayout(LayoutKind.Sequential)] struct ProcessInfo { public IntPtr process,thread; public uint processId,threadId; }
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    static extern IntPtr CreateFileW(string path,uint access,uint share,ref Security security,uint creation,uint flags,IntPtr template);
+    [DllImport("kernel32.dll",SetLastError=true)]
+    static extern bool InitializeProcThreadAttributeList(IntPtr list,int count,uint flags,ref IntPtr size);
+    [DllImport("kernel32.dll",SetLastError=true)]
+    static extern bool UpdateProcThreadAttribute(IntPtr list,uint flags,IntPtr attribute,IntPtr value,IntPtr size,IntPtr previous,IntPtr result);
+    [DllImport("kernel32.dll")] static extern void DeleteProcThreadAttributeList(IntPtr list);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)]
+    static extern bool CreateProcessW(string application,StringBuilder command,IntPtr processSecurity,IntPtr threadSecurity,
+      bool inherit,uint flags,IntPtr environment,string directory,ref ExtendedStartup startup,out ProcessInfo process);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern uint WaitForSingleObject(IntPtr handle,uint milliseconds);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process,out uint code);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    static bool Valid(IntPtr handle) { return handle!=IntPtr.Zero && handle!=new IntPtr(-1); }
+    public static int Run(string executable,string script,string directory) {
+      var security=new Security { length=Marshal.SizeOf(typeof(Security)), inherit=true };
+      IntPtr input=IntPtr.Zero,output=IntPtr.Zero,attributes=IntPtr.Zero,handles=IntPtr.Zero;
+      bool initialized=false;
+      var process=new ProcessInfo();
+      try {
+        input=CreateFileW("NUL",0x80000000,3,ref security,3,0,IntPtr.Zero);
+        if(!Valid(input)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        output=CreateFileW("NUL",0x40000000,3,ref security,3,0,IntPtr.Zero);
+        if(!Valid(output)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        IntPtr size=IntPtr.Zero;
+        InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size);
+        if(size==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        attributes=Marshal.AllocHGlobal(size);
+        if(!InitializeProcThreadAttributeList(attributes,1,0,ref size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        initialized=true;
+        handles=Marshal.AllocHGlobal(2*IntPtr.Size);
+        Marshal.WriteIntPtr(handles,0,input); Marshal.WriteIntPtr(handles,IntPtr.Size,output);
+        // Only these NUL handles are inherited: no redirected reader threads,
+        // accumulating logs, or unrelated inheritable profile/process handles.
+        if(!UpdateProcThreadAttribute(attributes,0,new IntPtr(0x00020002),handles,new IntPtr(2*IntPtr.Size),IntPtr.Zero,IntPtr.Zero))
+          throw new Win32Exception(Marshal.GetLastWin32Error());
+        var startup=new ExtendedStartup();
+        startup.startup.size=Marshal.SizeOf(typeof(ExtendedStartup));
+        startup.startup.flags=0x100;
+        startup.startup.input=input; startup.startup.output=output; startup.startup.error=output;
+        startup.attributes=attributes;
+        // Script is an owned .ps1 path, never a user command or argument.
+        var command=new StringBuilder("\""+executable+"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \""+script+"\"");
+        if(!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,0x08080000,IntPtr.Zero,directory,ref startup,out process))
+          throw new Win32Exception(Marshal.GetLastWin32Error());
+        CloseHandle(process.thread); process.thread=IntPtr.Zero;
+        if(WaitForSingleObject(process.process,0xffffffff)!=0) throw new Win32Exception(Marshal.GetLastWin32Error());
+        uint code;
+        if(!GetExitCodeProcess(process.process,out code)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        return unchecked((int)code);
+      } finally {
+        if(Valid(process.thread)) CloseHandle(process.thread);
+        if(Valid(process.process)) CloseHandle(process.process);
+        if(initialized) DeleteProcThreadAttributeList(attributes);
+        if(attributes!=IntPtr.Zero) Marshal.FreeHGlobal(attributes);
+        if(handles!=IntPtr.Zero) Marshal.FreeHGlobal(handles);
+        if(Valid(input)) CloseHandle(input);
+        if(Valid(output)) CloseHandle(output);
+      }
+    }
+  }
+}
+'@
+            }
+            $directory = Join-Path ([IO.Path]::GetTempPath()) ('gesher-panel-action-' + [guid]::NewGuid().ToString('N'))
+            $null = [IO.Directory]::CreateDirectory($directory)
+            $configuration = Join-Path $directory 'request.json'
+            $resultPath = Join-Path $directory 'result.json'
+            $entry = Join-Path $directory 'action.ps1'
+            try {
+                $data = @{ Body = $body; Here = $here; Operation = $operation; Request = $request
+                    InstallDefinition = $installDefinition; Language = $language }
+                [IO.File]::WriteAllText($configuration, ($data | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($true))
+                $hostScript = @'
+$ErrorActionPreference = 'Stop'
+$resultPath = Join-Path $PSScriptRoot 'result.json'
+try {
+    $config = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'request.json')) | ConvertFrom-Json
+    $result = & ([scriptblock]::Create($config.Body)) $config.Here $config.Operation $config.Request $config.InstallDefinition $config.Language
+    [IO.File]::WriteAllText($resultPath, ($result | ConvertTo-Json -Depth 4), [Text.UTF8Encoding]::new($true))
+} catch {
+    [IO.File]::WriteAllText($resultPath, ([PSCustomObject]@{ Errors = @($_.Exception.Message) } | ConvertTo-Json), [Text.UTF8Encoding]::new($true))
+    exit 1
+}
+'@
+                [IO.File]::WriteAllText($entry, $hostScript, [Text.UTF8Encoding]::new($true))
+                $executable = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell/v1.0/powershell.exe'
+                $exitCode = [Gesher.PanelActionHost]::Run($executable, $entry, $here)
+                if (-not [IO.File]::Exists($resultPath)) { throw "Dashboard operation exited without a result (exit code $exitCode)." }
+                [IO.File]::ReadAllText($resultPath) | ConvertFrom-Json
+            } finally {
+                # Only this owner's three known files and empty directory are
+                # removed, after its native process has exited. No recursive delete.
+                foreach ($path in $entry, $configuration, $resultPath) { [IO.File]::Delete($path) }
+                [IO.Directory]::Delete($directory, $false)
+            }
+        }
+        $null = $powerShell.AddScript($owner.ToString()).AddArgument($work.ToString()).AddArgument($here).AddArgument($operation).
+            AddArgument($request).AddArgument((Get-Command Install-PanelApk).Definition).AddArgument($script:GesherUiLanguage)
+        $handle = $powerShell.BeginInvoke()
+        return [PSCustomObject]@{ PowerShell = $powerShell; Handle = $handle; Disposed = $false }
+    } catch {
+        $powerShell.Dispose()
+        throw
+    }
+}
+
+function Start-PanelAction([string] $operation, $request, [string] $message = '') {
+    $state = $script:ActionState
+    if ($state.Closed -or $state.Worker -or $state.Completing -or $script:IsBusy -or
+        $script:UpdateState.Phase -in 'Confirming', 'Installing') { return $false }
+    Set-Busy $true $message
+    try {
+        $state.Worker = New-PanelActionWorker $operation $request
+        return $true
+    } catch {
+        try { Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true }
+        finally { Complete-DashboardAction }
+        return $false
+    }
+}
+
+function Complete-PanelAction {
+    $state = $script:ActionState
+    $worker = $state.Worker
+    if (-not $worker -or -not $worker.Handle.IsCompleted -or $state.Completing) { return }
+    $state.Completing = $true
+    $failures = [Collections.Generic.List[string]]::new()
+    try {
+        try {
+            $results = @($worker.PowerShell.EndInvoke($worker.Handle))
+            foreach ($result in $results) {
+                foreach ($failure in $result.Errors) {
+                    if ($failure) { $failures.Add([string]$failure) }
+                }
+            }
+            # A terminating runspace error can complete without producing the
+            # structured result; don't acknowledge an unobserved action as success.
+            if ($results.Count -ne 1) { throw 'Dashboard operation did not return a result.' }
+        } catch { $failures.Add($_.Exception.Message) }
+        finally {
+            try { $worker.PowerShell.Dispose() }
+            catch { $failures.Add($_.Exception.Message) }
+            finally { $worker.Disposed = $true; $state.Worker = $null }
+        }
+        if ($failures.Count) {
+            Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message ($failures -join "`n`n") -IsError $true
+        }
+    } finally {
+        try { Complete-DashboardAction } finally { $state.Completing = $false }
+    }
+}
+
+function Test-PanelActionClose {
+    # Completion releases ownership even if the dashboard's subsequent refresh
+    # needs a retry. A transient read failure must not trap an otherwise idle UI.
+    try { Complete-PanelAction } catch { }
+    if ($script:ActionState.Worker -or $script:ActionState.Completing) {
+        $statusMessage.Text = Get-GesherText 'cp_action_finish'
+        return $false
+    }
+    return $true
+}
+
 # Store Handlers
 $btnInstallStore.Add_Click({
-    Set-Busy $true (Get-GesherText 'cp_downloading' @('Aurora Store'))
-    $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
-    try {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        $storeApk = Join-Path $env:TEMP 'AuroraStore.apk'
-        if (-not (Test-Path $storeApk)) {
-            Invoke-WebRequest -Uri 'https://auroraoss.com/downloads/AuroraStore/Release/AuroraStore-4.6.1.apk' -OutFile $storeApk -UseBasicParsing
-        }
-        Install-PanelApk $storeApk 'Aurora Store'
-    } catch {
-        Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
-    } finally {
-        Complete-DashboardAction
-    }
+    [void](Start-PanelAction 'Store' @{} (Get-GesherText 'cp_downloading' @('Aurora Store')))
 })
 
 $btnOpenStore.Add_Click({
+    if ($script:IsBusy) { return }
     Start-Process -FilePath (Join-Path $here 'gesher-launch.exe') -ArgumentList 'launch', 'com.aurora.store' -WindowStyle Hidden
 })
 
 # Install APK Button Handler
 $btnInstallApk.Add_Click({
+    if ($script:IsBusy) { return }
     $ofd = [Microsoft.Win32.OpenFileDialog]::new()
     $ofd.Filter = "Android Packages (*.apk;*.apks;*.xapk)|*.apk;*.apks;*.xapk|All Files (*.*)|*.*"
     if ($ofd.ShowDialog() -eq $true) {
         $file = $ofd.FileName
         $fileName = [System.IO.Path]::GetFileName($file)
-        Set-Busy $true (Get-GesherText 'cp_installing' @($fileName))
-        $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
-        try {
-            Install-PanelApk $file $fileName
-        } catch {
-            Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
-        } finally {
-            Complete-DashboardAction
-        }
+        [void](Start-PanelAction 'Install' @{ Files = @($file) } (Get-GesherText 'cp_installing' @($fileName)))
     }
 })
 
 # Drag & Drop Handler
 $window.Add_Drop({
     param($sender, $e)
+    if ($script:IsBusy) { return }
     if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
         $files = $e.Data.GetData([System.Windows.DataFormats]::FileDrop)
-        try {
-            foreach ($file in $files) {
-                $ext = [System.IO.Path]::GetExtension($file).ToLower()
-                if ($ext -in '.apk', '.apks', '.xapk') {
-                    $fileName = [System.IO.Path]::GetFileName($file)
-                    Set-Busy $true (Get-GesherText 'cp_installing' @($fileName))
-                    $window.Dispatcher.Invoke([Action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
-                    try {
-                        Install-PanelApk $file $fileName
-                    } catch {
-                        Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
-                    }
-                }
-            }
-        } finally {
-            Complete-DashboardAction
+        $packages = @($files | Where-Object { [IO.Path]::GetExtension($_).ToLowerInvariant() -in '.apk', '.apks', '.xapk' })
+        if ($packages.Count) {
+            [void](Start-PanelAction 'Install' @{ Files = $packages } (Get-GesherText 'cp_installing' @([IO.Path]::GetFileName($packages[0]))))
         }
     }
 })
@@ -1373,26 +1614,21 @@ $window.Add_Drop({
 # Per-app Launch and Uninstall handlers (invoked via event binding or code behind)
 $script:OnAppLaunch = {
     param($pkg)
+    if ($script:IsBusy) { return }
     Start-Process -FilePath (Join-Path $here 'gesher-launch.exe') -ArgumentList 'launch', $pkg -WindowStyle Hidden
 }
 
 $script:OnAppUninstall = {
     param($pkg)
+    if ($script:IsBusy) { return }
     $item = $appsList.ItemsSource | Where-Object { $_.Package -eq $pkg } | Select-Object -First 1
     $label = if ($item -and $item.Label) { $item.Label } else { $pkg }
     $iconImage = if ($item) { $item.IconImage } else { $null }
-    if (Show-UninstallConfirmDialog -pkg $pkg -label $label -iconImage $iconImage) {
-        Set-Busy $true
-        try {
-            & (Join-Path $here 'gesher-app.ps1') uninstall $pkg
-            if ($LASTEXITCODE -ne 0) {
-                throw (Get-GesherText 'cp_uninstall_failed' @($label))
-            }
-        } catch {
-            Show-ModernMessageDialog -Title (Get-GesherText 'cp_title') -Message $_.Exception.Message -IsError $true
-        } finally {
-            Complete-DashboardAction
-        }
+    Set-Busy $true
+    try { $confirmed = Show-UninstallConfirmDialog -pkg $pkg -label $label -iconImage $iconImage }
+    finally { Set-Busy $false }
+    if ($confirmed) {
+        [void](Start-PanelAction 'Uninstall' @{ Package = [string]$pkg; Label = [string]$label })
     }
 }
 
@@ -1415,6 +1651,7 @@ $appsList.AddHandler([System.Windows.Controls.Button]::ClickEvent, [System.Windo
 $script:LiveTimer = [System.Windows.Threading.DispatcherTimer]::new()
 $script:LiveTimer.Interval = [TimeSpan]::FromMilliseconds($script:LiveRefreshIntervalMs)
 $script:LiveTimer.Add_Tick({
+    try { Complete-PanelAction } catch { }
     try { Invoke-LiveRefreshTick } catch { }
     try { Invoke-PanelUpdateTick } catch {
         Set-PanelUpdateStatus 'cp_update_check_failed' @() $_.Exception.Message
@@ -1426,6 +1663,7 @@ $window.Add_Activated({
 })
 $window.Add_Closing({
     param($sender, $event)
+    if (-not (Test-PanelActionClose)) { $event.Cancel = $true; return }
     # Finish or cancel the separate setup wizard before closing its progress view.
     # Checking and downloading can always be cancelled by closing this window.
     Complete-PanelUpdateInstallation
@@ -1436,6 +1674,7 @@ $window.Add_Closing({
     }
 })
 $window.Add_Closed({
+    $script:ActionState.Closed = $true
     Close-PanelUpdates
     $script:LiveTimer.Stop()
 })

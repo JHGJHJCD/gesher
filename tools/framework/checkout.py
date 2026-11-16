@@ -36,7 +36,8 @@ def checkout(tree, paths, whole_dirs=()):
         wanted = ['*.bp'] + [f'/{d}/' for d in sorted(wholes)]
         wanted += [f'/{f}' for f in sorted(files)
                    if not any(f.startswith(w + '/') for w in wholes)]
-        new = [p for p in wanted if p not in set(existing)]
+        existing_set = set(existing)
+        new = [p for p in wanted if p not in existing_set]
         if not new:
             continue
         subprocess.run(git + ['sparse-checkout', 'set', '--no-cone', '--stdin'],

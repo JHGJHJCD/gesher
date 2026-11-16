@@ -138,13 +138,17 @@ jlong WindowsCamera_open(JNIEnv* env, jclass, jstring id, jint width, jint heigh
 jint WindowsCamera_read(JNIEnv* env, jclass, jlong handle, jbyteArray frame) {
   auto* capture = reinterpret_cast<cam::Capture*>(handle);
   if (capture == nullptr) return E_INVALIDARG;
+  std::lock_guard<std::mutex> lock(capture->jni_read_mutex);
   cam::TraceSample trace(capture->jni_read_trace);
-  if (frame == nullptr ||
-      env->GetArrayLength(frame) < capture->width * capture->height * 3 / 2) {
+  const int64_t pixels = static_cast<int64_t>(capture->width) * capture->height;
+  if (frame == nullptr || capture->width <= 0 || capture->height <= 0 ||
+      capture->width % 2 != 0 || capture->height % 2 != 0 || pixels > INT32_MAX / 3 * 2 ||
+      env->GetArrayLength(frame) < pixels * 3 / 2) {
     return E_INVALIDARG;
   }
   trace.Step(0);
-  std::vector<uint8_t> buffer(static_cast<size_t>(capture->width) * capture->height * 3 / 2);
+  auto& buffer = capture->jni_read_buffer;
+  buffer.resize(static_cast<size_t>(pixels * 3 / 2));
   trace.Step(1);
   HRESULT hr = capture->Read(buffer.data());
   trace.Step(2);

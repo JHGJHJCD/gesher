@@ -3,6 +3,7 @@
 
 #include "abi_types.h"
 #include <gesher/arm64_va_list.h>
+#include <gesher/symbol_table.h>
 
 #include <stdint.h>
 #include <stddef.h>
@@ -126,7 +127,7 @@ inline double NextFp(SysvVaList* ap) {
 #endif
 
 // Symbol name -> address of the System V entry point (or data object).
-using SymbolTable = std::unordered_map<std::string, void*>;
+using SymbolTable = gesher::SymbolTable;
 
 // Each part of the shim adds its symbols.
 void RegisterLibc(SymbolTable& table);     // shim.cc

@@ -47,6 +47,7 @@
 #include <gesher/bionic_shim.h>
 #include <gesher/egl_angle.h>
 #include <gesher/elf_loader.h>
+#include <gesher/symbol_table.h>
 
 #include <android/native_window.h>
 
@@ -599,8 +600,8 @@ const GlThunk kHandwritten[] = {
     // eglGetProcAddress is added by Register().
 };
 
-std::unordered_map<std::string, void*>& ByName() {
-  static auto* map = new std::unordered_map<std::string, void*>();
+gesher::SymbolTable& ByName() {
+  static auto* map = new gesher::SymbolTable();
   return *map;
 }
 
