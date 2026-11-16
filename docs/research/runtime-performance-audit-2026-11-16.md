@@ -53,8 +53,12 @@ signalled state; the current thread needs no handle. A retained dead handle,
 including exit code `STILL_ACTIVE`, cannot make an exited thread visible.
 Access-denied custom DACLs retain the prior snapshot fallback. In the ordinary
 512-query workload, machine-wide snapshots fall from 512 to zero, with 384
-targeted opens and no handle growth. Real Windows coverage comprises 546 checks.
-Listing the entire task directory still enumerates threads.
+targeted opens and no handle growth. Real Windows coverage comprises 664 checks.
+The DACL fixture uses a scoped duplicate thread token with privileges disabled,
+so an elevated runner's debug privilege cannot bypass the denial being tested.
+It checks live/dead fallback, exact token identity/privilege restoration and
+handle balance; the process token is unchanged. Listing the entire task
+directory still enumerates threads.
 
 ### Iterative wildcard matching
 
