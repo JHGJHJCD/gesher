@@ -204,14 +204,13 @@ static jint Process_getProcessGroup(JNIEnv*, jclass, jint) {
 
 // As AndroidRuntime::setArgv0(name, /*setProcName=*/true) on a device: the process
 // name /proc/self/cmdline and /proc/self/comm report (gesher/process_name.h), and
-// the calling thread's name, its last 15 bytes if longer.
+// the calling thread's name, shortened by libutils' Android naming rules.
 static void Process_setArgV0Native(JNIEnv* env, jclass, jstring name) {
   if (name == nullptr) return;
   const char* utf = env->GetStringUTFChars(name, nullptr);
   if (utf == nullptr) return;
   gesher_set_process_argv0(utf);
-  const size_t len = strlen(utf);
-  pthread_setname_np(pthread_self(), len < 15 ? utf : utf + len - 15);
+  androidSetThreadName(utf);
   env->ReleaseStringUTFChars(name, utf);
 }
 

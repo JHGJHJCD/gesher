@@ -134,6 +134,17 @@ int main(int argc, char** argv) {
           "missing ARM64 DNS bridge must fail with ENOSYS");
   }
 
+  // The guest's process state cannot be cloned by the host's vfork-style shim.
+  // Call the actual guest bindings: both must return pid_t(-1), set EAGAIN and
+  // leave the caller running. This host supplies no fallback fork function.
+  for (const char* name : {"fork", "vfork"}) {
+    void* fn = api->guest_symbol(name);
+    g_test_errno = 0;
+    uint64_t result = fn ? api->call(fn, nullptr, 0) : 0;
+    Check(name, fn && static_cast<int32_t>(result) == -1 && g_test_errno == 11,
+          "guest process cloning must fail with EAGAIN");
+  }
+
   // `arm64_smoke_test crash-segv|crash-ill|crash-jump`: a faulting guest, which
   // must end the process with an Android-style "Fatal signal" report rather
   // than hang (tracks/47-arm64.ps1 runs these with a timeout).

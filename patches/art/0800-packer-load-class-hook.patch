@@ -14,8 +14,8 @@ index db91a54..ccb987b 100644
 +// here: compat/bionic/art_shim.cc loads a stand-in libart.so for such an app
 +// (only then) and sets this to its LoadClass, a System V function that does
 +// nothing unless the packer hooked it (ADR 0086). Null otherwise.
-+extern "C" void* volatile gesher_art_load_class_hook;
-+void* volatile gesher_art_load_class_hook = nullptr;
++extern "C" std::atomic<void*> gesher_art_load_class_hook;
++std::atomic<void*> gesher_art_load_class_hook{nullptr};
 +using GesherLoadClassHook = void(ART_SYSV_ABI*)(ClassLinker* linker,
 +                                                Thread* self,
 +                                                const DexFile* dex_file,
@@ -28,7 +28,7 @@ index db91a54..ccb987b 100644
                              const dex::ClassDef& dex_class_def,
                              Handle<mirror::Class> klass) {
 +#if defined(GESHER)
-+  if (void* hook = gesher_art_load_class_hook;
++  if (void* hook = gesher_art_load_class_hook.load(std::memory_order_acquire);
 +      UNLIKELY(hook != nullptr) && !klass->IsBootStrapClassLoaded()) {
 +    // The same arguments as the device's ClassLinker::LoadClass (this, then
 +    // references as pointers, the Handle by value), before the class data is read.

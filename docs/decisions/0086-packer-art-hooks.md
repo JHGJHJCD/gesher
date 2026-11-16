@@ -77,7 +77,9 @@ no symbol.
 - `compat/bionic/jni_bridge.cc` loads the stand-in when an app's
   `System.load`/`loadLibrary` opens a packer's shell (base name `libexec.so`,
   `libexecmain.so`, `libexec_x86.so` or `libexecmain_x86.so`). It loads it
-  before the shell's own code runs. It sets ART's `gesher_art_load_class_hook`
+  before the shell's own code runs, after checking that the input is an
+  x86-64 ELF shared object; ARM64 shells with those generic names do not
+  activate this host x86-64 stand-in. It sets ART's `gesher_art_load_class_hook`
   to the stand-in's `LoadClass`. Other apps get neither the file nor the hook.
   `GESHER_ART_SHIM=0` turns it off.
 - `patches/art/0800` defines that pointer in `runtime/class_linker.cc`. When
@@ -117,6 +119,10 @@ order):
   survives. The bridge's `Real()` now passes ART's own JNIEnv through
   unchanged. As `SetTableOverride` does anywhere, this turns ART's core
   platform API enforcement off in that process.
+  Installation checks both allocations, memory protection and instruction
+  cache flushing before publishing the table. A failed attempt releases its
+  allocations and can be retried. The class hook is published with release/
+  acquire synchronization only after the complete JNI table is ready.
 - **`MRS CNTVCT_EL0` in arm64 code.** SQLCipher (arm64-v8a, translated) reads
   the virtual counter, which the pinned dynarmic left undefined (SIGILL).
   `compat/arm64/dll/patch-dynarmic-fpsr.py` decodes it as `CNTPCT_EL0`,
@@ -183,6 +189,12 @@ APK the check passes.
 
   ART's own call is exercised only by an app whose packer hooks it; no packed
   app is in the repository.
+  `tools/test_art_jni_dispatch.py` executes the generated dispatch code with
+  both ABIs and checks integer, floating-point, stack and variadic arguments;
+  controlled OS/VM boundaries cover failure cleanup, retries and concurrent
+  publication, including rejection of unsupported or incomplete ELF headers.
+  The ARM64 smoke test calls both guest `fork` and `vfork` bindings
+  and requires `-1` with `EAGAIN`.
 - **Not covered:** the `LoadMethod` fallbacks (no such function exists in
   Android 16's ART), and any packer that resolves ART symbols through
   `dl_iterate_phdr` or `dlopen("libart.so")` instead of `/proc/self/maps`.

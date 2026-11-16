@@ -40,6 +40,7 @@
 #include <gesher/bionic_shim.h>
 #include <gesher/elf_dlopen.h>
 #include <gesher/elf_loader.h>
+#include <elf.h>
 
 #include <jni.h>
 #include <windows.h>
@@ -59,7 +60,7 @@ namespace elf = gesher::elf;
 
 // ART's LoadClass hook (runtime/class_linker.cc, patches/art/0800): the
 // stand-in libart.so's LoadClass once an app's packer needs it (ADR 0086).
-extern "C" void* volatile gesher_art_load_class_hook;
+extern "C" std::atomic<void*> gesher_art_load_class_hook;
 // ART's JNIEnv table and its override (runtime/jni/jni_env_ext.cc,
 // patches/art/0801).
 extern "C" const JNINativeInterface* gesher_art_jni_function_table();
@@ -864,69 +865,97 @@ void Install() {
 //   jb  ms
 // sysv: jmp [r10+24]
 // ms:   jmp [r10+16]
-void InstallCallerAbiJniTable() {
-  static std::once_flag once;
-  std::call_once(once, [] {
-    const JNINativeInterface* real = gesher_art_jni_function_table();
-    if (real == nullptr) return;
-    auto* image = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
-    const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
-    const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
-    const uint64_t lo = reinterpret_cast<uint64_t>(image);
-    const uint64_t hi = lo + nt->OptionalHeader.SizeOfImage;
+bool InstallCallerAbiJniTable() {
+  static std::mutex mutex;
+  static bool installed = false;
+  std::lock_guard<std::mutex> lock(mutex);
+  if (installed) return true;
+  const JNINativeInterface* real = gesher_art_jni_function_table();
+  if (real == nullptr) return false;
+  auto* image = reinterpret_cast<uint8_t*>(GetModuleHandleW(nullptr));
+  const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(image);
+  const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(image + dos->e_lfanew);
+  const uint64_t lo = reinterpret_cast<uint64_t>(image);
+  const uint64_t hi = lo + nt->OptionalHeader.SizeOfImage;
 
-    constexpr size_t kStub = 80;    // code (33 bytes), then its data
-    constexpr size_t kData = 40;    // lo, hi, Microsoft target, System V target
-    auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, kEnvSlots * kStub,
-                                                    MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    auto* table = static_cast<void**>(VirtualAlloc(nullptr, sizeof(JNINativeInterface),
-                                                   MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
-    if (code == nullptr || table == nullptr) return;
-    void* const* ms = reinterpret_cast<void* const*>(real);
-    for (size_t i = 0; i < kEnvSlots; ++i) {
-      if (ms[i] == nullptr || g_env_table[i] == nullptr) {
-        table[i] = ms[i];
-        continue;
-      }
-      uint8_t* p = code + i * kStub;
-      uint8_t* data = p + kData;
-      const uint8_t stub[] = {
-          0x4c, 0x8b, 0x1c, 0x24,                          // mov r11, [rsp]
-          0x49, 0xba, 0, 0, 0, 0, 0, 0, 0, 0,              // mov r10, imm64 (data)
-          0x4d, 0x3b, 0x1a,                                // cmp r11, [r10]
-          0x72, 0x06,                                      // jb sysv (+6)
-          0x4d, 0x3b, 0x5a, 0x08,                          // cmp r11, [r10+8]
-          0x72, 0x04,                                      // jb ms (+4)
-          0x41, 0xff, 0x62, 0x18,                          // sysv: jmp [r10+24]
-          0x41, 0xff, 0x62, 0x10,                          // ms: jmp [r10+16]
-      };
-      static_assert(sizeof(stub) <= kData && kData + 32 <= kStub, "stub layout");
-      std::memcpy(p, stub, sizeof(stub));
-      const uint64_t data_address = reinterpret_cast<uint64_t>(data);
-      std::memcpy(p + 6, &data_address, 8);
-      const uint64_t values[4] = {lo, hi, reinterpret_cast<uint64_t>(ms[i]),
-                                  reinterpret_cast<uint64_t>(g_env_table[i])};
-      std::memcpy(data, values, sizeof(values));
-      table[i] = p;
+  constexpr size_t kStub = 80;    // code (33 bytes), then its data
+  constexpr size_t kData = 40;    // lo, hi, Microsoft target, System V target
+  auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, kEnvSlots * kStub,
+                                                  MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+  auto* table = static_cast<void**>(VirtualAlloc(nullptr, sizeof(JNINativeInterface),
+                                                 MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+  auto discard = [&] {
+    if (code != nullptr) VirtualFree(code, 0, MEM_RELEASE);
+    if (table != nullptr) VirtualFree(table, 0, MEM_RELEASE);
+  };
+  if (code == nullptr || table == nullptr) {
+    discard();
+    return false;
+  }
+  void* const* ms = reinterpret_cast<void* const*>(real);
+  for (size_t i = 0; i < kEnvSlots; ++i) {
+    if (ms[i] == nullptr || g_env_table[i] == nullptr) {
+      table[i] = ms[i];
+      continue;
     }
-    DWORD old = 0;
-    VirtualProtect(code, kEnvSlots * kStub, PAGE_EXECUTE_READ, &old);
-    VirtualProtect(table, sizeof(JNINativeInterface), PAGE_READONLY, &old);
-    FlushInstructionCache(GetCurrentProcess(), code, kEnvSlots * kStub);
-    gesher_art_set_jni_table_override(reinterpret_cast<const JNINativeInterface*>(table));
-    std::fprintf(stderr,
-                 "gesher art: ART's JNIEnv table chooses its ABI by caller (a packer calls it "
-                 "from loaded code)\n");
-  });
+    uint8_t* p = code + i * kStub;
+    uint8_t* data = p + kData;
+    const uint8_t stub[] = {
+        0x4c, 0x8b, 0x1c, 0x24,                          // mov r11, [rsp]
+        0x49, 0xba, 0, 0, 0, 0, 0, 0, 0, 0,              // mov r10, imm64 (data)
+        0x4d, 0x3b, 0x1a,                                // cmp r11, [r10]
+        0x72, 0x06,                                      // jb sysv (+6)
+        0x4d, 0x3b, 0x5a, 0x08,                          // cmp r11, [r10+8]
+        0x72, 0x04,                                      // jb ms (+4)
+        0x41, 0xff, 0x62, 0x18,                          // sysv: jmp [r10+24]
+        0x41, 0xff, 0x62, 0x10,                          // ms: jmp [r10+16]
+    };
+    static_assert(sizeof(stub) <= kData && kData + 32 <= kStub, "stub layout");
+    std::memcpy(p, stub, sizeof(stub));
+    const uint64_t data_address = reinterpret_cast<uint64_t>(data);
+    std::memcpy(p + 6, &data_address, 8);
+    const uint64_t values[4] = {lo, hi, reinterpret_cast<uint64_t>(ms[i]),
+                                reinterpret_cast<uint64_t>(g_env_table[i])};
+    std::memcpy(data, values, sizeof(values));
+    table[i] = p;
+  }
+  DWORD old = 0;
+  if (!VirtualProtect(code, kEnvSlots * kStub, PAGE_EXECUTE_READ, &old) ||
+      !VirtualProtect(table, sizeof(JNINativeInterface), PAGE_READONLY, &old) ||
+      !FlushInstructionCache(GetCurrentProcess(), code, kEnvSlots * kStub)) {
+    discard();
+    return false;
+  }
+  gesher_art_set_jni_table_override(reinterpret_cast<const JNINativeInterface*>(table));
+  installed = true;
+  std::fprintf(stderr,
+               "gesher art: ART's JNIEnv table chooses its ABI by caller (a packer calls it "
+               "from loaded code)\n");
+  return true;
 }
 
 // An app library that is a packer's shell hooking ART by symbol (Ijiami's
 // libexec*.so): before it runs, the stand-in libart.so it looks for, and ART's
 // LoadClass calling it (ADR 0086). GESHER_ART_SHIM=0 turns this off.
 void LoadArtShimFor(const char* path) {
-  if (!gesher::bionic::IsArtHookingPacker(path) || gesher_art_load_class_hook != nullptr) return;
+#if !defined(__x86_64__)
+  // The stand-in and caller-ABI stubs contain host x86-64 instructions.
+  return;
+#endif
+  if (!gesher::bionic::IsArtHookingPacker(path) ||
+      gesher_art_load_class_hook.load(std::memory_order_acquire) != nullptr) return;
   const char* off = std::getenv("GESHER_ART_SHIM");
   if (off != nullptr && std::strcmp(off, "0") == 0) return;
+  // Generic libexec names also occur in ARM64 APKs. Inspect the input before
+  // any constructors run; an ARM64 shell cannot hook this x86-64 stand-in.
+  Elf64_Ehdr header{};
+  std::FILE* input = std::fopen(path, "rb");
+  if (input == nullptr) return;
+  const bool complete = std::fread(&header, 1, sizeof(header), input) == sizeof(header);
+  std::fclose(input);
+  if (!complete || std::memcmp(header.e_ident, ELFMAG, SELFMAG) != 0 ||
+      header.e_ident[EI_CLASS] != ELFCLASS64 || header.e_ident[EI_DATA] != ELFDATA2LSB ||
+      header.e_machine != EM_X86_64 || header.e_type != ET_DYN) return;
   const char* data = std::getenv("ANDROID_DATA");
   const std::string dir = std::string(data != nullptr && *data != 0 ? data : ".") +
                           "/system/gesher-art";
@@ -937,8 +966,13 @@ void LoadArtShimFor(const char* path) {
                  path, message.c_str());
     return;
   }
-  gesher_art_load_class_hook = entry;
-  InstallCallerAbiJniTable();
+  if (!InstallCallerAbiJniTable()) {
+    std::fprintf(stderr, "gesher art: %s needs a caller-ABI JNIEnv table, but setup failed\n", path);
+    return;
+  }
+  // Class loading runs on other threads. Publish only after both the shim and
+  // its JNI dispatch table are ready; a failed setup may be retried later.
+  gesher_art_load_class_hook.store(entry, std::memory_order_release);
   std::fprintf(stderr,
                "gesher art: %s hooks ART by symbol: ClassLinker::LoadClass from a stand-in "
                "libart.so (%s)\n",
