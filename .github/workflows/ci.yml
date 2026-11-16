@@ -147,6 +147,7 @@ jobs:
           python3 tools/test_bionic_key_contracts.py --sanitize
           python3 tools/test_pthread_clock_contracts.py --sanitize
           python3 tools/test_pthread_clock_contracts.py --linux-reference
+          python3 tools/test_pthread_attribute_contracts.py --sanitize
           python3 tools/test_bionic_wait_contracts.py --sanitize
           python3 tools/test_libcore_process_logging.py --sanitize
           python3 tools/test_debug_memory_contracts.py --sanitize
@@ -160,6 +161,7 @@ jobs:
           python3 tools/test_elf_lookup_performance.py --sanitize
           python3 tools/test_media_api_contracts.py --sanitize
           python3 tools/test_aaudio_builder_contracts.py
+          python3 tools/test_aaudio_lifecycle_contracts.py --sanitize
 
       - name: Timer, DNS and media lifetime contracts
         run: |

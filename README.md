@@ -41,6 +41,11 @@ reductions, frame-cache lifetime repairs, regression coverage and remaining work
 
 ## Compatibility
 
+The [November 16 compatibility follow-up](docs/research/android-runtime-followup-2026-11-16.md)
+refreshes the repository/API map and repairs network registration, AAudio
+lifetime/channel queries and native/translated thread attributes, with
+independent QA and mandatory Windows guest checks.
+
 The [November 14 contract audit](docs/research/android-contract-audit-2026-11-14.md)
 maps every tracked path, refreshes the SDK and service/JNI review queues, and
 repairs pthread clocks, location completion, NSD values, media callbacks and
