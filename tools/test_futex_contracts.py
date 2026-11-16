@@ -59,6 +59,7 @@ static bool DispatchTimerfdSyscall(int64_t,int64_t,int64_t,int64_t,int64_t,int64
 static int64_t RawSyscallX64(int64_t,const int64_t*) { return -ENOSYS; }
 ''' + guest + '''
 #undef syscall
+#define FUTEX_TEST_CLOCK_GETTIME gesher::AndroidClockGettime
 #include "futex_contract_test.inc"
 static long host(volatile int* a,int op,int n,const timespec* t,volatile int* b,int m) {
   return gesher_test_syscall(SYS_futex,a,op,n,t,b,m);
