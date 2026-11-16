@@ -10,6 +10,9 @@ before implementing or reviewing a change.
 Gesher provides the runtime, Android APIs and surrounding system services that
 an application expects. Windows integration must preserve the meaning of those
 interfaces and the application's intended workflow.
+Lifecycle, permission checks, errors and capability reporting are part of this
+contract. If a capability is unavailable, use the Android-defined unsupported or
+unavailable behavior rather than inventing a successful result.
 
 Do not add behavior that replaces, bypasses or changes an application's workflow
 or requirements to make a particular operation succeed. This applies even when
@@ -23,7 +26,7 @@ Examples:
 | --- | --- |
 | Connect Android's camera APIs to a Windows camera, preserving capture semantics and reporting actual capabilities. | Within scope. |
 | Implement an Android file-selection intent with a Windows file picker when the application requests file selection. | Within scope, preserving the intent's selection, permission and result contracts. |
-| Replace a camera capture with a file picker or feed a saved image as live camera input so an application accepts it as a fresh capture, including for cheque deposits. | Outside scope unless a maintainer explicitly approves a specific exception. |
+| Replace a camera capture with a file picker or feed a saved image as live camera input so an application accepts it as a fresh capture, including for cheque deposits. | Outside scope. Preserve the requested capture workflow and use an actual camera backend. |
 | Report successful autofocus, sensor readings or other capabilities that the backend does not implement, to satisfy an application's checks. | Outside scope. Implement the capability faithfully or use the Android-defined unavailable/unsupported behavior. |
 | Add package-name exceptions that change application semantics so tests pass while ordinary applications receive different behavior. | Outside scope. Test fixtures must exercise the relevant production behavior. |
 
@@ -31,15 +34,15 @@ Desktop presentation and input may differ where Windows requires it; the
 Android-visible contract and the application's choices must still be preserved.
 Mock devices and synthetic inputs may be used in explicit, isolated tests. They
 must not silently become production defaults or be presented as real hardware
-behavior. Proposals to expose synthetic inputs in the product require the same
-scope review as any other behavior change.
+behavior. Synthetic inputs must not replace real inputs in ordinary application
+use.
 
-If a proposal would depart from this policy, discuss it in an issue or PR and
-obtain explicit maintainer approval before implementing that departure. Link the
-approval and describe its exact scope in the PR. Approval of one exception does
-not authorize other exceptions. Routine compatibility work needs no separate
-scope approval. When reviewing existing work, an unapproved departure blocks a
-recommendation to merge.
+Discuss unclear Windows adaptations or non-runtime project-scope questions in an
+issue or PR, and link the relevant discussion. Maintainer approval, user opt-in
+and successful demonstrations do not waive the Android-contract requirements
+above. Routine compatibility work needs no separate scope approval. A violation
+of these requirements blocks a recommendation to merge until removed or
+redesigned.
 
 ## Preparing a contribution
 
@@ -47,7 +50,7 @@ recommendation to merge.
   Link the relevant Android documentation or AOSP source where applicable.
 - Explain the behavior before and after the change, including what applications
   observe and any capability, permission or workflow changes.
-- Keep changes focused enough to review. Identify any approved scope exception.
+- Keep changes focused enough to review. Identify any unresolved scope question.
 - Run checks appropriate to the change. For behavior changes, cover the actual
   production path and relevant failure cases; distinguish host fixtures, mocks
   and physical-device or Windows/ART validation. State what was not verified.
@@ -71,16 +74,16 @@ Human reviewers and AI assistants used for review must:
 2. Decide whether the implementation preserves the Android contract and the
    application's workflow. Look for substituted inputs, fabricated success or
    capabilities, package-specific workarounds and test/production differences.
-3. Report an unapproved policy violation as a **merge blocker**, with the
+3. Report a policy violation as a **merge blocker**, with the
    relevant code location, the rule violated and the observable consequence.
    Do not recommend approval merely because the implementation works or CI is
-   green. Ask for removal or redesign of the violating behavior, or explicit
-   maintainer approval of the specific departure.
+   green. Ask for removal or redesign of the violating behavior; maintainer
+   approval does not waive the Android-contract requirements.
 4. If a scope decision depends on missing evidence, state what is missing and
-   withhold an approval recommendation until it is resolved. Do not infer an
-   exception from silence, a checked box or the contributor's own assertion.
+   withhold an approval recommendation until it is resolved. Do not infer
+   compatibility from silence, a checked box or the contributor's own assertion.
 5. After scope review, check correctness, regressions, resource use and relevant
-   tests. Maintainer approval of a scope exception does not waive these checks.
+   tests. Scope compliance does not replace these checks.
 
 The review must state the reviewed commit, its scope conclusion and supporting
 evidence, any blockers or unresolved questions, and the validation performed

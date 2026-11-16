@@ -14,10 +14,11 @@ asks for a general code review without repeating the policy.
 - A Windows camera backend and an Android-requested file picker are legitimate
   integrations when they preserve their respective contracts. Replacing live
   camera capture with a saved image to satisfy an application's capture flow
-  requires explicit maintainer approval as a scope exception.
-- Obtain explicit maintainer approval before implementing a departure from the
-  scope policy. Cite the approval and keep the exception within its documented
-  bounds. Continue ordinary compatibility work without additional scope approval.
+  is outside scope.
+- Preserve Android lifecycle, permission, error and capability contracts. Discuss
+  unclear Windows adaptations or non-runtime scope questions, but do not treat
+  maintainer approval as permission to waive those contracts. Continue ordinary
+  compatibility work without additional scope approval.
 - Test the relevant production behavior and describe validation limits. Keep
   synthetic fixtures isolated from ordinary application behavior.
 
@@ -30,20 +31,20 @@ asks for a general code review without repeating the policy.
    workflows, capabilities, permissions or success results seen by an application
    are changed to bypass its expectations. Inspect affected call paths and tests
    where needed; green CI does not establish policy compliance.
-3. Mark an unapproved departure as a **merge blocker**. Cite the code location,
+3. Mark a policy violation as a **merge blocker**. Cite the code location,
    the policy rule and the behavior it causes. Recommend removal or redesign,
-   or require explicit maintainer approval of that specific exception. Do not
-   recommend approval while the violation remains unresolved.
-4. Verify any claimed maintainer approval in the supplied or accessible issue/PR
-   discussion. If approval or contract evidence is unavailable, state the missing
-   evidence and withhold an approval recommendation. Do not invent authorization
-   or treat a contributor's assertion as maintainer approval.
-5. Check correctness and relevant regressions even for approved exceptions.
+   and do not recommend approval while the violation remains unresolved.
+   Maintainer approval does not waive the Android-contract requirements.
+4. Verify contract evidence and any relevant scope discussion in the supplied or
+   accessible sources. If evidence is unavailable, state what is missing and
+   withhold an approval recommendation. Do not treat a contributor's assertion
+   or a checked box as evidence of Android compatibility.
+5. Check correctness, resource use and relevant regressions after scope review.
    Distinguish real production execution from mocks and host-only tests. Reassess
    affected findings when the PR changes.
 
 In the review, state the reviewed commit, the scope verdict (compliant,
-approved exception, blocked, or unresolved), the evidence for it, actionable
+blocked, or unresolved), the evidence for it, actionable
 findings and validation limits. If blocked or unresolved, clearly state that
 the PR is not ready for approval. A review request alone does not authorize
 posting the review, modifying GitHub state or merging.

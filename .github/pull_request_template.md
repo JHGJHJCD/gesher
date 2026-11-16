@@ -14,8 +14,9 @@ especially "Project scope: preserve application behavior".
   reporting or success results? Explain how it preserves application behavior.
 - Does it introduce synthetic inputs, device simulation or package-specific
   behavior? Explain the production/test boundary, or state that it does not.
-- If it departs from project scope, link explicit maintainer approval of that
-  specific exception. Otherwise, state "No scope exception".
+- If project scope is unclear, describe the question and link any relevant
+  discussion. Such discussion cannot waive Android-contract requirements.
+  Otherwise, state "Within project scope".
 
 ## Validation
 
@@ -25,7 +26,7 @@ which checks exercise production code and which use mocks or host-only fixtures.
 ## Contributor checklist
 
 - [ ] I have read the contribution policy and checked this change against it.
-- [ ] I have explained application-visible behavior and linked any scope approval.
+- [ ] I have explained application-visible behavior and identified any unresolved scope question.
 - [ ] I have reviewed the submitted code, including any AI-generated changes.
 - [ ] I have identified third-party code and licenses, if any, and have the right to submit this contribution.
 
@@ -33,7 +34,7 @@ which checks exercise production code and which use mocks or host-only fixtures.
 
 Read CONTRIBUTING.md and inspect the actual current-head diff. Check project
 scope before correctness. A checked box or green CI is not proof of compliance.
-Report unapproved workflow substitutions, bypasses or fabricated capabilities as
+Report workflow substitutions, bypasses or fabricated capabilities as
 merge blockers. Withhold an approval recommendation when scope evidence or a
-required maintainer approval is missing. State the reviewed commit, scope
+required Android-contract reference is missing. State the reviewed commit, scope
 conclusion, supporting evidence, blockers and validation limits in your review.
