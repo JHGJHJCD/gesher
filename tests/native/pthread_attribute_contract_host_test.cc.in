@@ -243,6 +243,60 @@ static void DelayedStartup() {
   Check(error == 11 && unchanged == 0x12345678 && test_windows::handles.load() == handles,
         "CreateThread failure leaves output and ownership unchanged");
 }
+static void DetachBeforePublication() {
+  Worker worker;
+  Thread target = 0;
+  test_windows::hold_start.store(true);
+  Check(api.create(&target, nullptr, RunWorker, &worker) == 0,
+        "create target whose publication can be detached concurrently");
+  std::atomic<bool> querying{false}, finished{false};
+  Attr result{};
+  int status = -1;
+  std::thread query([&] {
+    querying.store(true);
+    status = api.getattr(target, &result);
+    finished.store(true);
+  });
+  Await([&] { return querying.load(); }, "pre-publication detach observer starts");
+  std::this_thread::sleep_for(std::chrono::milliseconds(30));
+  bool pending = !finished.load();
+  int detach_result = api.detach(target);
+  Check(pending && detach_result == 0,
+        "pending query releases the registry lock for detach");
+  test_windows::hold_start.store(false);
+  Await([&] { return finished.load(); }, "detached target publication wakes its observer");
+  query.join();
+  Await([&] { return worker.ready.load(); }, "pre-publication detached target reaches callback");
+  int detached = -1;
+  Check(status == 0 && result.stack_base == worker.own.stack_base &&
+            result.stack_size == worker.own.stack_size &&
+            api.detach_get(&result, &detached) == 0 && detached == 1,
+        "waiting query observes target bounds and concurrent detach together");
+  worker.stop.store(true);
+  WaitNative(worker);
+  Check(api.getattr(target, &result) == 3,
+        "pre-publication detached target retires after callback completion");
+}
+static void FailedExternalRetention() {
+  int handles = test_windows::handles.load();
+  Worker worker;
+  test_windows::fail_duplicate.store(true);
+  std::thread external([&] { RunWorker(&worker); });
+  Await([&] { return worker.ready.load(); }, "external thread survives retained-handle exhaustion");
+  test_windows::fail_duplicate.store(false);
+  Check(worker.own_result == 0 && Contains(worker.own, worker.local),
+        "external self query remains authoritative without a retained handle");
+  Attr result;
+  std::memset(&result, 0x5a, sizeof result);
+  Attr before = result;
+  Check(api.getattr(worker.id, &result) == 11 &&
+            std::memcmp(&result, &before, sizeof result) == 0,
+        "external peer query reports EAGAIN without trusting an unretained identity");
+  worker.stop.store(true);
+  external.join();
+  Check(test_windows::handles.load() <= handles,
+        "external registration failure creates no retained handle to leak");
+}
 #ifndef GESHER_ATTRIBUTE_BASELINE
 static void TranslatedContracts() {
   using gesher::bionic::gesher_bionic___gesher_arm64_pthread_getattr_np;
@@ -321,6 +375,8 @@ int main() {
   ValueContracts(api);
   TargetContracts();
   DelayedStartup();
+  DetachBeforePublication();
+  FailedExternalRetention();
 #ifndef GESHER_ATTRIBUTE_BASELINE
   TranslatedContracts();
 #endif

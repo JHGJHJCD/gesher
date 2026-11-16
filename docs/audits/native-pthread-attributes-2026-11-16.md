@@ -125,6 +125,36 @@ architectures. The required final marker is `PASS guest pthread attributes`.
 Keep external process timeouts on all fixtures. The ARM64 containment assertion
 is necessary and must not be dropped to obtain a passing job.
 
+### Independent native QA
+
+A separate reviewer inspected the production change, the three pinned bionic
+blob identities above, the Windows target fixture and the translator's actual
+allocation/attachment path. No blocking defect was found within the documented
+live-target and attribute-value scope. The published bounds have distinct
+native/translated authorities, the registry lock is released during startup
+waiting, and query code re-finds a record after each wake rather than carrying
+a pointer across an unlocked wait. The ARM64 startup record is released before
+guest code can exit without returning through its wrapper.
+
+Independent tests add two boundary cases to the committed host harness:
+
+- A query starts before the target has published, and another thread detaches
+  that target. Detach completes while the query is waiting; after publication,
+  the query returns the target's bounds together with its new detached state.
+  Owned completion then proves retirement.
+- An external thread cannot retain its Windows-handle substitute. Its own
+  query still observes its stack; a peer receives `EAGAIN` with untouched output
+  rather than relying on an identity with no retained lifetime witness. The
+  failure path allocates no handle.
+
+The expanded source harness passes **78 checks with ASan/UBSan**. Its safe
+old-source control executes **66 checks and fails 39**, including the added
+pending-detach and external-peer assertions. Independent runs also pass all
+**216 clock checks**, all key-contract groups and the **24 Linux public guest
+checks**. These results use the same invocation-only local LSan workaround
+described above. They add no Windows or translated-execution claim; the actual
+Windows/NDK CI gates remain required. No production change was needed by QA.
+
 ## Explicit remaining compatibility gaps
 
 - Custom caller-provided stacks, guard requests and POSIX scheduling policy/
