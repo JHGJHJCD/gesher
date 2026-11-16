@@ -1390,6 +1390,8 @@ function New-PanelActionWorker([string] $operation, $request) {
         $owner = {
             param($body, $here, $operation, $request, $installDefinition, $language)
             $ErrorActionPreference = 'Stop'
+            $stage = 'prepare native action host'
+            try {
             # ConsoleHost preserves the packaged helpers' native stderr semantics.
             # A bare PowerShell API runspace turns even successful ART diagnostics
             # into terminating errors under ErrorActionPreference=Stop.
@@ -1426,6 +1428,10 @@ namespace Gesher {
     [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr process,out uint code);
     [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
     static bool Valid(IntPtr handle) { return handle!=IntPtr.Zero && handle!=new IntPtr(-1); }
+    static Win32Exception NativeFailure(string stage) {
+      int error=Marshal.GetLastWin32Error();
+      return new Win32Exception(error,stage+" (Win32="+error+"): "+new Win32Exception(error).Message);
+    }
     public static int Run(string executable,string script,string directory) {
       var security=new Security { length=Marshal.SizeOf(typeof(Security)), inherit=true };
       IntPtr input=IntPtr.Zero,output=IntPtr.Zero,attributes=IntPtr.Zero,handles=IntPtr.Zero;
@@ -1433,21 +1439,21 @@ namespace Gesher {
       var process=new ProcessInfo();
       try {
         input=CreateFileW("NUL",0x80000000,3,ref security,3,0,IntPtr.Zero);
-        if(!Valid(input)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if(!Valid(input)) throw NativeFailure("Open NUL input");
         output=CreateFileW("NUL",0x40000000,3,ref security,3,0,IntPtr.Zero);
-        if(!Valid(output)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if(!Valid(output)) throw NativeFailure("Open NUL output");
         IntPtr size=IntPtr.Zero;
         InitializeProcThreadAttributeList(IntPtr.Zero,1,0,ref size);
-        if(size==IntPtr.Zero) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if(size==IntPtr.Zero) throw NativeFailure("Size process attributes");
         attributes=Marshal.AllocHGlobal(size);
-        if(!InitializeProcThreadAttributeList(attributes,1,0,ref size)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if(!InitializeProcThreadAttributeList(attributes,1,0,ref size)) throw NativeFailure("Initialize process attributes");
         initialized=true;
         handles=Marshal.AllocHGlobal(2*IntPtr.Size);
         Marshal.WriteIntPtr(handles,0,input); Marshal.WriteIntPtr(handles,IntPtr.Size,output);
         // Only these NUL handles are inherited: no redirected reader threads,
         // accumulating logs, or unrelated inheritable profile/process handles.
         if(!UpdateProcThreadAttribute(attributes,0,new IntPtr(0x00020002),handles,new IntPtr(2*IntPtr.Size),IntPtr.Zero,IntPtr.Zero))
-          throw new Win32Exception(Marshal.GetLastWin32Error());
+          throw NativeFailure("Set inherited NUL handles");
         var startup=new ExtendedStartup();
         startup.startup.size=Marshal.SizeOf(typeof(ExtendedStartup));
         startup.startup.flags=0x100;
@@ -1456,11 +1462,11 @@ namespace Gesher {
         // Script is an owned .ps1 path, never a user command or argument.
         var command=new StringBuilder("\""+executable+"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \""+script+"\"");
         if(!CreateProcessW(executable,command,IntPtr.Zero,IntPtr.Zero,true,0x08080000,IntPtr.Zero,directory,ref startup,out process))
-          throw new Win32Exception(Marshal.GetLastWin32Error());
+          throw NativeFailure("Create action process: executable="+executable+", script="+script+", directory="+directory);
         CloseHandle(process.thread); process.thread=IntPtr.Zero;
-        if(WaitForSingleObject(process.process,0xffffffff)!=0) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if(WaitForSingleObject(process.process,0xffffffff)!=0) throw NativeFailure("Wait for action process");
         uint code;
-        if(!GetExitCodeProcess(process.process,out code)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        if(!GetExitCodeProcess(process.process,out code)) throw NativeFailure("Read action exit code");
         return unchecked((int)code);
       } finally {
         if(Valid(process.thread)) CloseHandle(process.thread);
@@ -1476,6 +1482,7 @@ namespace Gesher {
 }
 '@
             }
+            $stage = 'create action staging directory'
             $directory = Join-Path ([IO.Path]::GetTempPath()) ('gesher-panel-action-' + [guid]::NewGuid().ToString('N'))
             $null = [IO.Directory]::CreateDirectory($directory)
             $configuration = Join-Path $directory 'request.json'
@@ -1484,6 +1491,7 @@ namespace Gesher {
             try {
                 $data = @{ Body = $body; Here = $here; Operation = $operation; Request = $request
                     InstallDefinition = $installDefinition; Language = $language }
+                $stage = 'write action request'
                 [IO.File]::WriteAllText($configuration, ($data | ConvertTo-Json -Depth 8), [Text.UTF8Encoding]::new($true))
                 $hostScript = @'
 $ErrorActionPreference = 'Stop'
@@ -1497,16 +1505,24 @@ try {
     exit 1
 }
 '@
+                $stage = 'write action entry point'
                 [IO.File]::WriteAllText($entry, $hostScript, [Text.UTF8Encoding]::new($true))
                 $executable = Join-Path ([Environment]::GetFolderPath('System')) 'WindowsPowerShell/v1.0/powershell.exe'
+                $stage = 'run native action host'
                 $exitCode = [Gesher.PanelActionHost]::Run($executable, $entry, $here)
                 if (-not [IO.File]::Exists($resultPath)) { throw "Dashboard operation exited without a result (exit code $exitCode)." }
+                $stage = 'read action result'
                 [IO.File]::ReadAllText($resultPath) | ConvertFrom-Json
             } finally {
                 # Only this owner's three known files and empty directory are
                 # removed, after its native process has exited. No recursive delete.
                 foreach ($path in $entry, $configuration, $resultPath) { [IO.File]::Delete($path) }
                 [IO.Directory]::Delete($directory, $false)
+            }
+            } catch {
+                $detail = $_.Exception.GetBaseException().ToString()
+                if ($detail.Length -gt 4096) { $detail = $detail.Substring(0, 4096) }
+                throw "Dashboard action failed at $stage`: $detail"
             }
         }
         $null = $powerShell.AddScript($owner.ToString()).AddArgument($work.ToString()).AddArgument($here).AddArgument($operation).
