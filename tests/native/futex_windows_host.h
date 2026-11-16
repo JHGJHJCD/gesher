@@ -53,3 +53,13 @@ static void WakeByAddressAll(void* address) {
   std::lock_guard<std::mutex> lock(address_wait_mutex);
   auto it = address_waits.find(address); if (it != address_waits.end()) it->second->cv.notify_all();
 }
+
+using ULONGLONG = unsigned long long;
+static void QueryUnbiasedInterruptTimePrecise(ULONGLONG* ticks) {
+  timespec value; clock_gettime(CLOCK_MONOTONIC, &value);
+  *ticks = static_cast<ULONGLONG>(value.tv_sec) * 10000000 + value.tv_nsec / 100;
+}
+static void QueryInterruptTimePrecise(ULONGLONG* ticks) {
+  timespec value; clock_gettime(CLOCK_BOOTTIME, &value);
+  *ticks = static_cast<ULONGLONG>(value.tv_sec) * 10000000 + value.tv_nsec / 100;
+}

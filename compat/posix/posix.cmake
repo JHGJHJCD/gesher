@@ -62,7 +62,7 @@ add_custom_command(
   VERBATIM)
 target_sources(gesher_posix PRIVATE "${_gesher_posix_gen}/windows_zones_table.inc")
 target_include_directories(gesher_posix PRIVATE "${_gesher_posix_gen}")
-target_link_libraries(gesher_posix PUBLIC synchronization psapi ws2_32 iphlpapi bcrypt shell32 advapi32 ole32 uuid
+target_link_libraries(gesher_posix PUBLIC mincore synchronization psapi ws2_32 iphlpapi bcrypt shell32 advapi32 ole32 uuid
   pthread)
 # Pull in the crash reporter (src/crash.cc), which nothing calls.
 target_link_options(gesher_posix INTERFACE -Wl,-u,gesher_crash_reporter_anchor)

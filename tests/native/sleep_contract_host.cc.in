@@ -46,6 +46,12 @@ static uint32_t signal_wait_ms;
 static bool sleep_at_signal_boundary(uint32_t, uint32_t*, void (*)(void*), void*);
 static void deliver_at_signal_boundary();
 
+namespace gesher {
+// Clock transport seam. The shared Win32 readers are covered by clock_domains.
+int64_t MonotonicNanos() { LARGE_INTEGER value; QueryPerformanceCounter(&value); return value.QuadPart; }
+int64_t BoottimeNanos() { return MonotonicNanos(); }
+}
+
 namespace gesher::bionic {
 LinuxTimespec RealtimeNow() { return {123456789, 12345}; }
 int ReadPthreadCpuClock(int clock, int64_t* value) {

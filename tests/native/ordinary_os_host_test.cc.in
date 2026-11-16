@@ -35,7 +35,7 @@ struct WaitAction {
 static std::vector<WaitAction> actions;
 static std::vector<uint32_t> waits;
 static int pending_signal_polls;
-static bool QueryPerformanceFrequency(LARGE_INTEGER* value) {
+[[maybe_unused]] static bool QueryPerformanceFrequency(LARGE_INTEGER* value) {
   value->QuadPart = 1000000000;
   return true;
 }
@@ -44,6 +44,11 @@ static bool QueryPerformanceCounter(LARGE_INTEGER* value) {
       std::chrono::duration_cast<std::chrono::nanoseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count();
   return true;
+}
+
+namespace gesher {
+int64_t MonotonicNanos() { LARGE_INTEGER value; QueryPerformanceCounter(&value); return value.QuadPart; }
+int64_t BoottimeNanos() { return MonotonicNanos(); }
 }
 
 namespace gesher::bionic {

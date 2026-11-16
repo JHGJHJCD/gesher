@@ -5,6 +5,7 @@
 // Windows timer outside that registry's lock. Rearming uses the same join,
 // since disabling a threadpool timer alone does not revoke queued callbacks.
 #include <gesher/timerfd.h>
+#include <gesher/clocks.h>
 
 #include <errno.h>
 #include <string.h>
@@ -47,20 +48,6 @@ int64_t ToNanos(TimerFdTime time) {
 
 TimerFdTime FromNanos(int64_t value) {
   return {value / kNanos, value % kNanos};
-}
-
-int64_t MonotonicNanos() {
-  // Keep the same origin as bionic's clock_gettime, including CLOCK_BOOTTIME.
-  // Separate suspend-aware clock qualification remains necessary.
-  static const LARGE_INTEGER frequency = [] {
-    LARGE_INTEGER value;
-    QueryPerformanceFrequency(&value);
-    return value;
-  }();
-  LARGE_INTEGER value;
-  QueryPerformanceCounter(&value);
-  const __int128 nanos = static_cast<__int128>(value.QuadPart) * kNanos / frequency.QuadPart;
-  return nanos > kMaxTime ? kMaxTime : static_cast<int64_t>(nanos);
 }
 
 int64_t RealtimeNanos() {
@@ -107,7 +94,10 @@ struct TimerFd {
     WaitForThreadpoolTimerCallbacks(timer, TRUE);
   }
 
-  int64_t Now() const { return absolute_realtime ? RealtimeNanos() : MonotonicNanos(); }
+  int64_t Now() const {
+    if (absolute_realtime) return RealtimeNanos();
+    return clockid == kBoottime ? BoottimeNanos() : MonotonicNanos();
+  }
 
   // Account for all elapsed periods, even when Windows delayed/coalesced a
   // callback. Windows' millisecond period is not used as the source of truth.
@@ -144,8 +134,12 @@ struct TimerFd {
       ticks = kUnixEpoch100ns + next / 100 + (next % 100 != 0);
     } else {
       const __int128 left = static_cast<__int128>(next) - Now();
+      // Relative Win32 timers stop during suspend. A BOOTTIME deadline must
+      // be rechecked after resume, even if it was hours away before sleep.
+      // A finite slice bounds that delay without a wall-clock-dependent timer.
       const __int128 rounded = left > 0 ? (left + 99) / 100 : 1;
-      ticks = -static_cast<int64_t>(std::min(rounded, static_cast<__int128>(kMaxTime)));
+      const int64_t cap = clockid == kBoottime ? 10000000 : kMaxTime;
+      ticks = -static_cast<int64_t>(std::min(rounded, static_cast<__int128>(cap)));
     }
     const uint64_t bits = static_cast<uint64_t>(ticks);
     FILETIME due{static_cast<DWORD>(bits), static_cast<DWORD>(bits >> 32)};

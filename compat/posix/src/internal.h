@@ -59,7 +59,7 @@ size_t StackBottomReserve();
 // (fault_signals.cc).
 bool RetryAfterMadvise(uintptr_t addr, ULONG_PTR access);
 
-// Microseconds on a monotonic clock (QueryPerformanceCounter). Timeouts keep
+// Microseconds on the Android monotonic clock (excludes system suspend). Timeouts keep
 // their deadline on it: GetTickCount64 moves in 15.6 ms steps, and a wait
 // that ends a step early would return before Linux's would.
 ULONGLONG MonotonicMicros();

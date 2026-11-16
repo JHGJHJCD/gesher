@@ -17,7 +17,7 @@ import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
-CASES = ("ownership", "contracts", "deadlines", "quiescence")
+CASES = ("ownership", "contracts", "deadlines", "quiescence", "suspend")
 
 
 def section(source: str, first: str, following: str) -> str:
@@ -49,6 +49,7 @@ def main() -> int:
     core = "" if old else read("compat/posix/src/timerfd.cc")
     timer_core = re.sub(r"^#include[^\n]*\n", "", core, flags=re.M)
     replacements = {
+        "HAS_ANDROID_CLOCKS": str(int("#include <gesher/clocks.h>" in core)),
         "EVENT_FD": section(epoll, "struct EventFd {", "namespace {\n\nstruct Epoll;"),
         "OBJECT_REGISTRY": section(epoll, "struct Object {", "// Every live epoll"),
         "OBJECT_LOOKUP": section(epoll, "bool Lookup(int fd, Object* object)", "std::shared_ptr<Epoll> LookupEpoll("),

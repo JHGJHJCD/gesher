@@ -37,6 +37,8 @@ def main():
             print('futex source SHA256',hashlib.sha256(source.encode()).hexdigest(),flush=True)
             print('guest syscall section SHA256',hashlib.sha256(guest.encode()).hexdigest(),flush=True)
             (d / 'windows.h').write_text('#include "futex_windows_host.h"\n')
+            (d / 'gesher').mkdir()
+            (d / 'gesher/clocks.h').write_text((ROOT / 'compat/posix/include/gesher/clocks.h').read_text())
             owner = 'reinterpret_cast<FARPROC>(&gesher_futex_owner_v1)' if 'gesher_futex_owner_v1(' in source else 'nullptr'
             generated = '''#define _GNU_SOURCE 1
 #include <time.h>

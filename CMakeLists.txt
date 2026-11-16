@@ -206,6 +206,10 @@ add_executable(native3_unicode_test tests/native/native3_unicode_test.cc)
 target_compile_options(native3_unicode_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(native3_unicode_test PRIVATE gesher_bionic gesher_elf icuuc)
 
+add_executable(clock_domains_windows_test tests/native/clock_domains_windows_test.cc)
+target_compile_options(clock_domains_windows_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(clock_domains_windows_test PRIVATE gesher_posix)
+
 add_executable(native3_cpu_clock_test tests/native/native3_cpu_clock_test.cc)
 target_compile_options(native3_cpu_clock_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(native3_cpu_clock_test PRIVATE artbase gesher_posix)
