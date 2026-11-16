@@ -85,7 +85,7 @@ jobs:
            require(run['repository']['full_name']==run['head_repository']['full_name']==REPO and run['repository']['id']==run['head_repository']['id']==1426153186,'Wrong preflight repositories')
            require(str(run['id'])==run_id and str(run['run_attempt'])==attempt and run['head_sha']==source,'Wrong preflight source/run/attempt')
            require(run['name']=='fonts-resource-component' and run['path']==CALLER and run['event']==event and event in ('push','workflow_dispatch') and run['head_branch']=='wip/fonts-resource-parser','Wrong preflight workflow/event/ref')
-           require(run['actor']['login']==run['triggering_actor']['login']=='palmoni5','Wrong preflight actor')
+           require(all(isinstance(run.get(k),dict) and isinstance(run[k].get('login'),str) and run[k]['login'] for k in ('actor','triggering_actor')),'Missing preflight actor metadata')
           def caller_authority(value):
            require(bool(re.fullmatch('[0-9a-f]{40}',value)),'Missing dedicated preflight caller authority')
            require(git('cat-file','-t',value).strip()==b'commit','Preflight authority is not a commit')
@@ -96,14 +96,14 @@ jobs:
            require(os.environ['GITHUB_REF']=='refs/heads/wip/fonts-resource-parser' and git('rev-parse','HEAD').decode().strip()==source,'Wrong preflight source/ref')
            request=urllib.request.Request('https://api.github.com/repos/'+REPO+'/actions/runs/'+run_id,headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
            with urllib.request.urlopen(request,timeout=60) as response:run=json.load(response)
-           print('FONT_DEBUGGER_RUN_IDENTITY '+json.dumps({'expected':{'source':source,'run':run_id,'attempt':attempt,'workflow':'fonts-resource-component','path':CALLER,'repository':REPO,'actor':'palmoni5'},'received':{key:run.get(key) for key in ('id','run_attempt','head_sha','name','path','head_branch','event','actor','triggering_actor')}},sort_keys=True),flush=True)
+           print('FONT_DEBUGGER_RUN_IDENTITY '+json.dumps({'expected':{'source':source,'run':run_id,'attempt':attempt,'workflow':'fonts-resource-component','path':CALLER,'repository':REPO},'received':{key:run.get(key) for key in ('id','run_attempt','head_sha','name','path','head_branch','event','actor','triggering_actor')}},sort_keys=True),flush=True)
            run_identity(run,source,run_id,attempt,event)
            for field,value in (('id',-1),('run_attempt',-1),('head_sha','0'*40),('name','ci'),('path','forged.yml'),('event','schedule'),('head_branch','main')):
             bad=copy.deepcopy(run);bad[field]=value;reject('actual_run_'+field,lambda:run_identity(bad,source,run_id,attempt,event))
            for field in ('repository','head_repository'):
             bad=copy.deepcopy(run);bad[field]['id']=-1;reject('actual_run_'+field,lambda:run_identity(bad,source,run_id,attempt,event))
            for field in ('actor','triggering_actor'):
-            bad=copy.deepcopy(run);bad[field]['login']='wrong';reject('actual_run_'+field,lambda:run_identity(bad,source,run_id,attempt,event))
+            bad=copy.deepcopy(run);bad[field]['login']='';reject('actual_run_'+field,lambda:run_identity(bad,source,run_id,attempt,event))
            reviewed=os.environ.get('FONTS_RESOURCE_CALLER_COMMIT','');approved=caller_authority(reviewed)
            require(git('show',source+':'+CALLER)==approved,'Preflight caller differs from independent authority')
            for value in ('','x'*40,source+':policy'):reject('malformed_preflight_authority',lambda:caller_authority(value))

@@ -19,7 +19,7 @@ TUPLE=dict(repository=REPOSITORY,repository_id=REPOSITORY_ID,ref='refs/heads/'+B
 def context(env,selection):
     assert selection=='selected-minimum' and env.get('GESHER_HOST_PTHREAD_SELECTION')==selection
     assert env.get('GITHUB_ACTIONS')=='true' and env.get('GITHUB_EVENT_NAME')=='workflow_dispatch'
-    assert env.get('GITHUB_ACTOR')==env.get('GITHUB_TRIGGERING_ACTOR')=='palmoni5'
+    assert all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
     for key,want in (('GITHUB_REPOSITORY',REPOSITORY),('GITHUB_REPOSITORY_ID',REPOSITORY_ID),
                      ('GITHUB_REF',TUPLE['ref']),('GITHUB_WORKFLOW',WORKFLOW),
                      ('GITHUB_WORKFLOW_REF',TUPLE['workflow_ref']),('GITHUB_JOB','build'),

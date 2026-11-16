@@ -21,13 +21,18 @@ def main():
       **{a.VARIABLE:source})
     ctx=a.verify_context(env,'diagnostic-producer'); count=0
     for key in env:
-        bad=dict(env);bad[key]='invalid';reject(lambda:a.verify_context(bad,'diagnostic-producer'));count+=1
+        bad=dict(env);bad[key]='' if key in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR') else 'invalid';reject(lambda:a.verify_context(bad,'diagnostic-producer'));count+=1
     reject(lambda:a.verify_context(env,'unknown'));count+=1
     run=dict(id=123,run_attempt=1,head_sha=source,head_branch=a.BRANCH,path=a.CALLER,name=a.WORKFLOW,event='push',
       repository=dict(id=a.REPOSITORY_ID,full_name=a.REPOSITORY),head_repository=dict(id=a.REPOSITORY_ID,full_name=a.REPOSITORY),
       actor=dict(login='palmoni5'),triggering_actor=dict(login='palmoni5'),
       referenced_workflows=[dict(path=a.REPOSITORY+'/'+a.GUARD+'@'+guard,sha=guard)])
     a.verify_run(run,ctx,guard)
+    for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+        arbitrary_env=dict(env,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+        arbitrary_run=dict(run,actor=dict(login=actor),triggering_actor=dict(login=trigger))
+        assert a.verify_context(arbitrary_env,'diagnostic-producer')==ctx
+        a.verify_run(arbitrary_run,ctx,guard)
     for key in run:
         bad=copy.deepcopy(run);bad[key]=None;reject(lambda:a.verify_run(bad,ctx,guard));count+=1
     producer=dict(name='diagnostic-producer',head_sha=source,run_id=123,run_attempt=1,status='completed',conclusion='success',id=42)

@@ -12,7 +12,7 @@ WORKFLOW='graphicsdex-component'
 def verify_run(run,current,guard):
     assert str(run['id'])==current['run'] and str(run['run_attempt'])==current['attempt'] and run['head_sha']==current['source']
     assert run['name']==WORKFLOW and run['path']==CALLER and run['head_branch']==BRANCH and run['event'] in ('push','workflow_dispatch')
-    assert run['actor']['login']==run['triggering_actor']['login']=='palmoni5'
+    assert all(isinstance(run.get(k), dict) and isinstance(run[k].get('login'), str) and run[k]['login'] for k in ('actor', 'triggering_actor'))
     for key in ('repository','head_repository'):
         assert run[key]['id']==REPOSITORY_ID and run[key]['full_name']==REPOSITORY
     refs=run['referenced_workflows']

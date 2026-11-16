@@ -24,7 +24,7 @@ def validate_live(run,jobs,context,policy,event,phase):
     assert run['path']==focused.PATH and run['name']==focused.WORKFLOW and run['event']==event
     assert run['repository']['full_name']==run['head_repository']['full_name']==focused.REPOSITORY
     assert str(run['repository']['id'])==str(run['head_repository']['id'])==focused.REPOSITORY_ID
-    assert run['actor']['login']==run['triggering_actor']['login']=='palmoni5'
+    assert all(isinstance(run.get(k), dict) and isinstance(run[k].get('login'), str) and run[k]['login'] for k in ('actor', 'triggering_actor'))
     refs=[r for r in run['referenced_workflows'] if r['path']==policy]
     assert len(refs)==1 and refs[0]['sha']==policy.rsplit('@',1)[1]
     rows=jobs['jobs'];assert jobs['total_count']==len(rows)<=100

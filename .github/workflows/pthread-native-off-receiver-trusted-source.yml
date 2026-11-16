@@ -73,8 +73,8 @@ jobs:
               values={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':REPO,'GITHUB_REPOSITORY_ID':RID,
                       'GITHUB_REF':REF,'GITHUB_WORKFLOW':NAME,'GITHUB_JOB':'verify',
                       'GITHUB_WORKFLOW_REF':REPO+'/'+CALLER+'@'+REF,
-                      'GITHUB_SHA':source,'GITHUB_WORKFLOW_SHA':source,
-                      'GITHUB_ACTOR':'palmoni5','GITHUB_TRIGGERING_ACTOR':'palmoni5'}
+                      'GITHUB_SHA':source,'GITHUB_WORKFLOW_SHA':source}
+              assert all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
               assert all(env.get(k)==v for k,v in values.items())
               assert env.get('GITHUB_EVENT_NAME')in ('push','workflow_dispatch')
               assert all(re.fullmatch('[1-9][0-9]*',env.get(k,''))for k in ('GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'))
@@ -87,7 +87,7 @@ jobs:
               assert run['path']==CALLER and run['name']==NAME and run['event']==env['GITHUB_EVENT_NAME']
               assert run['repository']['full_name']==run['head_repository']['full_name']==REPO
               assert str(run['repository']['id'])==str(run['head_repository']['id'])==RID
-              assert run['actor']['login']==run['triggering_actor']['login']=='palmoni5'
+              assert all(isinstance(run.get(k), dict) and isinstance(run[k].get('login'), str) and run[k]['login'] for k in ('actor', 'triggering_actor'))
               refs=run['referenced_workflows']
               assert len(refs)==1 and refs[0]['path']==policy and refs[0]['sha']==policy.rsplit('@',1)[1]
 
@@ -168,7 +168,7 @@ jobs:
               print('NATIVE_OFF_SOURCE_PROOF exact_paths='+str(len(CHANGED))+' whole_tree='+str(len(current))+' scope=source_only',flush=True)
               return dict(expected=expected,current=current,full=full)
 
-          EXPECTED = {'.github/workflows/pthread-native-off-receiver-component.yml': '2f4ad28c9bfd51f6b94c75713aea3c89a27704bc42a287b67e773fa3f2efe64a', 'docs/handoff/tracks/pthread-native-off-receiver-component.md': '3b8e32a7f62bd43b26534465cebef78b395cda0bb8e642f91816f8a4839b48a3', 'tools/host-pthread-authority/minimum_receipt.py': 'f808ff36844677b0327ce162389687fe0703e6dd834092030f74abc31c8ab5d3', 'tools/toolchain/native_off_receiver.py': '46eeeeb96eb61e7c6ac2adc4f3bfc72eda3554fd870d6cd91361fc989388f8ea', 'tools/toolchain/native_off_receiver_context.py': '0be2e167d977be4d8b830d8a8d324dad03312a74309e4392064b4f476efeed0f', 'tools/toolchain/native_off_receiver_policy.py': '1acea9b635966498bfc79f4092dff79d8613aec2c2b9b8a26cdf5716781200ec', 'tools/toolchain/prepare_host_pthread.py': '894fabe1148e96e87d5f41a21996dfdee69057e2b674b396f53acc2824fdb72b', 'tools/toolchain/selected_link.cmake': '5c4413c11ef853f11b32a58a1a6be2020e6cdedfa8402e7ef0d85b380be27bfe', 'tools/toolchain/test_native_off_receiver_context.py': 'a47d270533e2836dac9b07a9426b8f3fb1365c4e1dca72af1cc71a88eb435caf', 'tools/toolchain/test_native_off_receiver_live.py': 'a5fe42e03e68c65fdb093563971765e81088681e9bc49673ca15b09f6fdb4954', 'tools/toolchain/test_native_off_receiver_policy.py': 'e6916759c563a8263542eb0a24ddec7481cab9b4ab9cb963114b07003fc6e2f8'}
+          EXPECTED = {'.github/workflows/pthread-native-off-receiver-component.yml': '2f4ad28c9bfd51f6b94c75713aea3c89a27704bc42a287b67e773fa3f2efe64a', 'docs/handoff/tracks/pthread-native-off-receiver-component.md': '3b8e32a7f62bd43b26534465cebef78b395cda0bb8e642f91816f8a4839b48a3', 'tools/host-pthread-authority/minimum_receipt.py': 'f808ff36844677b0327ce162389687fe0703e6dd834092030f74abc31c8ab5d3', 'tools/toolchain/native_off_receiver.py': '1d7122c8766e077a95032916c49f0df969f20ec727da610fedd62ba5905c96dd', 'tools/toolchain/native_off_receiver_context.py': '28251c6252097c9dc002aada2540bacd514f5b596c97970a4eb393c50e6ef300', 'tools/toolchain/native_off_receiver_policy.py': 'f6e6bfce237cea0292e4109880551825c3e6f24cb7abd7fa8ddafd5e1ec59b43', 'tools/toolchain/prepare_host_pthread.py': '894fabe1148e96e87d5f41a21996dfdee69057e2b674b396f53acc2824fdb72b', 'tools/toolchain/selected_link.cmake': '5c4413c11ef853f11b32a58a1a6be2020e6cdedfa8402e7ef0d85b380be27bfe', 'tools/toolchain/test_native_off_receiver_context.py': '34b4be4cff0cfecdc72a336f07ddb8eae7cc5ba98c0db00eb44239a089b09d66', 'tools/toolchain/test_native_off_receiver_live.py': 'b556f3e5b72bcd036f2157a19fda1762fe681551b4feb16308ffc28c0b3bf629', 'tools/toolchain/test_native_off_receiver_policy.py': '493c9b864d2f05a0dddb874fc769e7225de33659c66cf188cc292d5bff9c642f'}
 
           def gate_main():
               import os

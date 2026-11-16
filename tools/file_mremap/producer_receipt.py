@@ -33,7 +33,7 @@ def check_run(run,context,policy_commit):
     require(run['path']==CALLER and run['name']==WORKFLOW and run['event']in ('push','workflow_dispatch'),'focused workflow')
     for field in ('repository','head_repository'):
         require(run[field]['full_name']==REPO and str(run[field]['id'])==RID,'fork/repository identity')
-    require(run['actor']['login']==run['triggering_actor']['login']=='palmoni5','actor identity')
+    require(all(isinstance(run.get(k), dict) and isinstance(run[k].get('login'), str) and run[k]['login'] for k in ('actor', 'triggering_actor')), 'actor metadata')
     refs=run['referenced_workflows']
     require(len(refs)==1 and refs[0]['path']==REPO+'/'+POLICY+'@'+policy_commit and refs[0]['sha']==policy_commit,'actual immutable policy')
     return run

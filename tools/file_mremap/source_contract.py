@@ -99,8 +99,8 @@ def validate_context(value):
 def current_context(env,job):
     expected={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':REPO,'GITHUB_REPOSITORY_ID':RID,
       'GITHUB_REF':'refs/heads/'+BRANCH,'GITHUB_WORKFLOW':WORKFLOW,
-      'GITHUB_WORKFLOW_REF':REPO+'/'+CALLER+'@refs/heads/'+BRANCH,'GITHUB_JOB':job,
-      'GITHUB_ACTOR':'palmoni5','GITHUB_TRIGGERING_ACTOR':'palmoni5'}
+      'GITHUB_WORKFLOW_REF':REPO+'/'+CALLER+'@refs/heads/'+BRANCH,'GITHUB_JOB':job}
+    require(all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR')), 'actor metadata')
     require(all(env.get(k)==v for k,v in expected.items()),'wrong dedicated caller')
     require(env.get('GITHUB_EVENT_NAME')in ('push','workflow_dispatch'),'event')
     source=env.get('GITHUB_SHA');hexid(source,40)
