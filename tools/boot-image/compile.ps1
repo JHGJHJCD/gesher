@@ -22,6 +22,7 @@
 # methods it marks and put only the classes it lists in the image, as
 # Android's boot image is made (docs/compiled-code.md, ADR 0054).
 # -AppFilter is gesher-app.jar's filter (no AOSP profile covers it).
+# -ImageFormat chooses ART image storage; compiler filters and profiles are unchanged.
 # -AllClasses puts every class of the jars in the image (dexdump.exe lists
 # them), not only the profile's.
 #
@@ -32,6 +33,7 @@ param(
   [string] $Filter = 'verify',
   [string] $ExtensionFilter = 'verify',
   [string] $AppFilter = '',
+  [ValidateSet('lz4', 'lz4hc', 'uncompressed')] [string] $ImageFormat = 'lz4',
   [string[]] $BootProfiles = @(),
   [switch] $AllClasses,
   [int] $TimeoutMinutes = 20
@@ -69,7 +71,7 @@ $common = @(
   # for page by page (msync), slow on Windows for large sizes.
   '--runtime-arg', '-Xms64m', '--runtime-arg', '-Xmx512m', '--runtime-arg', '-XX:LargeObjectSpace=map',
   "--android-root=$(NoDrive "$root/system")",
-  '--instruction-set=x86_64', '--image-format=lz4',
+  '--instruction-set=x86_64', "--image-format=$($ImageFormat.ToLowerInvariant())",
   '--no-generate-mini-debug-info', '--no-watch-dog', '--avoid-storing-invocation', '-j4')
 
 # The boot image profile: the text profiles, concatenated, in binary form for
