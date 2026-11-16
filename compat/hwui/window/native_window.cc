@@ -12,6 +12,22 @@
 
 using gesher::Win32Surface;
 
+namespace {
+
+int32_t WindowQuery(ANativeWindow* window, int what) {
+  int value = 0;
+  int err = window->query(window, what, &value);
+  return err < 0 ? err : value;
+}
+
+// Keep the admission check used by the pinned libnativewindow entrypoints.
+// Geometry/lock retain their separate, older NDK contracts below.
+bool ValidWindow(ANativeWindow* window) {
+  return window != nullptr && WindowQuery(window, NATIVE_WINDOW_IS_VALID) != 0;
+}
+
+}  // namespace
+
 extern "C" {
 
 int32_t ANativeWindow_lock(ANativeWindow* window, ANativeWindow_Buffer* out_buffer,
@@ -34,31 +50,37 @@ int32_t ANativeWindow_setBuffersGeometry(ANativeWindow* window, int32_t width, i
 }
 
 int32_t ANativeWindow_setBuffersTransform(ANativeWindow* window, int32_t transform) {
+  constexpr int32_t all_transforms = NATIVE_WINDOW_TRANSFORM_FLIP_H |
+      NATIVE_WINDOW_TRANSFORM_FLIP_V | NATIVE_WINDOW_TRANSFORM_ROT_90 |
+      NATIVE_WINDOW_TRANSFORM_INVERSE_DISPLAY;
+  if (!ValidWindow(window) || (transform & ~all_transforms) != 0) return -EINVAL;
   return native_window_set_buffers_transform(window, transform);
 }
 
 int32_t ANativeWindow_setBuffersDataSpace(ANativeWindow* window, int32_t data_space) {
+  if (!ValidWindow(window)) return -EINVAL;
   return native_window_set_buffers_data_space(window, static_cast<android_dataspace_t>(data_space));
 }
 
 int32_t ANativeWindow_getBuffersDataSpace(ANativeWindow* window) {
-  int value = 0;
-  int err = window->query(window, NATIVE_WINDOW_DATASPACE, &value);
-  return err < 0 ? err : value;
+  if (!ValidWindow(window)) return -EINVAL;
+  return WindowQuery(window, NATIVE_WINDOW_DATASPACE);
 }
 
 int32_t ANativeWindow_getBuffersDefaultDataSpace(ANativeWindow* window) {
-  return ANativeWindow_getBuffersDataSpace(window);
+  if (!ValidWindow(window)) return -EINVAL;
+  return WindowQuery(window, NATIVE_WINDOW_DEFAULT_DATASPACE);
 }
 
 int32_t ANativeWindow_setFrameRate(ANativeWindow* window, float frame_rate, int8_t compatibility) {
-  return window->perform(window, NATIVE_WINDOW_SET_FRAME_RATE, static_cast<double>(frame_rate),
-                         static_cast<int>(compatibility), 0);
+  return ANativeWindow_setFrameRateWithChangeStrategy(
+      window, frame_rate, compatibility, ANATIVEWINDOW_CHANGE_FRAME_RATE_ONLY_IF_SEAMLESS);
 }
 
 int32_t ANativeWindow_setFrameRateWithChangeStrategy(ANativeWindow* window, float frame_rate,
                                                      int8_t compatibility,
                                                      int8_t change_frame_rate_strategy) {
+  if (!ValidWindow(window)) return -EINVAL;
   return window->perform(window, NATIVE_WINDOW_SET_FRAME_RATE, static_cast<double>(frame_rate),
                          static_cast<int>(compatibility),
                          static_cast<int>(change_frame_rate_strategy));
