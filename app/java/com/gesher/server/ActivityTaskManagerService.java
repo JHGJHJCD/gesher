@@ -632,6 +632,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 // Restore the caller's ThreadLocal before any lifecycle callbacks.
                 if (previous == null) mStackLaunch.remove();
                 else mStackLaunch.set(previous);
+                if (created[0] != null && !started.contains(created[0])) {
+                    started.add(created[0]);
+                }
                 rollbackBatch(started, failure);
                 throw failure;
             } finally {
@@ -641,6 +644,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if ((result != ActivityManager.START_SUCCESS
                     && result != ActivityManager.START_DELIVERED_TO_TOP)
                     || created[0] == null) {
+                if (created[0] != null && !started.contains(created[0])) {
+                    started.add(created[0]);
+                }
                 rollbackBatch(started, null);
                 return result == ActivityManager.START_SUCCESS
                         ? ActivityManager.START_CANCELED : result;
