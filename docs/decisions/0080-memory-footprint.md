@@ -115,3 +115,34 @@ accesses through the actual mapping and vectored-exception implementations.
 - Not addressed here: each launched app keeps a launcher dalvikvm alive for
   its lifetime (about 70 MB of working set each after this change), and the
   guest stacks of arm64 threads are committed (8 MiB each).
+
+## Measuring the system server separately
+
+`tools/process_memory.py` captures a live process through `GetProcessMemoryInfo`,
+`VirtualQueryEx`, and `QueryWorkingSetEx`. With `--images`, it identifies
+anonymous ART images by headers and checksums, rather than guessing by size.
+
+The following snapshots were taken on Windows. The first two used an isolated
+runtime copy without microG; the third used the personal profile after use,
+with background services enabled:
+
+| SystemServer state | Private resident | Total resident |
+|---|---:|---:|
+| Clean profile, no installed apps | 33.6 MiB | 79.2 MiB |
+| 25 installed packages, no app data or windows | 43.4 MiB | 96.2 MiB |
+| Personal profile after use, separate snapshot | 67.2 MiB | 130.6 MiB |
+
+Five ART images accounted for about 21 MiB of private resident memory:
+framework 13.56, core-oj 2.86, gesher-app 2.20, ICU 1.53, and core-libart
+0.86 MiB. The clean server charged about 785 MiB of private commit, but two
+allocations of about 256 MiB each accounted for only about 1.3 MiB of resident
+memory combined. Reducing capacity is not equivalent to saving physical RAM.
+These are snapshots under these conditions, not a memory budget for every
+installation.
+
+A separate diagnostic experiment attributed about 13 MiB of private image
+cost to relocation. Relocation remains enabled; this is not a recommendation
+to disable ASLR. The boot images contained only 44 KiB of fully zero pages
+and no metadata section to release. The experiment found no further substantial
+reduction demonstrated to preserve both behavior and performance. The image
+format comparison procedure is documented in [boot-image.md](../boot-image.md).
