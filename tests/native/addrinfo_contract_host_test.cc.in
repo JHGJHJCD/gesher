@@ -141,14 +141,15 @@ static void* dns_symbol(void*, const char* name) {
 #undef dlsym
 
 using namespace dns_transport;
-static int query(int route, const addrinfo_contract_row* hints, addrinfo_contract_row** result) {
+static int query(int route, const addrinfo_contract_row* hints, addrinfo_contract_row** result,
+                 const char* node = "127.0.0.1", const char* service = "80") {
   if (route == 0) {
     auto function = reinterpret_cast<addrinfo_contract_get_fn>(dns_symbol(nullptr, "getaddrinfo"));
-    return function("127.0.0.1", "80", hints, result);
+    return function(node, service, hints, result);
   }
   auto function = reinterpret_cast<addrinfo_contract_network_fn>(dns_symbol(nullptr, "android_getaddrinfofornetwork"));
   uint64_t handle = route == 1 ? 0 : (uint64_t{112} << 32) | 0xcafed00d;
-  return function(handle, "127.0.0.1", "80", hints, result);
+  return function(handle, node, service, hints, result);
 }
 static void release_guest(addrinfo_contract_row* result) {
   reinterpret_cast<addrinfo_contract_free_fn>(dns_symbol(nullptr, "freeaddrinfo"))(result);
@@ -227,11 +228,10 @@ static void test_backend_errors() {
   }
 }
 static void test_flags() {
-  // Preserve all existing flag translations, including V4MAPPED's legacy alias.
+  // Android 16 AI_MASK admits these five inputs, including ADDRCONFIG.
   const struct { int guest; int host; } supported[] = {
     {0x1, AI_PASSIVE}, {0x2, AI_CANONNAME}, {0x4, AI_NUMERICHOST},
-    {0x8, AI_NUMERICSERV}, {0x100, AI_ALL}, {0x200, AI_V4MAPPED},
-    {0x400, AI_ADDRCONFIG}, {0x800, AI_V4MAPPED}
+    {0x8, AI_NUMERICSERV}, {0x400, AI_ADDRCONFIG}
   };
   for (int route = 0; route < 3; ++route) {
     int accepted_mask = 0;
@@ -265,12 +265,47 @@ static void test_flags() {
     accounting = false;
   }
 }
+static void test_hints() {
+  for (int route = 0; route < 3; ++route) {
+    for (int field = 0; field < 4; ++field) {
+      for (int flags : {0xc, 0x10}) {
+        reset(0);
+        addrinfo_contract_row hints{};
+        hints.flags = flags;
+        if (field == 0) hints.address_length = 1;
+        if (field == 1) hints.canonical_name = reinterpret_cast<char*>(uintptr_t{1});
+        if (field == 2) hints.address = reinterpret_cast<sockaddr*>(uintptr_t{1});
+        if (field == 3) hints.next = reinterpret_cast<addrinfo_contract_row*>(uintptr_t{1});
+        auto* result = reinterpret_cast<addrinfo_contract_row*>(uintptr_t{1});
+        errno = EDOM;
+        int rc = query(route, &hints, &result);
+        check("getaddrinfo: output-only hints metadata precedes flags without backend work",
+              rc == 12 && result == nullptr && errno == EDOM &&
+              backend_calls == 0 && allocation_calls == 0 && backend_frees == 0);
+        if (result != reinterpret_cast<addrinfo_contract_row*>(uintptr_t{1})) release_guest(result);
+      }
+    }
+    for (bool invalid_hints : {false, true}) {
+      reset(0);
+      addrinfo_contract_row hints{};
+      hints.flags = 0x10;
+      hints.address_length = 1;
+      auto* result = reinterpret_cast<addrinfo_contract_row*>(uintptr_t{1});
+      int rc = query(route, invalid_hints ? &hints : nullptr, &result, nullptr, nullptr);
+      check("getaddrinfo: absent query precedes invalid hints and flags without backend work",
+            rc == 8 && result == nullptr && backend_calls == 0 && allocation_calls == 0 && backend_frees == 0);
+      if (result != reinterpret_cast<addrinfo_contract_row*>(uintptr_t{1})) release_guest(result);
+    }
+    accounting = false;
+  }
+}
 int main(int argc, char** argv) {
   if (argc != 2) return 2;
   if (std::strcmp(argv[1], "public") == 0) test_addrinfo_contracts();
   else if (std::strcmp(argv[1], "allocation") == 0) test_allocations();
   else if (std::strcmp(argv[1], "backend_errors") == 0) test_backend_errors();
   else if (std::strcmp(argv[1], "flags") == 0) test_flags();
+  else if (std::strcmp(argv[1], "hints") == 0) test_hints();
   else return 2;
   return failures == 0 ? 0 : 1;
 }

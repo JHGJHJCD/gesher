@@ -228,7 +228,9 @@ struct BionicAddrinfo {
 };
 
 // bionic (BSD) AI_* values -> gesher-base's (glibc's).
-constexpr int kBionicAiFlags = 0x1 | 0x2 | 0x4 | 0x8 | 0x100 | 0x200 | 0x400 | 0x800;
+// android-16.0.0_r4 netdb.h AI_MASK, enforced by DnsResolver validateHints.
+// AI_ALL and both V4MAPPED constants exist in the header but are not admitted.
+constexpr int kBionicAiFlags = 0x1 | 0x2 | 0x4 | 0x8 | 0x400;
 int AiFlagsIn(int f) {
   int out = 0;
   if (f & 0x1) out |= AI_PASSIVE;
@@ -287,11 +289,16 @@ int GetaddrinfoOnInterface(const char* node, const char* service, const BionicAd
                           BionicAddrinfo** res, uint32_t index) {
   if (res == nullptr) return EaiOut(EAI_FAIL);
   *res = nullptr;
+  // Android checks the missing query before validating the optional hints.
+  if (node == nullptr && service == nullptr) return 8; // EAI_NONAME
   addrinfo h{};
   if (hints != nullptr) {
+    // Android rejects output-only metadata in a hints record before flags.
+    if (hints->ai_addrlen != 0 || hints->ai_canonname != nullptr ||
+        hints->ai_addr != nullptr || hints->ai_next != nullptr) return 12; // EAI_BADHINTS
     // Translating only known bits would silently discard invalid guest flags
-    // before the host resolver can report EAI_BADFLAGS. Keep both historical
-    // V4MAPPED spellings accepted by AiFlagsIn.
+    // before the host resolver can report EAI_BADFLAGS. Use Android's accepted
+    // input mask even where the host resolver supports additional flags.
     if ((hints->ai_flags & ~kBionicAiFlags) != 0) return EaiOut(EAI_BADFLAGS);
     h.ai_flags = AiFlagsIn(hints->ai_flags);
     h.ai_family = hints->ai_family;

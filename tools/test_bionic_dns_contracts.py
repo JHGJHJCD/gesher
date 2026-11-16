@@ -69,7 +69,7 @@ def main() -> int:
         if args.sanitize:
             env["UBSAN_OPTIONS"] = "halt_on_error=1:" + env.get("UBSAN_OPTIONS", "")
         failed = []
-        for case in ("public", "allocation", "backend_errors", "flags"):
+        for case in ("public", "allocation", "backend_errors", "flags", "hints"):
             result = subprocess.run([str(executable), case], env=env, cwd=folder, text=True,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
             print(result.stdout, end="", flush=True)

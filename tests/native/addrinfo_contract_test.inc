@@ -47,7 +47,8 @@ static void test_addrinfo_contracts(void) {
   check("getaddrinfo: default-network wrapper retains numeric results", rc == 0 && addrinfo_contract_numeric_list(result));
   release(result);
   release(NULL);
-  const int32_t invalid_flags[] = {0x10, 0x20, 0x1000, 0x40000000, -1};
+  // Android rejects AI_ALL and the two historical V4MAPPED constants too.
+  const int32_t invalid_flags[] = {0x10, 0x20, 0x100, 0x200, 0x800, 0x1000, 0x40000000, -1};
   for (unsigned i = 0; i < sizeof(invalid_flags) / sizeof(invalid_flags[0]); ++i) {
     hints.flags = 0x4 | 0x8 | invalid_flags[i];
     result = (struct addrinfo_contract_row*)(uintptr_t)1;
@@ -57,6 +58,30 @@ static void test_addrinfo_contracts(void) {
     result = (struct addrinfo_contract_row*)(uintptr_t)1;
     rc = network(0, "127.0.0.1", "80", &hints, &result);
     check("getaddrinfo: network wrapper rejects unknown guest flags", rc == 3 && result == NULL);
+    if (result != (struct addrinfo_contract_row*)(uintptr_t)1) release(result);
+  }
+  hints.flags = 0x100;
+  result = (struct addrinfo_contract_row*)(uintptr_t)1;
+  check("getaddrinfo: missing query precedes invalid flags",
+        get(NULL, NULL, &hints, &result) == 8 && result == NULL);
+  if (result != (struct addrinfo_contract_row*)(uintptr_t)1) release(result);
+  result = (struct addrinfo_contract_row*)(uintptr_t)1;
+  check("getaddrinfo: network missing query precedes invalid flags",
+        network(0, NULL, NULL, &hints, &result) == 8 && result == NULL);
+  if (result != (struct addrinfo_contract_row*)(uintptr_t)1) release(result);
+  for (unsigned field = 0; field < 4; ++field) {
+    struct addrinfo_contract_row invalid = hints;
+    if (field == 0) invalid.address_length = 1;
+    if (field == 1) invalid.canonical_name = (char*)(uintptr_t)1;
+    if (field == 2) invalid.address = (struct sockaddr*)(uintptr_t)1;
+    if (field == 3) invalid.next = (struct addrinfo_contract_row*)(uintptr_t)1;
+    result = (struct addrinfo_contract_row*)(uintptr_t)1;
+    check("getaddrinfo: invalid hints metadata precedes invalid flags",
+          get("127.0.0.1", "80", &invalid, &result) == 12 && result == NULL);
+    if (result != (struct addrinfo_contract_row*)(uintptr_t)1) release(result);
+    result = (struct addrinfo_contract_row*)(uintptr_t)1;
+    check("getaddrinfo: network invalid hints metadata reports EAI_BADHINTS",
+          network(0, "127.0.0.1", "80", &invalid, &result) == 12 && result == NULL);
     if (result != (struct addrinfo_contract_row*)(uintptr_t)1) release(result);
   }
   hints.flags = 0x4 | 0x8;
