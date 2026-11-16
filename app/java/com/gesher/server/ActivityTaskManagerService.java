@@ -2694,7 +2694,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             }
         }
         return task.isEmpty() ? finishFromApp(r, resultCode, resultData)
-                : finishTogether(r, task, "finish-task", resultCode, resultData);
+                // AOSP task removal ignores the caller's success result/data and
+                // cancels outstanding results while removing its activities.
+                : finishTogether(r, task, "finish-task", android.app.Activity.RESULT_CANCELED, null);
     }
 
     boolean finishAffinity(ActivityRecord r) {

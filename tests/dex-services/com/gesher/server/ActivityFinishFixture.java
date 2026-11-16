@@ -268,6 +268,32 @@ public final class ActivityFinishFixture {
             f.gone(caller); f.alive(other);
             if (flag == Activity.FINISH_TASK_WITH_ACTIVITY) f.gone(bottom); else f.alive(bottom);
         }
+        // Task removal cancels any outstanding result, even if the finishing
+        // activity supplied RESULT_OK/data. An ordinary finish retains them.
+        for (int flag : new int[]{Activity.DONT_FINISH_TASK_WITH_ACTIVITY,
+                Activity.FINISH_TASK_WITH_ROOT_ACTIVITY, Activity.FINISH_TASK_WITH_ACTIVITY}) {
+            Harness f = new Harness();
+            Object receiver = f.record("Receiver", 15, "b", "STOPPED");
+            Object source = f.record("RootWithResult", 16, "a", "STOPPED", receiver, "result", 15);
+            Object sibling = f.record("Sibling", 16, "a", "STOPPED");
+            Intent data = new Intent("fixture.finish.result");
+            f.asApp(() -> check(f.controller.finishActivity(token(source), Activity.RESULT_OK, data, flag),
+                    "Result-bearing finish was rejected"));
+            List<?> pendingResults = (List<?>) get(receiver, "pendingResults");
+            check(pendingResults.size() == 1, "Finish did not complete the outstanding result");
+            ResultInfo result = (ResultInfo) pendingResults.get(0);
+            if (flag == Activity.DONT_FINISH_TASK_WITH_ACTIVITY) {
+                check(result.mResultCode == Activity.RESULT_OK && result.mData != null
+                                && data.getAction().equals(result.mData.getAction()),
+                        "Ordinary activity finish lost its supplied result");
+                f.alive(sibling);
+            } else {
+                check(result.mResultCode == Activity.RESULT_CANCELED && result.mData == null,
+                        "Task removal forwarded a supplied result instead of canceling it");
+                f.gone(sibling);
+            }
+            f.gone(source); f.alive(receiver);
+        }
         System.out.println("Activity finish: root-only flag 1, unconditional flag 2, ordinary flag 0, interleaved tasks and unlaunched member passed");
     }
 
