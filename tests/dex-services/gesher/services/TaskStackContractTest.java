@@ -14,7 +14,6 @@ import android.view.Display;
 import com.android.internal.pm.parsing.pkg.PackageImpl;
 import com.android.internal.pm.pkg.component.ParsedActivityImpl;
 import com.gesher.server.ApkPackage;
-import com.gesher.server.StandIn;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -93,8 +92,12 @@ public final class TaskStackContractTest {
     private static final class AppThread extends IApplicationThread.Default {
         final IBinder binder = new Binder();
         final List<ClientTransaction> transactions = new ArrayList<>();
+        Runnable onSchedule;
         @Override public IBinder asBinder() { return binder; }
-        @Override public void scheduleTransaction(ClientTransaction t) { transactions.add(t); }
+        @Override public void scheduleTransaction(ClientTransaction t) {
+            transactions.add(t);
+            if (onSchedule != null) onSchedule.run();
+        }
     }
     private static final class Harness {
         final Object tasks;
@@ -219,10 +222,61 @@ public final class TaskStackContractTest {
         check(h.records().size() == 1 && (Boolean)get(h.records().get(0), "finishing"),
                 "Failed member left an unowned running root");
     }
+    /** Synchronous lifecycle callbacks can win the race before later intents publish. */
+    private static void reentrantAndFailure() throws Exception {
+        Harness h = new Harness();
+        final boolean[] fired = {false};
+        h.thread.onSchedule = () -> {
+            if (fired[0]) return;
+            fired[0] = true;
+            try {
+                Object root = h.record("Root");
+                h.acknowledge("activityResumed", root);
+                h.acknowledge("activityPaused", root);
+            } catch (Exception failure) { throw new AssertionError(failure); }
+        };
+        check(h.start(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                launch("Middle"), launch("Top")) == ActivityManager.START_SUCCESS,
+                "Reentrant parent callback rejected the rest of the stack");
+        check(fired[0] && "PAUSED".equals(h.state(h.record("Root")))
+                        && "LAUNCHING".equals(h.state(h.record("Middle")))
+                        && "INITIALIZING".equals(h.state(h.record("Top"))),
+                "Already-paused root stranded the next stack member");
+        h.acknowledge("activityResumed", h.record("Middle"));
+        h.acknowledge("activityPaused", h.record("Middle"));
+        check("LAUNCHING".equals(h.state(h.record("Top"))),
+                "Reentrant first member prevented the final Activity from launching");
+
+        Harness throwing = new Harness();
+        throwing.thread.onSchedule = () -> {
+            throw new IllegalStateException("injected synchronous ActivityThread failure");
+        };
+        boolean observed = false;
+        try {
+            throwing.start(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                    launch("Top"));
+        } catch (IllegalStateException expected) {
+            observed = expected.getMessage().contains("injected");
+        }
+        check(observed, "ActivityThread exception was swallowed during batch publication");
+        Object interruptedRoot = throwing.record("Root");
+        check((Boolean)get(interruptedRoot, "finishing"),
+                "Exception before the first start returned escaped partial-stack rollback");
+        throwing.thread.onSchedule = null;
+        final int[] code = {ActivityManager.START_CANCELED};
+        throwing.asApp(() -> code[0] = throwing.api.startActivity(throwing.thread, PKG,
+                null, launch("Other"), null, null, null, -1, 0, null, null));
+        check(code[0] == ActivityManager.START_SUCCESS
+                        && !(Boolean)get(throwing.record("Other"), "batchCreated"),
+                "Failed batch leaked ThreadLocal state to an ordinary new Activity");
+    }
+
     public static void main(String[] args) throws Exception {
         fullStack();
         invalidBatch();
+        reentrantAndFailure();
         System.out.println("TaskStackContractTest all passed: " + checks
-                + " checks; ordered members, public task snapshots, lifecycle handoff and failed-batch cleanup");
+                + " checks; ordered task history, asynchronous/synchronous pause handoffs, "
+                + "identity, malformed inputs and exception rollback");
     }
 }
