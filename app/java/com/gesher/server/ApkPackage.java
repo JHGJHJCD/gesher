@@ -100,6 +100,9 @@ public final class ApkPackage {
     void attachEnabledState(PackageEnabledStore store, String owner) {
         mEnabledOwner = owner; mEnabledStore = store;
     }
+    boolean hasEnabledState(PackageEnabledStore store) {
+        return mEnabledStore == store && mEnabledOwner != null;
+    }
     String enabledStateOwner() { return mEnabledOwner; }
     PackageEnabledStore.State enabledState() {
         PackageEnabledStore store = mEnabledStore;

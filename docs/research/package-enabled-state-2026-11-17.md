@@ -40,7 +40,7 @@ The expectations follow the project's pinned AOSP `android-16.0.0_r4` sources:
 | `MATCH_DISABLED_COMPONENTS` | Return component metadata, retaining separate component/application `enabled` values |
 | Invalid or duplicate batch entry | Reject the whole batch before changes or side effects |
 | Conflicting component `DONT_KILL_APP` flags within a package | Reject the whole batch |
-| User other than 0 | Reject; the runtime has one enabled-state user |
+| Nonexistent user | Setters return without changes and application getters report `DISABLED`; component getters retain AOSP's cross-user permission check and null-component ordering |
 
 ## Publication and installation lifetime
 
@@ -61,6 +61,11 @@ restore old overrides. Loading discards rows whose installation owner no longer
 matches, and the next commit compacts them. Limits on package count, component
 count and serialized bytes are enforced on both read and write; malformed data
 fails explicitly rather than silently re-enabling applications.
+
+Installation establishes the enabled-state owner before committing `packages.list`.
+An owner I/O failure therefore leaves both the registry and the live package set
+unchanged. Final package publication reuses the prepared record without repeating
+owner I/O, and a registry-write failure restores the installer's previous entry.
 
 The original five removal journal slots remain `item-0` through `item-4`. The new
 marker has the stable slot `package-enabled-owner`. New independent removal paths
@@ -131,11 +136,12 @@ process-local `PropertyInvalidatedCache` test mode and verify cached public
   store. Covers writer/read bounds, immutable input, serialized-size/UTF failure,
   failed replacement, restart, marker retirement, stale-row compaction, corruption,
   and transient isolation using real files.
-- `tools/test_package_enabled_state.py`: 196 checks per protected/GMS mode, plus
+- `tools/test_package_enabled_state.py`: 211 checks per protected/GMS mode, plus
   write/read in separate JVMs. Covers public application/component batches,
   validation, metadata/resolvers, actual cache results, concurrent single-package
   and multi-package snapshots, broadcasts, update/uninstall/quarantine rollback,
-  failed persistence and standalone isolation. It also runs the real activity
+  failed persistence, install-owner preparation/registry rollback, nonexistent-user
+  API ordering and standalone isolation. It also runs the real activity
   manager's exit-dispatch method and `ActiveServices` death/restart decisions with
   a recording application thread and controlled restart timer. Reentrant real
   `registerAttachedProcess` calls exercise stale-record supersession, and recording

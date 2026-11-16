@@ -19,7 +19,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("framework-classes", "core-classes", "app-classes", "apksig", "java-home"):
         parser.add_argument("--" + name, required=True, type=Path)
-    parser.add_argument("--group", choices=("all", "application", "metadata", "batch", "cache", "validation", "persistence", "quarantine", "lifecycle", "generation", "standalone"), default="all")
+    parser.add_argument("--group", choices=("all", "application", "metadata", "batch", "cache", "validation", "persistence", "quarantine", "lifecycle", "generation", "standalone", "installation"), default="all")
     args = parser.parse_args()
     cc = shutil.which("cc")
     if not cc:

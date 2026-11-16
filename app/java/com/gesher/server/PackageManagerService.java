@@ -148,11 +148,16 @@ public final class PackageManagerService extends IPackageManager.Default {
         return mEnabledStore;
     }
 
+    /** Finish owner I/O before an installer commits its durable package registry. */
+    synchronized void prepareAdd(ApkPackage p) {
+        PackageEnabledStore store = enabledStore();
+        if (!p.hasEnabledState(store)) p.attachEnabledState(store, store.owner(p.packageName));
+    }
+
     /** Adds or replaces a package (an install or an update). */
     synchronized void add(ApkPackage p) {
+        prepareAdd(p);
         Map<String, ApkPackage> map = new LinkedHashMap<>(mPackages);
-        PackageEnabledStore store = enabledStore();
-        p.attachEnabledState(store, store.owner(p.packageName));
         map.put(p.packageName, p);
         mPackages = map;
         PackageManager.invalidatePackageInfoCache();
@@ -548,8 +553,11 @@ public final class PackageManagerService extends IPackageManager.Default {
     /** Installed overrides survive restart/update and retire with the installation. */
     @Override
     public int getComponentEnabledSetting(ComponentName componentName, int userId) {
-        enabledUser(userId);
-        if (componentName == null) throw new IllegalArgumentException("componentName is null");
+        // ComputerEngine checks cross-user access before looking up a component's
+        // user; a privileged lookup of a nonexistent user reports DISABLED.
+        enforceEnabledCrossUser(userId);
+        if (componentName == null) return PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+        if (userId != 0) return PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
         String pkg = componentName.getPackageName();
         ApkPackage installed = get(pkg);
         if (installed != null) return installed.componentEnabledState(componentName.getClassName());
@@ -565,6 +573,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     @Override
     public void setComponentEnabledSetting(ComponentName componentName, int newState, int flags,
             int userId, String callingPackage) {
+        if (userId != 0) return;
         setComponentEnabledSettings(List.of(new PackageManager.ComponentEnabledSetting(
                 componentName, newState, flags)), userId, callingPackage);
     }
@@ -572,6 +581,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     @Override
     public void setApplicationEnabledSetting(String packageName, int newState, int flags,
             int userId, String callingPackage) {
+        if (userId != 0) return;
         setComponentEnabledSettings(List.of(new PackageManager.ComponentEnabledSetting(
                 packageName, newState, flags)), userId, callingPackage);
     }
@@ -580,9 +590,11 @@ public final class PackageManagerService extends IPackageManager.Default {
     public synchronized void setComponentEnabledSettings(
             List<PackageManager.ComponentEnabledSetting> settings, int userId,
             String callingPackage) {
+        // AOSP returns for a nonexistent user before validating caller-owned input.
+        if (userId != 0) return;
         if (settings == null) throw new IllegalArgumentException("settings is null");
-        enabledUser(userId);
         if (settings.isEmpty()) throw new IllegalArgumentException("settings is empty");
+        enforceEnabledCrossUser(userId);
         // Capture caller-owned input, then validate the entire batch before any state,
         // persistence, cache, process or broadcast change.
         List<PackageManager.ComponentEnabledSetting> captured = new ArrayList<>(settings);
@@ -667,8 +679,18 @@ public final class PackageManagerService extends IPackageManager.Default {
         if (services != null && services.pm == this) services.atm.restartForEnabledState(pkg);
     }
 
-    private static void enabledUser(int userId) {
-        if (userId != 0) throw new SecurityException("Only enabled-state user 0 is available");
+    private void enforceEnabledCrossUser(int userId) {
+        if (userId < 0) throw new IllegalArgumentException("Invalid userId " + userId);
+        int callingUid = Binder.getCallingUid();
+        if (android.os.UserHandle.getUserId(callingUid) != userId
+                && callingUid != android.os.Process.ROOT_UID
+                && callingUid != android.os.Process.SYSTEM_UID
+                && mPermissions.checkProcessPermission("android.permission.INTERACT_ACROSS_USERS_FULL",
+                        Binder.getCallingPid(), callingUid) != PackageManager.PERMISSION_GRANTED
+                && mPermissions.checkProcessPermission("android.permission.INTERACT_ACROSS_USERS",
+                        Binder.getCallingPid(), callingUid) != PackageManager.PERMISSION_GRANTED) {
+            throw new SecurityException("Enabled-state access requires cross-user permission");
+        }
     }
 
     private static void checkEnabledState(int state) {
@@ -718,7 +740,9 @@ public final class PackageManagerService extends IPackageManager.Default {
 
     @Override
     public int getApplicationEnabledSetting(String packageName, int userId) {
-        enabledUser(userId);
+        // Unlike the component getter, AOSP checks user existence before permissions.
+        if (userId != 0) return PackageManager.COMPONENT_ENABLED_STATE_DISABLED;
+        enforceEnabledCrossUser(userId);
         ApkPackage installed = get(packageName);
         if (installed != null) return installed.applicationEnabledState();
         if (synthetic(packageName)

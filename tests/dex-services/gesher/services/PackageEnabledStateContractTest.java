@@ -341,7 +341,26 @@ public final class PackageEnabledStateContractTest {
         expect(IllegalArgumentException.class, () -> h.client.setComponentEnabledSettings(List.of(
                 part(a, "Main", 2, KEEP), part(a, "Alias", 1, 0))), "Conflicting DONT_KILL flags accepted");
         expect(IllegalArgumentException.class, () -> h.api.setApplicationEnabledSetting(a, 37, KEEP, 0, a), "Invalid enum accepted");
-        expect(SecurityException.class, () -> h.api.setApplicationEnabledSetting(a, 2, KEEP, 10, a), "Unsupported user changed user 0");
+        // The pinned service checks existence before setter input/permissions. These
+        // requests must not accidentally target the only installed user, user 0.
+        h.api.setApplicationEnabledSetting(a, 2, KEEP, 10, a);
+        h.api.setComponentEnabledSetting(component(a, "Main"), 2, KEEP, 10, a);
+        h.api.setComponentEnabledSettings(List.of(app(a, 2)), 10, a);
+        h.api.setComponentEnabledSettings(null, 10, a);
+        h.api.setApplicationEnabledSetting(null, 37, KEEP, -1, a);
+        h.api.setComponentEnabledSetting(null, 37, KEEP, -1, a);
+        check(h.api.getApplicationEnabledSetting(a, 0) == 0
+                && h.api.getComponentEnabledSetting(component(a, "Main"), 0) == 0,
+                "Nonexistent-user setter altered user 0");
+        check(h.api.getApplicationEnabledSetting(a, 10) == 2
+                && h.api.getApplicationEnabledSetting(null, -1) == 2,
+                "Nonexistent-user application getter did not report DISABLED");
+        check(h.api.getComponentEnabledSetting(component(a, "Main"), 10) == 2
+                && h.api.getComponentEnabledSetting(null, 10) == 0,
+                "Privileged component lookup lost AOSP user/null ordering");
+        expect(IllegalArgumentException.class,
+                () -> h.api.getComponentEnabledSetting(component(a, "Main"), -1),
+                "Component getter accepted a negative user");
         expect(IllegalArgumentException.class, () -> h.api.getApplicationEnabledSetting("fixture.enabled.unknown", 0), "Unknown package state invented");
         h.client.setComponentEnabledSetting(component(a, "Main"), 3, KEEP);
         check(h.client.getComponentEnabledSetting(component(a, "Main")) == 0, "Application-only enum applied to component");
@@ -351,6 +370,17 @@ public final class PackageEnabledStateContractTest {
                 Binder.restoreCallingIdentity(((long)19001 << 32) | 899913);
                 expect(SecurityException.class, () -> h.api.setApplicationEnabledSetting(a, 2, KEEP, 0, a),
                         "Forged package name bypassed permission checking");
+                expect(SecurityException.class,
+                        () -> h.api.getComponentEnabledSetting(component(a, "Main"), 10),
+                        "Component getter skipped cross-user authorization");
+                check(h.api.getApplicationEnabledSetting(a, 10) == 2,
+                        "Application getter checked permissions before absent user");
+                h.api.setComponentEnabledSettings(null, 10, a);
+                Binder.restoreCallingIdentity(((long)1019001 << 32) | 899913);
+                check(h.api.getComponentEnabledSetting(component(a, "Main"), 10) == 2,
+                        "Same-user absent component lookup did not report DISABLED");
+                expect(SecurityException.class, () -> h.api.getApplicationEnabledSetting(a, 0),
+                        "Application getter allowed another user's identity");
             } finally { Binder.restoreCallingIdentity(previous); }
         }
         h.drain(); check(h.events.isEmpty() && h.kills.isEmpty(), "Rejected/no-op batch caused side effects");
@@ -565,6 +595,74 @@ public final class PackageEnabledStateContractTest {
                 && h.client.getComponentEnabledSetting(component(a, "Alias")) == 1,
                 "Separate VM did not retain application/component state");
     }
+    /** Real install publication/storage boundary; the APK parser has already supplied the records. */
+    private static void installationPublication() throws Exception {
+        String existing = "fixture.enabled.install.existing", added = "fixture.enabled.install.added";
+        Harness h = new Harness(record(existing, true));
+        Path root = Path.of(System.getenv("ANDROID_DATA"));
+        Path firstCode = root.resolve("app/" + existing + "-1"), addedCode = root.resolve("app/" + added + "-1");
+        Files.createDirectories(firstCode); Files.createDirectories(addedCode);
+        Class<?> installerType = Class.forName("com.gesher.server.Installer");
+        Class<?> entryType = Class.forName("com.gesher.server.Installer$Entry");
+        var entryCtor = entryType.getDeclaredConstructor(String.class, String.class, long.class, long.class);
+        entryCtor.setAccessible(true);
+        Object previous = entryCtor.newInstance(existing, firstCode.toString(), 1L, 1L);
+        Object addition = entryCtor.newInstance(added, addedCode.toString(), 2L, 2L);
+        Map<String, Object> entries = new LinkedHashMap<>(); entries.put(existing, previous);
+        var installerCtor = installerType.getDeclaredConstructor(PackageManagerService.class,
+                Class.forName("com.gesher.server.ActivityTaskManagerService"), Map.class);
+        installerCtor.setAccessible(true);
+        Object installer = installerCtor.newInstance(h.service, null, entries);
+        invoke(installer, "writeRegistry", new Class<?>[0]);
+        Path registry = root.resolve("system/packages.list"), marker = root.resolve("system/package-enabled-owners/" + added);
+        byte[] before = Files.readAllBytes(registry);
+        ApkPackage candidate = record(added, true);
+        Files.createDirectories(marker); // A deterministic owner-publication I/O failure.
+        expect(IllegalStateException.class,
+                () -> invoke(installer, "publishInstalled", new Class<?>[]{entryType, ApkPackage.class}, addition, candidate),
+                "Installer committed a package whose owner could not be established");
+        check(Arrays.equals(before, Files.readAllBytes(registry)) && !entries.containsKey(added)
+                && h.service.get(added) == null, "Owner failure changed the registry or live package set");
+        Files.delete(marker);
+        invoke(installer, "publishInstalled", new Class<?>[]{entryType, ApkPackage.class}, addition, candidate);
+        check(h.service.get(added) == candidate && entries.get(added) == addition
+                && Files.readString(registry).contains(added + "\t"), "Prepared install failed to publish");
+
+        h.client.setApplicationEnabledSetting(added, 3, KEEP);
+        byte[] owner = Files.readAllBytes(marker);
+        ApkPackage update = record(added, true);
+        Object replacement = entryCtor.newInstance(added, addedCode.toString(), 2L, 3L);
+        invoke(installer, "publishInstalled", new Class<?>[]{entryType, ApkPackage.class}, replacement, update);
+        check(h.service.get(added) == update && h.client.getApplicationEnabledSetting(added) == 3
+                && Arrays.equals(owner, Files.readAllBytes(marker)), "Update replaced its installation owner or enabled state");
+
+        // A later registry failure must not leave Installer's in-memory source of
+        // truth pointing at the unpublished update.
+        Path saved = registry.resolveSibling("packages.saved");
+        Files.move(registry, saved); Files.createDirectory(registry);
+        try {
+            Object failed = entryCtor.newInstance(added, addedCode.toString(), 2L, 4L);
+            expect(java.io.IOException.class,
+                    () -> invoke(installer, "publishInstalled", new Class<?>[]{entryType, ApkPackage.class}, failed, record(added, true)),
+                    "Registry replacement failure returned success");
+            check(entries.get(added) == replacement && h.service.get(added) == update
+                    && h.client.getApplicationEnabledSetting(added) == 3,
+                    "Registry failure published a candidate or retained its pending entry");
+        } finally { Files.delete(registry); Files.move(saved, registry); }
+
+        // After preparation, repeat publication must not perform fallible owner I/O.
+        ApkPackage prepared = record(added, true);
+        invoke(h.service, "prepareAdd", new Class<?>[]{ApkPackage.class}, prepared);
+        Path savedOwner = marker.resolveSibling(added + ".saved");
+        Files.move(marker, savedOwner); Files.createDirectory(marker);
+        try {
+            invoke(installer, "publishInstalled", new Class<?>[]{entryType, ApkPackage.class}, replacement, prepared);
+            check(h.service.get(added) == prepared && h.client.getApplicationEnabledSetting(added) == 3,
+                    "Prepared publication repeated owner I/O after registry commit");
+        } finally { Files.delete(marker); Files.move(savedOwner, marker); }
+        h.drain();
+    }
+
     public static int run(boolean useBinder, String group) throws Exception {
         art = useBinder; checks = transactions = 0;
         if (group.equals("all") || group.equals("application")) applicationBatch();
@@ -578,6 +676,7 @@ public final class PackageEnabledStateContractTest {
         if (group.equals("all") || group.equals("lifecycle")) lifecycle();
         if (group.equals("all") || group.equals("generation")) retirementGeneration();
         if (group.equals("all") || group.equals("standalone")) standalone();
+        if (group.equals("all") || group.equals("installation")) installationPublication();
         if (group.equals("write") || group.equals("read")) crossProcess(group.equals("write"));
         if (useBinder) check(transactions > 0, "Generated IPackageManager Binder proxy was not exercised");
         return checks;

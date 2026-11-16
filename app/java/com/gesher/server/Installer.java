@@ -462,9 +462,7 @@ final class Installer {
                 }
                 installed.setSystemAddon(true);
             }
-            mEntries.put(pkg, entry);
-            writeRegistry();
-            mPm.add(installed);
+            publishInstalled(entry, installed);
             if (old != null && !old.codePath.equals(entry.codePath)) {
                 delete(new File(old.codePath));
             }
@@ -478,6 +476,21 @@ final class Installer {
         } finally {
             if (tempDir != null) deleteTree(tempDir);
         }
+    }
+
+    /** Owner creation can fail; finish it before committing the installed registry. */
+    private void publishInstalled(Entry entry, ApkPackage installed) throws IOException {
+        mPm.prepareAdd(installed);
+        Entry previous = mEntries.put(entry.packageName, entry);
+        try {
+            writeRegistry();
+        } catch (IOException | RuntimeException failure) {
+            if (previous == null) mEntries.remove(entry.packageName);
+            else mEntries.put(entry.packageName, previous);
+            throw failure;
+        }
+        // prepareAdd attached this record to the store; publication performs no owner I/O.
+        mPm.add(installed);
     }
 
     /** The "unchanged" answer for {@code pkg}, installed in {@code old}. */
