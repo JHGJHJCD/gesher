@@ -61,8 +61,13 @@ dimensions. Sanitizers test the same operations, not physical GPU behavior.
 
 The Windows graphics suite continues to run GlBindingsTest and
 ImageReaderEglTest against real ART/ANGLE, and additionally reruns
-ImageReaderEglTest with the optimized path forced off. Full Windows
-CI and physical Intel GPU performance tests are still required.
+ImageReaderEglTest with the optimized path forced off. The ImageReader
+fixture deliberately leaves nondefault GL_PACK_ALIGNMENT and ANGLE
+reverse-row pack state active across swaps and, when GLES2 advertises a
+pixel pack buffer extension, binds a PBO. It checks that pixels remain
+correct, every state value is restored and no GLES error is introduced.
+Both the optimized and forced-staging paths must pass.
+Full Windows CI and physical Intel GPU performance tests are still required.
 
 For performance acceptance, alternate default and forced staging runs
 on Intel iGPU hardware and a discrete GPU with the same APK, resolution

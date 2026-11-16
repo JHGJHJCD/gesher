@@ -153,6 +153,7 @@ struct Child {
   EGLContext last_context = EGL_NO_CONTEXT;
   bool reverse_rows = false;
   bool bgra_read = false;
+  bool es2_pack_buffer = false;
   bool force_copy = false;
   std::vector<uint32_t> pixels;  // scratch retained for conversion fallbacks
   ~Child();
@@ -308,6 +309,11 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
         const char* extensions = reinterpret_cast<const char*>(gl->get_string(GL_EXTENSIONS));
         c->reverse_rows = HasGlExtension(extensions, "GL_ANGLE_pack_reverse_row_order");
         c->bgra_read = HasGlExtension(extensions, "GL_EXT_read_format_bgra");
+        // GLES2 can expose PBOs through an extension; pointer arguments to
+        // glReadPixels are offsets while a pack buffer is bound.
+        c->es2_pack_buffer =
+            HasGlExtension(extensions, "GL_NV_pixel_buffer_object") ||
+            HasGlExtension(extensions, "GL_EXT_pixel_buffer_object");
       }
       ReadbackLayout plan = PlanChildReadback(
           w, h, b.width, b.height, b.stride, b.format,
@@ -318,22 +324,23 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
               skip_pixels = 0, reverse_order = 0;
         gl->get_integerv(GL_PACK_ALIGNMENT, &alignment);
         const GLenum fb_target = version >= 3 ? GL_READ_FRAMEBUFFER : GL_FRAMEBUFFER;
+        const bool pbo_available = version >= 3 || c->es2_pack_buffer;
         if (version >= 3) {
           gl->get_integerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
-          gl->get_integerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
           gl->get_integerv(GL_PACK_ROW_LENGTH, &row_length);
           gl->get_integerv(GL_PACK_SKIP_ROWS, &skip_rows);
           gl->get_integerv(GL_PACK_SKIP_PIXELS, &skip_pixels);
         } else if (version == 2) {
           gl->get_integerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
         }
+        if (pbo_available) gl->get_integerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
         if (c->reverse_rows) gl->get_integerv(GL_PACK_REVERSE_ROW_ORDER_ANGLE, &reverse_order);
         const bool direct = plan.direct != DirectReadFormat::kNone;
         const GLint desired_reverse = direct ? GL_TRUE : GL_FALSE;
         const GLint desired_row_length = direct ? b.stride : 0;
         if (framebuffer != 0) gl->bind_framebuffer(fb_target, 0);
+        if (pbo_available && pack_buffer != 0) gl->bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
         if (version >= 3) {
-          if (pack_buffer != 0) gl->bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
           if (row_length != desired_row_length)
             gl->pixel_storei(GL_PACK_ROW_LENGTH, desired_row_length);
           if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, 0);
@@ -358,9 +365,9 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
           if (skip_pixels != 0) gl->pixel_storei(GL_PACK_SKIP_PIXELS, skip_pixels);
           if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, skip_rows);
           if (row_length != desired_row_length) gl->pixel_storei(GL_PACK_ROW_LENGTH, row_length);
-          if (pack_buffer != 0)
-            gl->bind_buffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
         }
+        if (pbo_available && pack_buffer != 0)
+          gl->bind_buffer(GL_PIXEL_PACK_BUFFER, static_cast<GLuint>(pack_buffer));
         if (framebuffer != 0) gl->bind_framebuffer(fb_target, static_cast<GLuint>(framebuffer));
         if (!direct) CopyChildReadback(c->pixels.data(), b.bits, plan);
       }

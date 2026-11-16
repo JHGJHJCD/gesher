@@ -25,6 +25,15 @@ import android.os.HandlerThread;
 
 /** A real EGL producer into the ImageReader surface used by Flutter platform views. */
 public final class ImageReaderEglTest {
+    private static final int GL_PACK_REVERSE_ROW_ORDER_ANGLE = 0x93A4;
+    private static final int GL_PIXEL_PACK_BUFFER = 0x88EB;
+    private static final int GL_PIXEL_PACK_BUFFER_BINDING = 0x88ED;
+    private static final int GL_STREAM_READ = 0x88E1;
+
+    private static boolean hasExtension(String list, String name) {
+        return list != null && (" " + list + " ").contains(" " + name + " ");
+    }
+
     static void check(boolean value, String label) {
         if (!value) throw new AssertionError(label + " (EGL 0x" + Integer.toHexString(EGL14.eglGetError()) + ")");
         System.out.println("ImageReaderEglTest PASS " + label);
@@ -48,11 +57,40 @@ public final class ImageReaderEglTest {
                     new int[] { EGL14.EGL_NONE }, 0);
             check(surface != EGL14.EGL_NO_SURFACE, "reader EGL surface");
             check(EGL14.eglMakeCurrent(display, surface, surface, context), "make current");
+            // A child swap is an internal read: it must not change the app's
+            // pack state. ANGLE can offer reverse rows and GLES2 PBOs as extensions.
+            String extensions = GLES20.glGetString(GLES20.GL_EXTENSIONS);
+            boolean reverse = hasExtension(extensions, "GL_ANGLE_pack_reverse_row_order");
+            boolean pbo = hasExtension(extensions, "GL_NV_pixel_buffer_object")
+                    || hasExtension(extensions, "GL_EXT_pixel_buffer_object");
+            int[] packBuffer = new int[1];
+            GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 1);
+            if (reverse) GLES20.glPixelStorei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, 1);
+            if (pbo) {
+                GLES20.glGenBuffers(1, packBuffer, 0);
+                GLES20.glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer[0]);
+                GLES20.glBufferData(GL_PIXEL_PACK_BUFFER, 16 * 12 * 4, null, GL_STREAM_READ);
+                check(packBuffer[0] != 0 && GLES20.glGetError() == GLES20.GL_NO_ERROR,
+                        "PBO can be bound before child surface swap");
+            }
             for (int color = 0; color < 3; color++) {
                 GLES20.glViewport(0, 0, 16, 12);
                 GLES20.glClearColor(color == 0 ? 1 : 0, color == 1 ? 1 : 0, color == 2 ? 1 : 0, 1);
                 GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT);
                 check(EGL14.eglSwapBuffers(display, surface), "swap " + color);
+                int[] state = new int[1];
+                GLES20.glGetIntegerv(GLES20.GL_PACK_ALIGNMENT, state, 0);
+                check(state[0] == 1, "pack alignment unchanged after swap " + color);
+                if (reverse) {
+                    GLES20.glGetIntegerv(GL_PACK_REVERSE_ROW_ORDER_ANGLE, state, 0);
+                    check(state[0] == 1, "reverse row order unchanged after swap " + color);
+                }
+                if (pbo) {
+                    GLES20.glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, state, 0);
+                    check(state[0] == packBuffer[0], "PBO binding unchanged after swap " + color);
+                }
+                check(GLES20.glGetError() == GLES20.GL_NO_ERROR,
+                        "GLES state queries after swap have no errors " + color);
                 try (Image image = reader.acquireLatestImage()) {
                     check(image != null, "image " + color);
                     check(image.getWidth() == 16 && image.getHeight() == 12 && image.getTimestamp() > 0, "metadata " + color);
@@ -82,6 +120,12 @@ public final class ImageReaderEglTest {
                     }
                 }
             }
+            if (pbo) {
+                GLES20.glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+                GLES20.glDeleteBuffers(1, packBuffer, 0);
+            }
+            if (reverse) GLES20.glPixelStorei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, 0);
+            GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 4);
             HandlerThread callbacks = new HandlerThread("reader-callback");
             callbacks.start();
             try {
