@@ -28,20 +28,13 @@ foreach ($name in 'GESHER_GTEST84_MODE','GESHER_GTEST84_PID','GESHER_GTEST84_CWD
 }
 $gtest84SavedLibs = $libsTests
 $gtest84SavedArt = $artBin
-if (-not ('Gtest84NativeHandles' -as [type])) {
-  Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class Gtest84NativeHandles {
-  [DllImport("kernel32.dll", SetLastError = true)]
-  static extern bool GetHandleInformation(IntPtr handle, out uint flags);
-  public static bool Closed(IntPtr handle) {
-    uint flags;
-    return handle != IntPtr.Zero && !GetHandleInformation(handle, out flags) && Marshal.GetLastWin32Error() == 6;
-  }
+if (-not ('ProcessReaderObservation.NativeWitnesses' -as [type])) {
+  Add-Type -Path (Join-Path $PSScriptRoot '../fixtures/ProcessReaderCloseObserver.cs')
 }
-'@
-}
+$reader84SavedObserver = [GtestProcessNativeHandles]::BeforeCloseObserver
+[ProcessReaderObservation.NativeWitnesses]::Begin()
+[GtestProcessNativeHandles]::BeforeCloseObserver = [ProcessReaderObservation.NativeWitnesses]::CaptureCallback
+try {
 Write-Host "ACTUAL_GTEST_RUNTIME powershell=$($PSVersionTable.PSVersion) framework=$([Runtime.InteropServices.RuntimeInformation]::FrameworkDescription)"
 try {
   $env:GESHER_CI_PROCESS_TRACE = '1'
@@ -74,10 +67,10 @@ try {
         if ($mode -ne 'missing-exe') {
           $pipeEvidence = [regex]::Match($text, 'tasksdone=True pipesclosed=True pipe-output=(\d+) pipe-error=(\d+)')
           $actualPipesClosed = $pipeEvidence.Success -and
-            [Gtest84NativeHandles]::Closed([IntPtr][long]$pipeEvidence.Groups[1].Value) -and
-            [Gtest84NativeHandles]::Closed([IntPtr][long]$pipeEvidence.Groups[2].Value)
+            [ProcessReaderObservation.NativeWitnesses]::ClosedPair(
+              [IntPtr][long]$pipeEvidence.Groups[1].Value, [IntPtr][long]$pipeEvidence.Groups[2].Value)
           $correct = $correct -and $text.Contains('disposed=True') -and $actualPipesClosed
-          Write-Host "ACTUAL_GTEST_PIPE_CLEANUP helper=$helper case=$mode tasks-stopped=$($pipeEvidence.Success) native-pipes-invalid=$actualPipesClosed"
+          Write-Host "ACTUAL_GTEST_PIPE_CLEANUP helper=$helper case=$mode tasks-stopped=$($pipeEvidence.Success) original-pipes-released=$actualPipesClosed"
         }
         if ($expected) { $correct = $correct -and $text.Contains('1 tests passed') -and $text.Contains('readers=True') }
         if ($mode -eq 'nonzero') { $correct = $correct -and $text.Contains('exit 0x00000017') }
@@ -157,10 +150,10 @@ try {
         if ($helper -eq 'InvokeOpenSl') {
           $pipeEvidence = [regex]::Match($text, 'INFO READER_CLEANUP helper=InvokeOpenSl tasksdone=True pipesclosed=True processclosed=True pipe-output=(\d+) pipe-error=(\d+)')
           $invalid = $pipeEvidence.Success -and
-            [Gtest84NativeHandles]::Closed([IntPtr][long]$pipeEvidence.Groups[1].Value) -and
-            [Gtest84NativeHandles]::Closed([IntPtr][long]$pipeEvidence.Groups[2].Value)
+            [ProcessReaderObservation.NativeWitnesses]::ClosedPair(
+              [IntPtr][long]$pipeEvidence.Groups[1].Value, [IntPtr][long]$pipeEvidence.Groups[2].Value)
           $correct = $correct -and $invalid
-          Write-Host "ACTUAL_READER_PIPE_CLEANUP helper=InvokeOpenSl case=$($case.Mode) tasks-stopped=$($pipeEvidence.Success) native-pipes-invalid=$invalid"
+          Write-Host "ACTUAL_READER_PIPE_CLEANUP helper=InvokeOpenSl case=$($case.Mode) tasks-stopped=$($pipeEvidence.Success) original-pipes-released=$invalid"
         }
         if ($case.Mode -in @('normal', 'nonzero')) {
           $correct = $correct -and $text.Contains("process84 stdout $($case.Mode)") -and
@@ -322,10 +315,10 @@ foreach ($case in @(@{ Mode = 'normal'; Expected = 0 }, @{ Mode = 'nonzero'; Exp
     $correct = $code -eq $case.Expected -and $timer.Elapsed.TotalSeconds -lt ($limit + 20)
     $pipeEvidence = [regex]::Match($text, 'INFO READER_CLEANUP helper=RunTimed tasksdone=True pipesclosed=True processclosed=True pipe-output=(\d+) pipe-error=(\d+)')
     $invalid = $pipeEvidence.Success -and
-      [Gtest84NativeHandles]::Closed([IntPtr][long]$pipeEvidence.Groups[1].Value) -and
-      [Gtest84NativeHandles]::Closed([IntPtr][long]$pipeEvidence.Groups[2].Value)
+      [ProcessReaderObservation.NativeWitnesses]::ClosedPair(
+        [IntPtr][long]$pipeEvidence.Groups[1].Value, [IntPtr][long]$pipeEvidence.Groups[2].Value)
     $correct = $correct -and $invalid
-    Write-Host "ACTUAL_READER_PIPE_CLEANUP helper=RunTimed case=$($case.Mode) tasks-stopped=$($pipeEvidence.Success) native-pipes-invalid=$invalid"
+    Write-Host "ACTUAL_READER_PIPE_CLEANUP helper=RunTimed case=$($case.Mode) tasks-stopped=$($pipeEvidence.Success) original-pipes-released=$invalid"
     if ($case.Mode -in @('normal', 'nonzero')) {
       $correct = $correct -and $text.Contains("process84 stdout $($case.Mode)") -and
         $text.Contains("process84 stderr $($case.Mode)")
@@ -548,8 +541,8 @@ foreach($mode in 'normal','nonzero','missing-marker','timeout','retained'){
         if(-not $facts){$g.Failed=$true}
         $pair=[regex]::Match($g.Text,'kernel=True tasks=True pipes=2 disposed=True output=(\d+) error=(\d+)')
         if(-not $pair.Success){$g.Failed=$true}
-        elseif(-not [Gtest84NativeHandles]::Closed([IntPtr][long]$pair.Groups[1].Value) -or
-               -not [Gtest84NativeHandles]::Closed([IntPtr][long]$pair.Groups[2].Value)){$g.Failed=$true}
+        elseif(-not [ProcessReaderObservation.NativeWitnesses]::ClosedPair(
+                 [IntPtr][long]$pair.Groups[1].Value,[IntPtr][long]$pair.Groups[2].Value)){$g.Failed=$true}
         if($mode -eq 'retained' -and -not $g.Text.Contains('did not complete within ten seconds')){$g.Failed=$true}
         if($g.Failed){Write-Host "FAIL  CI processes: GraphicsDex $mode ownership/status";$script:failed++}
         else{Write-Host "PASS  CI processes: GraphicsDex $mode actual helper/typed ownership"}
@@ -565,3 +558,7 @@ foreach($mode in 'normal','nonzero','missing-marker','timeout','retained'){
 }
 # Restore surrounding fixture environment through a protected owner boundary.
 while($true){try{$Dir=$graphics84SavedDir;foreach($n in $graphics84SavedEnv.Keys){[Environment]::SetEnvironmentVariable($n,$graphics84SavedEnv[$n])};break}catch{try{[Threading.Thread]::Sleep(5000)}catch{}}}
+} finally {
+  [GtestProcessNativeHandles]::BeforeCloseObserver = $reader84SavedObserver
+  [ProcessReaderObservation.NativeWitnesses]::End()
+}

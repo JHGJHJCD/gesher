@@ -178,6 +178,17 @@ public static class Fixture {
     return same && owned.IsClosed && !GetHandleInformation(value, out flags) && Marshal.GetLastWin32Error() == 6;
   }
 
+  static void Observed(Action action) {
+    var previous = GtestProcessNativeHandles.BeforeCloseObserver;
+    ProcessReaderObservation.NativeWitnesses.Begin();
+    GtestProcessNativeHandles.BeforeCloseObserver = ProcessReaderObservation.NativeWitnesses.CaptureCallback;
+    try { action(); }
+    finally {
+      GtestProcessNativeHandles.BeforeCloseObserver = previous;
+      ProcessReaderObservation.NativeWitnesses.End();
+    }
+  }
+
   public static int Run() {
     checks = failures = 0;
     var timer = Stopwatch.StartNew();
@@ -213,6 +224,51 @@ public static class Fixture {
         Check(((ReusingReader)pipe.Reader).Reused && Valid(pipe.Raw) && pipe.Handle.IsClosed &&
               witness.OriginalGone(), "legacy failure is actual value reuse, not an unclosed pipe");
       }
+    });
+    Case("actual-call observer accepts real numeric slot reuse", delegate {
+      Observed(delegate {
+        using (var pipe = new Pipe(reuse: true))
+        using (var witness = new Witness(pipe.Raw)) {
+          pipe.CompleteReader();
+          Check(GtestProcessNativeHandles.CloseOwnedReader(pipe.Reader, pipe.Handle), "observed helper close succeeds");
+          Check(((ReusingReader)pipe.Reader).Reused && Valid(pipe.Raw), "observed original slot really holds a replacement event");
+          Check(ProcessReaderObservation.NativeWitnesses.Closed(pipe.Raw) && witness.OriginalGone(),
+              "late independent observer verifies the original pipe despite numeric reuse");
+          Check(!ProcessReaderObservation.NativeWitnesses.Closed(pipe.Raw), "observer evidence cannot be reused");
+        }
+      });
+    });
+    Case("actual-call observer rejects a retained native pipe", delegate {
+      Observed(delegate {
+        using (var pipe = new Pipe(ownsHandle: false))
+        using (var witness = new Witness(pipe.Raw)) {
+          pipe.CompleteReader();
+          Check(!GtestProcessNativeHandles.CloseOwnedReader(pipe.Reader, pipe.Handle), "observed leak still fails the helper");
+          Check(pipe.Handle.IsClosed && witness.OriginalStillOpen(), "observed native leak is real despite managed disposal");
+          Check(!ProcessReaderObservation.NativeWitnesses.Closed(pipe.Raw), "independent observer rejects the same native leak");
+        }
+      });
+    });
+    Case("actual-call observer checks both pipes after one fails", delegate {
+      Observed(delegate {
+        using (var open = new Pipe(leaveOpen: true))
+        using (var closed = new Pipe()) {
+          open.CompleteReader(); closed.CompleteReader();
+          Check(!GtestProcessNativeHandles.CloseOwnedReader(open.Reader, open.Handle), "observed leave-open reader fails");
+          Check(GtestProcessNativeHandles.CloseOwnedReader(closed.Reader, closed.Handle), "other observed pipe closes");
+          Check(!ProcessReaderObservation.NativeWitnesses.ClosedPair(open.Raw, closed.Raw), "pair rejects the unclosed pipe");
+          Check(!ProcessReaderObservation.NativeWitnesses.Closed(closed.Raw), "pair consumes both independent witnesses");
+        }
+      });
+    });
+    Case("actual-call observer rejects uncaptured handles", delegate {
+      Observed(delegate {
+        using (var pipe = new Pipe()) {
+          pipe.CompleteReader();
+          pipe.Reader.Dispose();
+          Check(!ProcessReaderObservation.NativeWitnesses.Closed(pipe.Raw), "post-close numbers alone supply no evidence");
+        }
+      });
     });
     Case("managed closed but actual native pipe retained", delegate {
       using (var pipe = new Pipe(ownsHandle: false))

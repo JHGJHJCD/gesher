@@ -102,6 +102,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Windows test shard coverage, dependencies and failure controls
+        shell: pwsh
+        run: tests/windows/test-test-shards.ps1
+
       - name: Strict archive adversarial controls
         run: |
           python3 tools/ci/receipt_identity.py
@@ -1572,16 +1576,14 @@ jobs:
           name: e2e-results-${{ matrix.os }}
           path: e2e-results/
 
-  test:
-    # Keep the required full-suite check names while running the existing
-    # framework/service tracks early on separate Windows runners.
-    name: ${{ matrix.suite == 'full' && 'test' || 'framework-contracts' }} (${{ matrix.os }})
+  test-shards:
+    name: test-${{ matrix.shard }} (${{ matrix.os }})
     needs: [build, framework, native-libs, libs, graphics, angle, boot-image, webview, exec, media, posix, arm64, surfaces, native2, supplier-correlation]
     strategy:
       fail-fast: false
       matrix:
         os: [windows-2022, windows-2025]
-        suite: [full, framework-contracts]
+        shard: [native, desktop, services, compilation]
     runs-on: ${{ matrix.os }}
     # A hung app or check fails the job instead of running for six hours.
     timeout-minutes: 120
@@ -1619,7 +1621,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Real Windows thread, Binder, GDI and socket allocation contracts
-        if: matrix.suite == 'full'
+        if: matrix.shard == 'native'
         timeout-minutes: 2
         shell: pwsh
         run: |
@@ -1657,7 +1659,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: ARM64 parked TLS, reuse and actual translator callbacks
-        if: matrix.suite == 'full'
+        if: matrix.shard == 'native'
         timeout-minutes: 3
         shell: pwsh
         run: |
@@ -1751,19 +1753,18 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run offline identity and retirement regressions
-        if: matrix.suite == 'full'
+        if: matrix.shard == 'services'
         shell: pwsh
         run: |
           powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/windows/run-microg-security.ps1 -Dir dist -EvidenceDir "${{ runner.temp }}/microg-security" | Tee-Object -FilePath microg-security-results.txt
           exit $LASTEXITCODE
 
       - name: Run tests
-        if: matrix.suite == 'full'
         shell: pwsh
         run: |
-          pwsh -NoProfile -File tests/windows/run-tests.ps1 dist -Web3Observer dist/web3_process_waits.exe | Tee-Object -FilePath results.txt
+          pwsh -NoProfile -File tests/windows/run-tests.ps1 dist -Shard ${{ matrix.shard }} -Web3Observer dist/web3_process_waits.exe | Tee-Object -FilePath results.txt
           $code = $LASTEXITCODE
-          "### Tests — ${{ matrix.os }}" >> $env:GITHUB_STEP_SUMMARY
+          "### Tests — ${{ matrix.os }} / ${{ matrix.shard }}" >> $env:GITHUB_STEP_SUMMARY
           '```' >> $env:GITHUB_STEP_SUMMARY
           # Full diagnostics stay in results.txt/job logs. Source receipts can be
           # very large; GitHub rejects a step summary above 1 MiB.
@@ -1780,31 +1781,9 @@ jobs:
           '```' >> $env:GITHUB_STEP_SUMMARY
           exit $code
 
-      - name: Run framework and service contracts with graphics/font prerequisites
-        if: matrix.suite == 'framework-contracts'
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File tests/windows/run-tests.ps1 dist -FrameworkContractsOnly -Web3Observer dist/web3_process_waits.exe | Tee-Object -FilePath framework-contracts-results.txt
-          $code = $LASTEXITCODE
-          "### Framework contracts — ${{ matrix.os }}" >> $env:GITHUB_STEP_SUMMARY
-          '```' >> $env:GITHUB_STEP_SUMMARY
-          # Preserve full failure output in this leg's own result artifact.
-          $summaryBytes = 0
-          $summaryTruncated = $false
-          foreach ($line in Get-Content framework-contracts-results.txt | Where-Object { $_ -match '^(PASS|FAIL)  |^[0-9]+ test\(s\) failed$' }) {
-            $entry = if ($line.Length -gt 1200) { $line.Substring(0, 1200) + ' ... (see job log)' } else { $line }
-            $entryBytes = [Text.Encoding]::UTF8.GetByteCount($entry) + 2
-            if ($summaryBytes + $entryBytes -gt 700000) { $summaryTruncated = $true; break }
-            $entry >> $env:GITHUB_STEP_SUMMARY
-            $summaryBytes += $entryBytes
-          }
-          if ($summaryTruncated) { 'Summary shortened; complete results remain in the job log and framework-contracts-results.txt.' >> $env:GITHUB_STEP_SUMMARY }
-          '```' >> $env:GITHUB_STEP_SUMMARY
-          exit $code
-
       - name: Upload media output captures
         uses: actions/upload-artifact@v4
-        if: ${{ always() && matrix.suite == 'full' }}
+        if: ${{ always() && matrix.shard == 'services' }}
         with:
           name: media-output-${{ matrix.os }}
           path: |
@@ -1815,7 +1794,7 @@ jobs:
 
       - name: Upload offline regression evidence
         uses: actions/upload-artifact@v4
-        if: ${{ always() && matrix.suite == 'full' }}
+        if: ${{ always() && matrix.shard == 'services' }}
         with:
           name: microg-security-${{ matrix.os }}
           path: |
@@ -1832,14 +1811,30 @@ jobs:
             microg-security-results.txt
             results.txt
 
-      - name: Upload framework contract results
+      - name: Upload shard results
         uses: actions/upload-artifact@v4
-        if: ${{ always() && matrix.suite == 'framework-contracts' }}
+        if: always()
         with:
-          name: framework-contracts-results-${{ matrix.os }}
+          name: test-results-${{ matrix.os }}-${{ matrix.shard }}
           path: |
-            framework-contracts-results.txt
+            results.txt
             ci-owners.json
+          if-no-files-found: error
+
+  test:
+    name: test (${{ matrix.os }})
+    needs: [test-shards]
+    if: always()
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, windows-2025]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every Windows test shard to pass
+        env:
+          SHARD_RESULT: ${{ needs.test-shards.result }}
+        run: test "$SHARD_RESULT" = success
 
   # Extra isolated jobs execute the real regression in the SAME canonical
   # full. Only these jobs download the separately named hook artifact.

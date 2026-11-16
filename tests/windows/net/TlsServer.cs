@@ -93,8 +93,13 @@ public sealed class GesherNetTlsServer : IDisposable {
                     await ssl.FlushAsync(timeout.Token).ConfigureAwait(false);
                 }
             } catch (Exception error) when (error is IOException || error is AuthenticationException ||
-                        error is OperationCanceledException || error is ObjectDisposedException || error is SocketException) {
+                        error is OperationCanceledException || error is ObjectDisposedException || error is SocketException ||
+                        (Volatile.Read(ref stopped) != 0 && error is ArgumentException argument &&
+                         argument.ParamName == "innerStream")) {
                 // Rejected certificates and interrupted fixture clients are expected.
+                // Dispose may close the accepted NetworkStream after GetStream but
+                // before SslStream checks CanRead/CanWrite. Only shutdown makes that
+                // constructor failure expected; keep errors on a live server fatal.
             } finally {
                 byte ignored;
                 clients.TryRemove(client, out ignored);
