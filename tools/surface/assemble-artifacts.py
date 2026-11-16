@@ -11,6 +11,7 @@ ALLOWED = {'current_framework': ('base_framework', FRAMEWORK), 'current_host': (
 FRAMEWORK.update('orderedbroadcast-source.apk orderedbroadcast-target.apk webviewlifecycle.apk namedprocesslauncher.apk windowpromotion-source.apk windowpromotion-target.apk windowpromotion-control.dex'.split())
 FRAMEWORK.update('packageevents-observer.apk packageevents-target-v1.apk packageevents-target-v2.apk packageevents-control.dex'.split())
 HOST.add('account-chooser-native-tests.dex')
+HOST.add('permission_dialog_test.exe')
 FRAMEWORK.update('icon-base.apk icon-density.apk icon-bundle.apks icon-bundle.xapk'.split())
 
 def assemble(source, dest, ledger, owner, prefix='', exclude=()):
