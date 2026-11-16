@@ -9,7 +9,7 @@ $tokens = $null; $parseErrors = $null
 $ast = [System.Management.Automation.Language.Parser]::ParseFile(
     [IO.Path]::GetFullPath($PanelPath), [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw ($parseErrors | Out-String) }
-foreach ($name in 'Test-PanelRequestRecent', 'Read-PanelRequest', 'Get-AppInstallTimes', 'Invoke-PanelRequest') {
+foreach ($name in 'Read-PanelRequest', 'Get-AppInstallTimes', 'Invoke-PanelRequest') {
     $functions = @($ast.FindAll({
         param($node)
         $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq $name
@@ -17,15 +17,42 @@ foreach ($name in 'Test-PanelRequestRecent', 'Read-PanelRequest', 'Get-AppInstal
     if ($functions.Count -ne 1) { throw "Expected one production function: $name" }
     . ([scriptblock]::Create($functions[0].Extent.Text))
 }
-# The second instance's exit is guarded by the request and the mutex, in that order.
-$text = [IO.File]::ReadAllText([IO.Path]::GetFullPath($PanelPath))
-if ($text -notmatch "Mutex\]::new\(\`$false, 'Local\\Gesher\.ControlPanel'") { throw 'The panel no longer opens its named mutex unowned' }
-if ($text -notmatch 'PanelInstanceCreated -and \(Test-PanelRequestRecent\)') { throw 'A second panel no longer leaves a request to the first' }
 
 $script:Checks = 0
 function Assert-Request([bool] $value, [string] $message) {
     if (-not $value) { throw $message }
     $script:Checks++
+}
+
+# One panel: run the production startup lines (single-panel decision) in child processes,
+# as a second start does, with the first panel's mutex held here.
+$text = [IO.File]::ReadAllText([IO.Path]::GetFullPath($PanelPath))
+$start = $text.IndexOf('$script:PanelReopen = ')
+$end = $text.IndexOf("`n}", $text.IndexOf('if (-not $script:PanelInstanceCreated -and -not $script:PanelReopen)'))
+if ($start -lt 0 -or $end -lt 0) { throw 'The single-panel startup block was not found' }
+$startup = $text.Substring($start, $end + 2 - $start)
+$suffix = [guid]::NewGuid().ToString('N')
+$startup = $startup.Replace('Local\Gesher.ControlPanel', "Local\Gesher.ControlPanelCheck$suffix")
+$probe = Join-Path ([IO.Path]::GetTempPath()) "gesher-panel-start-$suffix.ps1"
+[IO.File]::WriteAllText($probe, $startup + "`nexit 7`n")
+$created = $false
+$mutex = [System.Threading.Mutex]::new($false, "Local\Gesher.ControlPanelCheck$suffix", [ref] $created)
+$show = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::AutoReset, "Local\Gesher.ControlPanelCheck$suffix.Show")
+try {
+    Assert-Request $created 'The check could not create its panel mutex'
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $probe
+    Assert-Request ($LASTEXITCODE -eq 0) "A second panel did not exit (exit $LASTEXITCODE)"
+    Assert-Request ($show.WaitOne(2000)) 'A second panel did not signal the first'
+    $env:GESHER_PANEL_REOPEN = '1'
+    try { & powershell -NoProfile -ExecutionPolicy Bypass -File $probe } finally { Remove-Item Env:GESHER_PANEL_REOPEN }
+    Assert-Request ($LASTEXITCODE -eq 7) "Reopen was stopped by the open panel (exit $LASTEXITCODE)"
+    Assert-Request (-not $show.WaitOne(0)) 'Reopen signalled the old panel'
+    $mutex.Dispose(); $show.Dispose(); $mutex = $null
+    & powershell -NoProfile -ExecutionPolicy Bypass -File $probe
+    Assert-Request ($LASTEXITCODE -eq 7) "A start after the panel closed did not open (exit $LASTEXITCODE)"
+} finally {
+    if ($mutex) { $mutex.Dispose(); $show.Dispose() }
+    Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
 }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ("gesher-panel-request-" + [guid]::NewGuid())
@@ -34,19 +61,13 @@ try {
     $script:PanelRequestFile = Join-Path $root 'data/system/control-panel-request'
     $script:PanelRequestTaken = "$($script:PanelRequestFile).taken"
 
-    # No request: nothing to do, nothing recent.
+    # A request is read once and leaves nothing behind.
     Assert-Request ($null -eq (Read-PanelRequest)) 'A missing request was read'
-    Assert-Request (-not (Test-PanelRequestRecent)) 'No request counted as recent'
-
-    # A request is read once, moved aside, and counts as recent while it is fresh.
     [IO.File]::WriteAllText($script:PanelRequestFile, "com.example.app`n")
-    Assert-Request (Test-PanelRequestRecent) 'A pending request was not recent'
     Assert-Request ((Read-PanelRequest) -eq 'com.example.app') 'The request package was not read'
     Assert-Request (-not (Test-Path -LiteralPath $script:PanelRequestFile)) 'The request was not taken'
+    Assert-Request (-not (Test-Path -LiteralPath $script:PanelRequestTaken)) 'The taken request was left behind'
     Assert-Request ($null -eq (Read-PanelRequest)) 'A taken request was read twice'
-    Assert-Request (Test-PanelRequestRecent) 'A just-taken request was not recent (a second panel would open)'
-    [IO.File]::SetLastWriteTimeUtc($script:PanelRequestTaken, [DateTime]::UtcNow.AddMinutes(-5))
-    Assert-Request (-not (Test-PanelRequestRecent)) 'An old taken request still blocks a new panel'
 
     # packages.list times (ms since 1970) become local dates; unknown packages have none.
     [IO.File]::WriteAllText((Join-Path $root 'data/system/packages.list'),
@@ -58,6 +79,7 @@ try {
     # Invoke-PanelRequest: raises the window; only a package name reaches the dialog.
     $script:IsBusy = $false
     $script:ShowingAppInfo = $false
+    $script:PanelShowEvent = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::AutoReset)
     $script:Shown = [System.Collections.Generic.List[string]]::new()
     $window = [PSCustomObject]@{ WindowState = [System.Windows.WindowState]::Minimized; Topmost = $false; Activations = 0 }
     $window | Add-Member -MemberType ScriptMethod -Name Activate -Value { $this.Activations++; $true }
@@ -69,6 +91,8 @@ try {
         Assert-Request (Test-Path -LiteralPath $script:PanelRequestFile) 'A request was taken while a dialog was open'
         Remove-Item -LiteralPath $script:PanelRequestFile
     }
+    Invoke-PanelRequest
+    Assert-Request ($window.Activations -eq 0) 'The panel came to the front with nothing to show'
     [IO.File]::WriteAllText($script:PanelRequestFile, "com.example.app`n")
     Invoke-PanelRequest
     Assert-Request ($script:Shown.Count -eq 1 -and $script:Shown[0] -eq 'com.example.app') 'The app details were not shown'
@@ -82,10 +106,15 @@ try {
     Assert-Request ($script:Shown.Count -eq 1) 'A request that is not a package name reached the dialog'
     Assert-Request ($window.Activations -eq 6) 'An empty or invalid request did not still raise the panel'
 
+    # Busy: the request waits, but a second start's signal still raises the panel.
     $script:IsBusy = $true
     [IO.File]::WriteAllText($script:PanelRequestFile, "com.example.app`n")
     Invoke-PanelRequest
     Assert-Request (Test-Path -LiteralPath $script:PanelRequestFile) 'A busy panel took a request'
+    Assert-Request ($window.Activations -eq 6) 'A busy panel came to the front for a request it keeps'
+    $null = $script:PanelShowEvent.Set()
+    Invoke-PanelRequest
+    Assert-Request ($window.Activations -eq 7 -and $script:Shown.Count -eq 1) 'A second start did not raise a busy panel'
 } finally {
     Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -65,7 +65,10 @@ final class ControlCenter {
             request.delete();
             return false;
         }
-        return WindowsHost.openUrl(link);
+        if (WindowsHost.openUrl(link)) return true;
+        // Not left for a Control Center the user opens later.
+        request.delete();
+        return false;
     }
 
     /** The request: one line, the package (empty for the main view); replaced atomically. */

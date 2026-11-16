@@ -1036,8 +1036,11 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     if (!opened) return ActivityManager.START_INTENT_NOT_RESOLVED;
                     // Settings answers a startActivityForResult when the user leaves it;
                     // Windows' page reports nothing, so the request is not left waiting.
+                    // Only to an activity of the calling process: another app's token
+                    // must not receive a result it did not ask for.
                     ActivityRecord source = resultToToken != null ? forToken(resultToToken) : null;
-                    if (source != null && requestCode >= 0) {
+                    if (source != null && requestCode >= 0 && source.app != null
+                            && source.app.pid == originalPid) {
                         deliverResult(source, resultWho, requestCode,
                                 android.app.Activity.RESULT_CANCELED, null);
                     }

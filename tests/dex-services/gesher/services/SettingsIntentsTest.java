@@ -267,6 +267,16 @@ public final class SettingsIntentsTest {
         require(names(pm.queryIntentActivities(launcher, null,
                 PackageManager.MATCH_DISABLED_COMPONENTS, 0).getList())
                 .contains(main.getClassName()), "MATCH_DISABLED_COMPONENTS lost the activity");
+        // Explicit lookups (startActivity by component, the launcher) do not find it either.
+        require(pm.getActivityInfo(main, 0, 0) == null, "disabled activity still found by name");
+        require(pm.getActivityInfo(main, PackageManager.MATCH_DISABLED_COMPONENTS, 0) != null,
+                "MATCH_DISABLED_COMPONENTS lost the activity by name");
+        // DISABLED_USER is an application state: ignored for a component, as on Android.
+        pm.setComponentEnabledSetting(receiver,
+                PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER, 0, 0, PACKAGE);
+        require(pm.getComponentEnabledSetting(receiver, 0)
+                == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, "DISABLED_USER was applied");
+        require(pm.getReceiverInfo(receiver, 0, 0) != null, "ignored state hid the receiver");
 
         // The batch form checks every entry first: one bad entry changes nothing.
         throwsType(IllegalArgumentException.class, () -> pm.setComponentEnabledSettings(
@@ -285,6 +295,7 @@ public final class SettingsIntentsTest {
                 == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, "DEFAULT did not reset");
         require(names(pm.queryIntentActivities(launcher, null, 0, 0).getList())
                 .contains(main.getClassName()), "re-enabled activity does not resolve");
+        require(pm.getActivityInfo(main, 0, 0) != null, "re-enabled activity not found by name");
 
         throwsType(IllegalArgumentException.class, () -> pm.setComponentEnabledSetting(
                 new ComponentName(PACKAGE, "NoSuchClass"),
@@ -296,8 +307,12 @@ public final class SettingsIntentsTest {
                 new ComponentName("com.example.missing", "X"),
                 PackageManager.COMPONENT_ENABLED_STATE_DISABLED, 0, 0, PACKAGE),
                 "unknown package accepted");
+        // Reading: as Settings.getComponentEnabledSettingLPr, an unknown class of a known
+        // package is DEFAULT, an unknown package throws.
+        require(pm.getComponentEnabledSetting(new ComponentName(PACKAGE, "NoSuchClass"), 0)
+                == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT, "unknown class not DEFAULT");
         throwsType(IllegalArgumentException.class, () -> pm.getComponentEnabledSetting(
-                new ComponentName(PACKAGE, "NoSuchClass"), 0), "unknown component read");
+                new ComponentName("com.example.missing", "X"), 0), "unknown package read");
         System.out.println("SettingsIntentsTest: component enabled states are kept and applied");
     }
 

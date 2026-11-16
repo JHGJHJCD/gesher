@@ -38,9 +38,12 @@ answered by `IFoo.Default` (null, 0, false, nothing done) and one missing servic
    shortcut it keeps (`data/system/gesher-control-panel.lnk` to `gesher-launch.exe
    control-panel`): `WindowsHost.openUrl` (ShellExecute) takes no arguments, and a
    shortcut needs no new native code. The Control Center shows the app's details dialog
-   (install and update times, uninstall). A Control Center already open takes the request
-   on its live-refresh timer; a second one started for the same request exits (named
-   mutex, never owned, so "Reopen after update" still works).
+   (install and update times, uninstall; Close is the default button, since another app
+   raised it). There is one Control Center: a second start (an App info, or the Start menu
+   again) signals the open one through a named event and exits; the open one comes to the
+   front and takes the request on its live-refresh timer. The named mutex is never owned
+   and is released as the window closes; "Reopen after update" passes
+   GESHER_PANEL_REOPEN to start the new version while the old one is still open.
 2. **List screens open the Control Center itself** (app lists, sync and accounts,
    Settings' main page); **device screens open a fixed `ms-settings:` page** (Wi-Fi,
    Bluetooth, location, date, language, display, sound, storage, battery...). The intent's
@@ -52,9 +55,12 @@ answered by `IFoo.Default` (null, 0, false, nothing done) and one missing servic
    reports nothing back, and Settings' screens answer CANCELED on a phone too; apps
    re-check the permission state themselves.
 5. **The wrong stand-in answers are implemented**: StorageStatsService (sizes measured on
-   the host files, walks capped at 200,000 entries; no quotas), component enabled states
-   (kept for the device's lifetime, dropped with the package, applied to activity, service,
-   receiver and provider queries unless MATCH_DISABLED_COMPONENTS), memory info from
+   the host files, one budget of 200,000 entries per query; no quotas; an app may ask about
+   itself, anything else needs PACKAGE_USAGE_STATS, which on Gesher means the app declares
+   it, since there is no "Usage access" screen to grant the app op), component enabled
+   states (kept for the device's lifetime, dropped with the package, applied to queries and
+   to get*Info unless MATCH_DISABLED_COMPONENTS; DISABLED_USER and DISABLED_UNTIL_USED are
+   ignored for components, and an unknown class reads as DEFAULT, as on Android), memory info from
    Gesher's /proc/meminfo, the calling process's importance, SIM_STATE_ABSENT, "" for the
    profile type, provider intent queries. Methods whose Default answer is already right
    (listener registrations with nothing to report, no mainline modules, no IME tracker)
@@ -70,8 +76,8 @@ answered by `IFoo.Default` (null, 0, false, nothing done) and one missing servic
   starting (`resolveActivity() != null`) still shows its own fallback. Faking a Settings
   ResolveInfo would affect every chooser; left out.
 - Component states are not persisted across device restarts; apps that toggle components
-  normally set them again as they start. Explicit starts of a disabled activity are not
-  refused yet.
+  normally set them again as they start. No PACKAGE_CHANGED broadcast is sent, and the
+  Start menu shortcut of a disabled launcher activity stays.
 - `IInputManager.setPointerIcon` (cursor shapes) and
   `IActivityManager.getHistoricalProcessExitReasons` still answer Default and remain in
   the stand-in log: they need Windows cursor mapping and an exit-history store.

@@ -305,7 +305,7 @@ public final class PackageManagerService extends IPackageManager.Default {
         if (p == null && BrowserPackageSupport.isBrowserPackage(className.getPackageName())) {
             return BrowserPackageSupport.activityInfo(className.getClassName(), flags);
         }
-        return p == null ? null : p.activityInfo(className.getClassName(), flags);
+        return p == null ? null : enabledOnly(p.activityInfo(className.getClassName(), flags), flags);
     }
 
     @Override
@@ -435,14 +435,14 @@ public final class PackageManagerService extends IPackageManager.Default {
     public ServiceInfo getServiceInfo(ComponentName className, long flags, int userId) {
         if (isRemovalPending(className.getPackageName())) return null;
         ApkPackage p = get(className.getPackageName());
-        return p == null ? null : p.serviceInfo(className.getClassName(), flags);
+        return p == null ? null : enabledOnly(p.serviceInfo(className.getClassName(), flags), flags);
     }
 
     @Override
     public ActivityInfo getReceiverInfo(ComponentName className, long flags, int userId) {
         if (isRemovalPending(className.getPackageName())) return null;
         ApkPackage p = get(className.getPackageName());
-        return p == null ? null : p.receiverInfo(className.getClassName(), flags);
+        return p == null ? null : enabledOnly(p.receiverInfo(className.getClassName(), flags), flags);
     }
 
     @Override
@@ -456,7 +456,7 @@ public final class PackageManagerService extends IPackageManager.Default {
         ApkPackage p = get(className.getPackageName());
         if (p == null) return null;
         for (ProviderInfo info : p.providers(flags)) {
-            if (info.name.equals(className.getClassName())) return info;
+            if (info.name.equals(className.getClassName())) return enabledOnly(info, flags);
         }
         return null;
     }
@@ -534,8 +534,12 @@ public final class PackageManagerService extends IPackageManager.Default {
         if (componentName == null) throw new IllegalArgumentException("componentName is null");
         Integer state = mComponentStates.get(componentName);
         if (state != null) return state;
-        if (!hasComponent(componentName)) {
-            throw new IllegalArgumentException("Unknown component: " + componentName);
+        String pkg = componentName.getPackageName();
+        // As Settings.getComponentEnabledSettingLPr: an unknown package throws, an unknown
+        // class of a known package is DEFAULT. Gesher's synthetic GMS/Play and browser
+        // packages are known packages whose components keep their manifest state.
+        if (get(pkg) == null && !synthetic(pkg) && !BrowserPackageSupport.isBrowserPackage(pkg)) {
+            throw new IllegalArgumentException("Unknown package: " + pkg);
         }
         return PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
     }
@@ -565,6 +569,14 @@ public final class PackageManagerService extends IPackageManager.Default {
 
     private void setComponentState(ComponentName component, int state) {
         checkComponentState(component, state);
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+                || state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
+            // As PackageManagerService: these are application states; for a component
+            // the request is logged and ignored.
+            SystemServer.log("setComponentEnabledSetting: state " + state
+                    + " is not valid for component " + component.flattenToShortString());
+            return;
+        }
         if (state == PackageManager.COMPONENT_ENABLED_STATE_DEFAULT) {
             mComponentStates.remove(component);
         } else {
@@ -618,6 +630,12 @@ public final class PackageManagerService extends IPackageManager.Default {
             if (name.equals(info.name)) return true;
         }
         return false;
+    }
+
+    /** A component a run-time setting disabled is not found, unless MATCH_DISABLED_COMPONENTS. */
+    private <T extends android.content.pm.ComponentInfo> T enabledOnly(T info, long flags) {
+        if (info == null || (flags & PackageManager.MATCH_DISABLED_COMPONENTS) != 0) return info;
+        return componentDisabled(info.packageName, info.name) ? null : info;
     }
 
     /** Whether a run-time setting disabled the component. */
