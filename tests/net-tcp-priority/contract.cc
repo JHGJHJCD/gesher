@@ -21,6 +21,7 @@
 #include <sys/eventfd.h>
 #include "../../compat/posix/src/socket_internal.h"
 namespace gesher::test { int NativeUdpErrorControl(bool blocking); void NativeSupplierRetirement(); void DumpOwnHandleTypes(int mode, uintptr_t caller = 0, uintptr_t observer = 0); }
+namespace gesher::test { void ObserveOwnerThreads(int mode, bool failed); }
 #endif
 
 static void require(bool ok, const char* what) {
@@ -375,6 +376,7 @@ static void owned_wait_controls() {
     gesher::ws::OwnerCensus actual{}; require(gesher::ws::ReadConnectOwnerCensus(&actual), "actual production owner handle/thread census");
     if (mode == 0) baseline = actual;
     printf("TCP_PRIORITY_OWNER_CENSUS mode=%d handles=%u/%u threads=%u/%u\n", mode, actual.handles, baseline.handles, actual.threads, baseline.threads); fflush(stdout);
+    gesher::test::ObserveOwnerThreads(mode, actual.handles != baseline.handles || actual.threads != baseline.threads);
     require(actual.handles == baseline.handles && actual.threads == baseline.threads, "repeated real ownership returns to warm handle and thread baseline");
   }
   puts("PASS TCP priority: real owned mode flips cancellation send deadline and native owner retirement");
