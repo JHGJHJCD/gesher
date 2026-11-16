@@ -23,7 +23,10 @@ env:
   LLVM_MINGW_NAME: llvm-mingw-20261006-ucrt-ubuntu-22.04-x86_64
 
 jobs:
+  source-identity:
+    uses: ./.github/workflows/source-identity.yml
   build:
+    needs: [source-identity]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
