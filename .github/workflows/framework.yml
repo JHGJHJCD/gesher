@@ -478,6 +478,7 @@ jobs:
           python3 tools/test_null_bindings.py "${args[@]}"
           "$JAVA_HOME/bin/javac" -cp work/sdk-36/android.jar \
             -d "$RUNNER_TEMP/media-receiver-sdk" \
+            tests/dex-services/gesher/services/MediaTestBootstrap.java \
             tests/dex-services/gesher/services/MediaReceiverLifecycleTest.java
 
       - name: Cookie callback caller Looper contracts
