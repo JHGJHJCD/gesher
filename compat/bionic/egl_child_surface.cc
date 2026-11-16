@@ -156,6 +156,7 @@ struct Child {
   bool reverse_rows = false;
   bool bgra_read = false;
   bool es2_pack_buffer = false;
+  bool es2_pack_subimage = false;
   bool force_copy = false;
   std::vector<uint32_t> pixels;  // scratch retained for conversion fallbacks
   ~Child();
@@ -329,6 +330,7 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
         c->bgra_read = extensions.bgra_read;
         // GLES2 may expose PBOs only through the optional extension.
         c->es2_pack_buffer = extensions.es2_pack_buffer;
+        c->es2_pack_subimage = extensions.es2_pack_subimage;
       }
       ReadbackLayout plan = PlanChildReadback(
           w, h, b.width, b.height, b.stride, b.format,
@@ -340,13 +342,18 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
         gl->get_integerv(GL_PACK_ALIGNMENT, &alignment);
         const GLenum fb_target = version >= 3 ? GL_READ_FRAMEBUFFER : GL_FRAMEBUFFER;
         const bool pbo_available = version >= 3 || c->es2_pack_buffer;
+        const bool pack_layout_available = version >= 3 || c->es2_pack_subimage;
         if (version >= 3) {
           gl->get_integerv(GL_READ_FRAMEBUFFER_BINDING, &framebuffer);
+        } else if (version == 2) {
+          gl->get_integerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
+        }
+        // ANGLE exposes this layout state to GLES2 via NV_pack_subimage.
+        // It affects both direct reads and the tightly packed staging buffer.
+        if (pack_layout_available) {
           gl->get_integerv(GL_PACK_ROW_LENGTH, &row_length);
           gl->get_integerv(GL_PACK_SKIP_ROWS, &skip_rows);
           gl->get_integerv(GL_PACK_SKIP_PIXELS, &skip_pixels);
-        } else if (version == 2) {
-          gl->get_integerv(GL_FRAMEBUFFER_BINDING, &framebuffer);
         }
         if (pbo_available) gl->get_integerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
         if (c->reverse_rows) gl->get_integerv(GL_PACK_REVERSE_ROW_ORDER_ANGLE, &reverse_order);
@@ -355,7 +362,7 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
         const GLint desired_row_length = direct ? b.stride : 0;
         if (framebuffer != 0) gl->bind_framebuffer(fb_target, 0);
         if (pbo_available && pack_buffer != 0) gl->bind_buffer(GL_PIXEL_PACK_BUFFER, 0);
-        if (version >= 3) {
+        if (pack_layout_available) {
           if (row_length != desired_row_length)
             gl->pixel_storei(GL_PACK_ROW_LENGTH, desired_row_length);
           if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, 0);
@@ -376,7 +383,7 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
         if (c->reverse_rows && reverse_order != desired_reverse)
           gl->pixel_storei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, reverse_order);
         if (alignment != 4) gl->pixel_storei(GL_PACK_ALIGNMENT, alignment);
-        if (version >= 3) {
+        if (pack_layout_available) {
           if (skip_pixels != 0) gl->pixel_storei(GL_PACK_SKIP_PIXELS, skip_pixels);
           if (skip_rows != 0) gl->pixel_storei(GL_PACK_SKIP_ROWS, skip_rows);
           if (row_length != desired_row_length) gl->pixel_storei(GL_PACK_ROW_LENGTH, row_length);

@@ -118,6 +118,18 @@ int main() {
       [&](int) -> const char* { ++indexed; return "GL_NV_pixel_buffer_object"; });
   Check(legacy == 1 && counts == 1 && indexed == 4, "ES2 uses legacy list only");
   Check(es2.reverse_rows && es2.bgra_read && !es2.es2_pack_buffer, "ES2 capabilities");
+  auto pack_layout = QueryReadbackExtensions(2,
+      []() { return "GL_NV_pack_subimage GL_NV_pixel_buffer_object"; },
+      []() { return 0; }, [](int) -> const char* { return nullptr; });
+  Check(pack_layout.es2_pack_subimage && pack_layout.es2_pack_buffer,
+        "ES2 pack layout and PBO extensions recognized");
+  auto similar_pack_layout = QueryReadbackExtensions(2,
+      []() { return "GL_NV_pack_subimage_extra PREFIX_GL_NV_pack_subimage"; },
+      []() { return 0; }, [](int) -> const char* { return nullptr; });
+  Check(!similar_pack_layout.es2_pack_subimage, "ES2 pack layout requires exact extension token");
+  ReadbackExtensions indexed_pack_layout;
+  RecordReadbackExtension(&indexed_pack_layout, "GL_NV_pack_subimage");
+  Check(indexed_pack_layout.es2_pack_subimage, "indexed pack layout extension recognized");
   auto malformed = QueryReadbackExtensions(3,
       [&]() { ++legacy; return "GL_ANGLE_pack_reverse_row_order"; },
       [&]() { ++counts; return 65536; },

@@ -36,6 +36,7 @@ struct ReadbackExtensions {
   bool reverse_rows = false;
   bool bgra_read = false;
   bool es2_pack_buffer = false;
+  bool es2_pack_subimage = false;
 };
 
 inline void RecordReadbackExtension(ReadbackExtensions* result, const char* name) {
@@ -44,6 +45,7 @@ inline void RecordReadbackExtension(ReadbackExtensions* result, const char* name
   if (std::strcmp(name, "GL_EXT_read_format_bgra") == 0) result->bgra_read = true;
   if (std::strcmp(name, "GL_NV_pixel_buffer_object") == 0 ||
       std::strcmp(name, "GL_EXT_pixel_buffer_object") == 0) result->es2_pack_buffer = true;
+  if (std::strcmp(name, "GL_NV_pack_subimage") == 0) result->es2_pack_subimage = true;
 }
 
 template <typename Legacy, typename Count, typename Indexed>
@@ -57,6 +59,7 @@ inline ReadbackExtensions QueryReadbackExtensions(int client_version, Legacy leg
     result.bgra_read = HasGlExtension(extensions, "GL_EXT_read_format_bgra");
     result.es2_pack_buffer = HasGlExtension(extensions, "GL_NV_pixel_buffer_object") ||
                              HasGlExtension(extensions, "GL_EXT_pixel_buffer_object");
+    result.es2_pack_subimage = HasGlExtension(extensions, "GL_NV_pack_subimage");
     return result;
   }
   // Bound an invalid driver-reported count rather than looping indefinitely.

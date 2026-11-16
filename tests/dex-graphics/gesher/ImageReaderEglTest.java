@@ -127,9 +127,18 @@ public final class ImageReaderEglTest {
             boolean reverse = hasExtension(extensions, "GL_ANGLE_pack_reverse_row_order");
             boolean pbo = hasExtension(extensions, "GL_NV_pixel_buffer_object")
                     || hasExtension(extensions, "GL_EXT_pixel_buffer_object");
+            boolean packLayout = hasExtension(extensions, "GL_NV_pack_subimage");
             int[] packBuffer = new int[1];
             GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 1);
             if (reverse) GLES20.glPixelStorei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, 1);
+            if (packLayout) {
+                // Legal GLES2 extension state must not affect the internal read.
+                // The shorter row length also keeps a broken implementation's
+                // overlapping writes within this test's native buffer.
+                GLES20.glPixelStorei(GLES30.GL_PACK_ROW_LENGTH, 8);
+                GLES20.glPixelStorei(GLES30.GL_PACK_SKIP_ROWS, 1);
+                GLES20.glPixelStorei(GLES30.GL_PACK_SKIP_PIXELS, 2);
+            }
             if (pbo) {
                 GLES20.glGenBuffers(1, packBuffer, 0);
                 GLES20.glBindBuffer(GL_PIXEL_PACK_BUFFER, packBuffer[0]);
@@ -153,6 +162,14 @@ public final class ImageReaderEglTest {
                     GLES20.glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, state, 0);
                     check(state[0] == packBuffer[0], "PBO binding unchanged after swap " + color);
                 }
+                if (packLayout) {
+                    GLES20.glGetIntegerv(GLES30.GL_PACK_ROW_LENGTH, state, 0);
+                    check(state[0] == 8, "GLES2 pack row length unchanged after swap " + color);
+                    GLES20.glGetIntegerv(GLES30.GL_PACK_SKIP_ROWS, state, 0);
+                    check(state[0] == 1, "GLES2 pack skip rows unchanged after swap " + color);
+                    GLES20.glGetIntegerv(GLES30.GL_PACK_SKIP_PIXELS, state, 0);
+                    check(state[0] == 2, "GLES2 pack skip pixels unchanged after swap " + color);
+                }
                 check(GLES20.glGetError() == GLES20.GL_NO_ERROR,
                         "GLES state queries after swap have no errors " + color);
                 try (Image image = reader.acquireLatestImage()) {
@@ -160,10 +177,13 @@ public final class ImageReaderEglTest {
                     check(image.getWidth() == 16 && image.getHeight() == 12 && image.getTimestamp() > 0, "metadata " + color);
                     Image.Plane plane = image.getPlanes()[0];
                     ByteBuffer bytes = plane.getBuffer();
-                    int offset = 5 * plane.getRowStride() + 7 * plane.getPixelStride();
-                    for (int channel = 0; channel < 4; channel++)
-                        check((bytes.get(offset + channel) & 255) == (channel == color || channel == 3 ? 255 : 0),
-                                "pixel " + color + "/" + channel);
+                    for (int offset : new int[] {0,
+                            5 * plane.getRowStride() + 7 * plane.getPixelStride(),
+                            11 * plane.getRowStride() + 15 * plane.getPixelStride()}) {
+                        for (int channel = 0; channel < 4; channel++)
+                            check((bytes.get(offset + channel) & 255) == (channel == color || channel == 3 ? 255 : 0),
+                                    "pixel " + color + "/" + offset + "/" + channel);
+                    }
                     try (HardwareBuffer buffer = image.getHardwareBuffer()) {
                         check(buffer != null && buffer.getWidth() == 16 && buffer.getHeight() == 12
                                 && buffer.getFormat() == HardwareBuffer.RGBA_8888
@@ -189,6 +209,11 @@ public final class ImageReaderEglTest {
                 GLES20.glDeleteBuffers(1, packBuffer, 0);
             }
             if (reverse) GLES20.glPixelStorei(GL_PACK_REVERSE_ROW_ORDER_ANGLE, 0);
+            if (packLayout) {
+                GLES20.glPixelStorei(GLES30.GL_PACK_ROW_LENGTH, 0);
+                GLES20.glPixelStorei(GLES30.GL_PACK_SKIP_ROWS, 0);
+                GLES20.glPixelStorei(GLES30.GL_PACK_SKIP_PIXELS, 0);
+            }
             GLES20.glPixelStorei(GLES20.GL_PACK_ALIGNMENT, 4);
             HandlerThread callbacks = new HandlerThread("reader-callback");
             callbacks.start();
