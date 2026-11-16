@@ -8,7 +8,6 @@ import com.gesher.server.ApkPackage;
 import com.gesher.server.SharedLibraryGraph;
 import java.io.File;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -49,15 +48,13 @@ public final class AppStoragePublicHost {
                 PackageImpl parsed = (PackageImpl) PackageImpl.forTesting(name, "/fixture/base.apk");
                 parsed.setTargetSdkVersion(36);
                 parsed.setDefaultToDeviceProtectedStorage(deviceDefault);
+                parsed.hideAsFinal();
                 ApkPackage pkg = (ApkPackage) unsafe.allocateInstance(ApkPackage.class);
                 set(pkg, "parsed", parsed); set(pkg, "packageName", name);
                 set(pkg, "apkPath", "/fixture/base.apk"); set(pkg, "mUid", 10000);
                 set(pkg, "sharedLibraries", SharedLibraryGraph.EMPTY);
                 pkg.setDataDir(root.resolve(name).toString());
-                ApplicationInfo info = (ApplicationInfo) unsafe.allocateInstance(ApplicationInfo.class);
-                info.packageName = name; info.targetSdkVersion = 36;
-                Method project = ApkPackage.class.getDeclaredMethod("installed", ApplicationInfo.class);
-                project.setAccessible(true); project.invoke(pkg, info);
+                ApplicationInfo info = pkg.applicationInfo(0);
                 Files.createDirectories(Path.of(info.credentialProtectedDataDir, "files"));
                 Files.createDirectories(Path.of(info.deviceProtectedDataDir, "files"));
                 LoadedApk loaded = new LoadedApk(null, info, CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,
