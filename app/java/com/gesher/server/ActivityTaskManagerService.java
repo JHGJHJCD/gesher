@@ -614,16 +614,18 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         List<ActivityRecord> started = new ArrayList<>(intents.length);
         ActivityRecord parent = null;
         int taskId = launchTaskId(options);
+        final boolean sharedIdentity = shareIdentity(options);
+        ActivityRecord[] created = new ActivityRecord[1];
         int result = ActivityManager.START_SUCCESS;
         for (int i = 0; i < intents.length; i++) {
             Intent member = new Intent(intents[i]);
-            ActivityRecord[] created = new ActivityRecord[1];
+            created[0] = null;
             StackLaunch previous = mStackLaunch.get();
             mStackLaunch.set(new StackLaunch(member, parent));
             try {
                 result = start(caller, member, resolvedTypes == null ? null : resolvedTypes[i],
                         callingPackage, i == 0 ? resultTo : null, null, -1, taskId,
-                        shareIdentity(options), created);
+                        sharedIdentity, created);
             } finally {
                 if (previous == null) mStackLaunch.remove();
                 else mStackLaunch.set(previous);
@@ -3199,7 +3201,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (r.state == State.LAUNCHING || r.state == State.RESUMING) r.state = State.RESUMED;
             if (r.state == State.RESUMED && !r.finishing) {
                 for (ActivityRecord child : mActivities) {
-                    if (child.waitingFor == r && child.state == State.INITIALIZING
+                    if (child.batchCreated && child.waitingFor == r
+                            && child.state == State.INITIALIZING
                             && !child.finishing) {
                         pauseForStack = true;
                         break;
