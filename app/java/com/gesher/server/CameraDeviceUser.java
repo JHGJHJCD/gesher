@@ -489,16 +489,9 @@ public final class CameraDeviceUser extends ICameraDeviceUser.Default {
         byte[] nv12 = null;
         Frame f;
         while ((f = next(timing)) != null) {
-            List<Stream> targets = new ArrayList<>();
-            synchronized (mLock) {
-                for (int streamId : f.request.streamIds) {
-                    Stream s = mStreams.get(streamId);
-                    if (s != null) targets.add(s);
-                }
-            }
             if (mCapture == null) {
                 try {
-                    mCapture = open(targets);
+                    mCapture = open();
                 } catch (WindowsCamera.OpenException e) {
                     CameraService.log(e.getMessage());
                     fail(f, ICameraDeviceCallbacks.ERROR_CAMERA_DEVICE);
@@ -582,8 +575,8 @@ public final class CameraDeviceUser extends ICameraDeviceUser.Default {
         return frame;
     }
 
-    /** Opens the device at the largest size a target asks for. */
-    private WindowsCamera.Capture open(List<Stream> targets) throws WindowsCamera.OpenException {
+    /** Opens the device at the largest configured stream size. */
+    private WindowsCamera.Capture open() throws WindowsCamera.OpenException {
         int w = 640, h = 480;
         long area = 0;
         synchronized (mLock) {

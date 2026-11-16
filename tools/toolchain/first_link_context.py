@@ -27,7 +27,7 @@ def common_context(env, selection):
     assert re.fullmatch('[0-9a-f]{40}', source)
     assert source == env.get('GITHUB_WORKFLOW_SHA') == env.get('GESHER_FIRST_LINK_AUTHORIZED_SOURCE')
     assert env.get('GITHUB_EVENT_NAME') in ('push', 'workflow_dispatch')
-    assert env.get('GITHUB_ACTOR') == env.get('GITHUB_TRIGGERING_ACTOR') == 'palmoni5'
+    assert all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
     for key in ('GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT'):
         assert re.fullmatch('[1-9][0-9]*', env[key])
     policy = env['GESHER_FIRST_LINK_POLICY_REF']

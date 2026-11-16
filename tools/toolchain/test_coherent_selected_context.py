@@ -11,6 +11,9 @@ def main():
   GITHUB_SHA=source,GITHUB_WORKFLOW_SHA=source,GESHER_COHERENT_FULL_AUTHORIZED_SOURCE=source,
   GITHUB_RUN_ID='123',GITHUB_RUN_ATTEMPT='1',GESHER_COHERENT_FULL_POLICY_REF=c.REPOSITORY+'/'+c.PATH+'@'+source)
  assert c.context(env,'selected-minimum')['GITHUB_SHA']==source
+ for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+  arbitrary=dict(env,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+  assert c.context(arbitrary,'selected-minimum')['GITHUB_SHA']==source
  descriptor=c.descriptor(env);assert descriptor['policy_ref']==env['GESHER_COHERENT_FULL_POLICY_REF']
  c.check_descriptor(descriptor,env)
  for key,value in (('policy_ref',c.REPOSITORY+'/'+c.PATH+'@'+'f'*40),('source','f'*40),('caller','foreign')):
@@ -19,7 +22,7 @@ def main():
   except (AssertionError,KeyError):pass
   else:raise AssertionError('invalid descriptor accepted: '+key)
  for key in env:
-  bad=copy.copy(env);bad[key]='invalid'
+  bad=copy.copy(env);bad[key]='' if key in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR') else 'invalid'
   try:c.context(bad,'selected-minimum')
   except (AssertionError,KeyError):pass
   else:raise AssertionError('invalid caller accepted: '+key)

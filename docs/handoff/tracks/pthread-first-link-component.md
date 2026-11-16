@@ -17,7 +17,8 @@ The only added factory caller is:
 - Producer job `build`, caller key `pthread-first-link/build`.
 - Actual `GITHUB_WORKFLOW_REF` must contain that exact repository/path/ref;
   workflow SHA, checkout SHA and approved caller source must agree.
-- Actor and triggering actor must both be `palmoni5`. PR/fork contexts reject.
+- Actor and triggering actor must have nonempty login metadata; different
+  contributors and rerun actors are accepted. PR/fork contexts still reject.
 
 A separately frozen reusable policy at
 `.github/workflows/pthread-first-link-trusted-source.yml@G` reads only the

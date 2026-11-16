@@ -73,8 +73,9 @@ def gate(pins):
     expected={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':REPO,'GITHUB_REPOSITORY_ID':RID,
       'GITHUB_REF':'refs/heads/'+BRANCH,'GITHUB_WORKFLOW':NAME,
       'GITHUB_WORKFLOW_REF':REPO+'/'+CALLER+'@refs/heads/'+BRANCH,'GITHUB_JOB':'verify',
-      'GITHUB_ACTOR':'palmoni5','GITHUB_TRIGGERING_ACTOR':'palmoni5','GITHUB_EVENT_NAME':'push',
+      'GITHUB_EVENT_NAME':'push',
       'GITHUB_WORKFLOW_SHA':source,VAR:source}
+    assert all(isinstance(e.get(k), str) and e[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
     assert all(e.get(k)==v for k,v in expected.items())
     for k in ('GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'):assert re.fullmatch('[1-9][0-9]*',e[k])
     assert re.fullmatch('[0-9a-f]{40}',source) and re.fullmatch('[0-9a-f]{40}',guard)
@@ -82,7 +83,7 @@ def gate(pins):
     assert run['id']==int(e['GITHUB_RUN_ID']) and run['run_attempt']==int(e['GITHUB_RUN_ATTEMPT'])
     assert run['head_sha']==source and run['head_branch']==BRANCH and run['path']==CALLER and run['name']==NAME and run['event']=='push'
     for k in ('repository','head_repository'):assert run[k]['id']==int(RID) and run[k]['full_name']==REPO
-    for k in ('actor','triggering_actor'):assert run[k]['login']=='palmoni5'
+    assert all(isinstance(run.get(k), dict) and isinstance(run[k].get('login'), str) and run[k]['login'] for k in ('actor', 'triggering_actor'))
     refs=run['referenced_workflows'];assert len(refs)==1 and refs[0]['path']==REPO+'/'+GUARD+'@'+guard and refs[0]['sha']==guard
     count=verify_source(source,guard,pins)
     with open(e['GITHUB_OUTPUT'],'a',encoding='utf-8',newline='\n') as f:f.write('source='+source+'\n')

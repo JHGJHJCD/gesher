@@ -30,7 +30,6 @@
 #include <limits>
 #include <cstdlib>
 #include <string_view>
-#include <vector>
 
 #include "binder_internal.h"
 #include "internal.h"
@@ -47,16 +46,14 @@ bool IsAbsolute(const char* path) {
 }
 
 // The parts of an absolute path, without empty and "." components.
-std::vector<std::string_view> Parts(std::string_view path) {
-  std::vector<std::string_view> parts;
-  while (!path.empty()) {
-    size_t end = path.find('/');
-    std::string_view part = path.substr(0, end);
-    if (!part.empty() && part != ".") parts.push_back(part);
-    if (end == std::string_view::npos) break;
-    path.remove_prefix(end + 1);
+std::string_view NextPart(std::string_view* path) {
+  while (!path->empty()) {
+    size_t end = path->find('/');
+    std::string_view part = path->substr(0, end);
+    path->remove_prefix(end == std::string_view::npos ? path->size() : end + 1);
+    if (!part.empty() && part != ".") return part;
   }
-  return parts;
+  return {};
 }
 
 // /dev, /proc and /sys are Linux's virtual file systems: their names never
@@ -64,16 +61,21 @@ std::vector<std::string_view> Parts(std::string_view path) {
 // time zone. Returns kFile for any other path. For kVirtual, *name is the
 // normalized name ("proc/self/status").
 PathKind VirtualKind(std::string_view path, std::wstring* name) {
-  std::vector<std::string_view> parts = Parts(path);
-  if (parts.empty()) return PathKind::kFile;
-  if (parts.size() == 2 && parts[0] == "etc" && parts[1] == "timezone") {
-    *name = L"etc/timezone";
-    return PathKind::kVirtual;
+  // Ordinary file paths need only their first component. Do not allocate a
+  // component vector for every open/stat, or retain any path between calls.
+  const auto root = NextPart(&path);
+  if (root == "etc") {
+    const auto leaf = NextPart(&path);
+    if (leaf == "timezone" && NextPart(&path).empty()) {
+      *name = L"etc/timezone";
+      return PathKind::kVirtual;
+    }
+    return PathKind::kFile;
   }
-  if (parts[0] == "proc") {
-    std::string joined;
-    for (std::string_view part : parts) {
-      if (!joined.empty()) joined += '/';
+  if (root == "proc") {
+    std::string joined(root);
+    for (auto part = NextPart(&path); !part.empty(); part = NextPart(&path)) {
+      joined += '/';
       joined += part;
     }
     *name = Widen(joined.c_str());
@@ -81,18 +83,24 @@ PathKind VirtualKind(std::string_view path, std::wstring* name) {
   }
   // /sys/devices/system/cpu/{possible,present}: the CPU lists cpuinfo
   // (XNNPACK, onnxruntime) reads first, served like /proc's files.
-  if (parts.size() == 5 && parts[0] == "sys" && parts[1] == "devices" &&
-      parts[2] == "system" && parts[3] == "cpu" &&
-      (parts[4] == "possible" || parts[4] == "present")) {
-    *name = L"sys/devices/system/cpu/" + Widen(std::string(parts[4]).c_str());
-    return PathKind::kVirtual;
+  if (root == "sys") {
+    if (NextPart(&path) == "devices" && NextPart(&path) == "system" &&
+        NextPart(&path) == "cpu") {
+      const auto leaf = NextPart(&path);
+      if ((leaf == "possible" || leaf == "present") && NextPart(&path).empty()) {
+        *name = leaf == "possible" ? L"sys/devices/system/cpu/possible" : L"sys/devices/system/cpu/present";
+        return PathKind::kVirtual;
+      }
+    }
+    return PathKind::kMissing;
   }
-  if (parts[0] != "dev" && parts[0] != "sys") return PathKind::kFile;
-  if (parts.size() == 2 && parts[0] == "dev") {
-    if (parts[1] == "null") return PathKind::kNull;
-    if (parts[1] == "zero") return PathKind::kZero;
-    if (parts[1] == "random" || parts[1] == "urandom") return PathKind::kRandom;
-    if (parts[1] == "binder") return BinderDeviceExists() ? PathKind::kBinder : PathKind::kMissing;
+  if (root != "dev") return PathKind::kFile;
+  const auto leaf = NextPart(&path);
+  if (NextPart(&path).empty()) {
+    if (leaf == "null") return PathKind::kNull;
+    if (leaf == "zero") return PathKind::kZero;
+    if (leaf == "random" || leaf == "urandom") return PathKind::kRandom;
+    if (leaf == "binder") return BinderDeviceExists() ? PathKind::kBinder : PathKind::kMissing;
   }
   return PathKind::kMissing;
 }
@@ -307,7 +315,8 @@ static int SystemFontPath(const char* path, std::wstring* windows) {
         p[prefix.size()] != '/' && p[prefix.size()] != '\\')) return 0;
     suffix = p.substr(prefix.size());
     if (suffix.find_first_of("\\:") != std::string_view::npos) return -1;
-    for (auto part : Parts(suffix)) {
+    auto remaining = suffix;
+    for (auto part = NextPart(&remaining); !part.empty(); part = NextPart(&remaining)) {
       if (part.back() == '.' || part.back() == ' ') return -1;
       // Win32 treats these basenames as devices, even with an extension.
       std::string stem(part.substr(0, part.find('.')));

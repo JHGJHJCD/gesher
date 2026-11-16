@@ -42,8 +42,8 @@ def authority_env(env):
     values={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':REPO,'GITHUB_REPOSITORY_ID':RID,
             'GITHUB_REF':REF,'GITHUB_WORKFLOW':NAME,'GITHUB_JOB':'verify',
             'GITHUB_WORKFLOW_REF':REPO+'/'+CALLER+'@'+REF,
-            'GITHUB_SHA':source,'GITHUB_WORKFLOW_SHA':source,
-            'GITHUB_ACTOR':'palmoni5','GITHUB_TRIGGERING_ACTOR':'palmoni5'}
+            'GITHUB_SHA':source,'GITHUB_WORKFLOW_SHA':source}
+    assert all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
     assert all(env.get(k)==v for k,v in values.items())
     assert env.get('GITHUB_EVENT_NAME')in ('push','workflow_dispatch')
     assert all(re.fullmatch('[1-9][0-9]*',env.get(k,''))for k in ('GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT'))
@@ -56,7 +56,7 @@ def authority_run(env,run,policy):
     assert run['path']==CALLER and run['name']==NAME and run['event']==env['GITHUB_EVENT_NAME']
     assert run['repository']['full_name']==run['head_repository']['full_name']==REPO
     assert str(run['repository']['id'])==str(run['head_repository']['id'])==RID
-    assert run['actor']['login']==run['triggering_actor']['login']=='palmoni5'
+    assert all(isinstance(run.get(k), dict) and isinstance(run[k].get('login'), str) and run[k]['login'] for k in ('actor', 'triggering_actor'))
     refs=run['referenced_workflows']
     assert len(refs)==1 and refs[0]['path']==policy and refs[0]['sha']==policy.rsplit('@',1)[1]
 

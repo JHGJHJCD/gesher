@@ -14,10 +14,13 @@ def main():
         return dict(id=7,name=name,head_sha=ctx['GITHUB_SHA'],run_id=123456,run_attempt=1,status=status,conclusion=conclusion)
     jobs=dict(total_count=2,jobs=[job('source_authority / verify'),job('build','in_progress',None)])
     component.validate_live(run,jobs,ctx,policy,'push')
+    for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+        arbitrary=dict(run,actor=dict(login=actor),triggering_actor=dict(login=trigger))
+        component.validate_live(arbitrary,jobs,ctx,policy,'push')
     failures=[]
     for field,value in [('id',9),('run_attempt',2),('head_sha','3'*40),('head_branch','main'),('path','.github/workflows/ci.yml'),('name','ci'),('event','pull_request')]:
         a=copy.deepcopy(run);a[field]=value;failures.append((a,jobs))
-    for object_name,field,value in [('repository','id',1),('repository','full_name','other/gesher'),('head_repository','id',1),('actor','login','other'),('triggering_actor','login','other')]:
+    for object_name,field,value in [('repository','id',1),('repository','full_name','other/gesher'),('head_repository','id',1),('actor','login',''),('triggering_actor','login','')]:
         a=copy.deepcopy(run);a[object_name][field]=value;failures.append((a,jobs))
     a=copy.deepcopy(run);a['referenced_workflows']=[];failures.append((a,jobs))
     a=copy.deepcopy(run);a['referenced_workflows'][0]['sha']='3'*40;failures.append((a,jobs))
@@ -41,7 +44,7 @@ def main():
     try:component.validate_live(run,consumer,ctx,policy,'push',consumer=True)
     except AssertionError:pass
     else:raise AssertionError('Failed focused producer accepted by portable consumer')
-    print('PASS FIRST_LINK_ONLY liveAPI pure '+str(len(failures)+1)+' source/path/ref/actor/policy/currentattempt/role negatives; no API/native/network')
+    print('PASS FIRST_LINK_ONLY liveAPI pure '+str(len(failures)+1)+' source/path/ref/actor-metadata/policy/currentattempt/role negatives; no API/native/network')
 
 
 if __name__=='__main__':main()

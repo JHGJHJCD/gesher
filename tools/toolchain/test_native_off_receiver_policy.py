@@ -80,8 +80,12 @@ def authority_controls():
              head_repository=dict(full_name=p.REPO,id=int(p.RID)),actor=dict(login='palmoni5'),
              triggering_actor=dict(login='palmoni5'),referenced_workflows=[dict(path=policy,sha='2'*40)])
     p.authority_run(env,run,policy);negatives=0
+    for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+        arbitrary_env=dict(env,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+        arbitrary_run=dict(run,actor=dict(login=actor),triggering_actor=dict(login=trigger))
+        p.authority_run(arbitrary_env,arbitrary_run,policy)
     for key in env:
-        bad=dict(env);bad[key]='UNBOUND'
+        bad=dict(env);bad[key]='' if key in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR') else 'UNBOUND'
         try:p.authority_run(bad,run,policy)
         except (AssertionError,KeyError):negatives+=1
         else:raise AssertionError('Wrong gate env admitted: '+key)
@@ -92,7 +96,7 @@ def authority_controls():
         else:raise AssertionError('Wrong gate live run admitted: '+key)
     for key,sub in [('repository','id'),('repository','full_name'),('head_repository','id'),
                     ('head_repository','full_name'),('actor','login'),('triggering_actor','login')]:
-        bad=copy.deepcopy(run);bad[key][sub]='UNBOUND'
+        bad=copy.deepcopy(run);bad[key][sub]='' if sub=='login' else 'UNBOUND'
         try:p.authority_run(env,bad,policy)
         except (AssertionError,KeyError):negatives+=1
         else:raise AssertionError('Wrong gate live identity admitted')

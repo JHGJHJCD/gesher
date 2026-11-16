@@ -27,10 +27,13 @@ def reject(r,j,phase):
     else:raise AssertionError('Wrong live producer/authority accepted')
 for phase in ('build','reference','receiver'):
     original=jobs(phase);n.validate_live(run,original,ctx,policy,'push',phase)
+    for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+        arbitrary=dict(run,actor=dict(login=actor),triggering_actor=dict(login=trigger))
+        n.validate_live(arbitrary,original,ctx,policy,'push',phase)
     for field,value in [('id',0),('run_attempt',2),('head_sha','0'*40),('head_branch','main'),('path','.github/workflows/ci.yml'),('name','ci'),('event','schedule'),('referenced_workflows',[])]:
         r=copy.deepcopy(run);r[field]=value;reject(r,original,phase)
     for field in ('actor','triggering_actor'):
-        r=copy.deepcopy(run);r[field]['login']='other';reject(r,original,phase)
+        r=copy.deepcopy(run);r[field]['login']='';reject(r,original,phase)
     for field in ('repository','head_repository'):
         for key,value in [('id',0),('full_name','other/repo')]:
             r=copy.deepcopy(run);r[field][key]=value;reject(r,original,phase)

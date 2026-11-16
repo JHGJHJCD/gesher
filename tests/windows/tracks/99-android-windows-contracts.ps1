@@ -57,6 +57,33 @@ Check 'media: real callback WAV sources, PCM bytes, metadata and receiver releas
   $callbackMediaOut
 } @('MediaCallbackContractTest all passed:')
 
+# The November 16 contracts run on actual ART/JNI and generated Binder proxies.
+foreach ($finishFixture in @(
+  @{ Class = 'ActivityFinishContractTest'; Marker = 'Activity finish Binder contract all passed:' },
+  @{ Class = 'NullBindingContractTest'; Marker = 'Null binding contracts passed:' }
+)) {
+  $finishOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' + $finishFixture.Class) 90
+  $finishCode = $LASTEXITCODE
+  Check "services: $($finishFixture.Class) public callbacks and Binder lifecycle contracts" {
+    $global:LASTEXITCODE = $finishCode
+    $finishOut
+  } @($finishFixture.Marker)
+}
+
+$receiverAudioSaved = [Environment]::GetEnvironmentVariable('GESHER_AUDIO', 'Process')
+try {
+  $env:GESHER_AUDIO = 'null'
+  $receiverMediaOut = FixesRun ($dvmFixes + 'gesher.services.MediaReceiverLifecycleTest') 90
+  $receiverMediaCode = $LASTEXITCODE
+  Check 'media: public SoundPool and MediaRecorder release ownership' {
+    $global:LASTEXITCODE = $receiverMediaCode
+    $receiverMediaOut
+  } @('MediaReceiverLifecycleTest all passed:')
+} finally {
+  if ($null -eq $receiverAudioSaved) { Remove-Item Env:GESHER_AUDIO -ErrorAction SilentlyContinue }
+  else { [Environment]::SetEnvironmentVariable('GESHER_AUDIO', $receiverAudioSaved, 'Process') }
+}
+
 foreach ($lookupCase in @(
   @{ Exe = 'elf_load_test.exe'; Library = 'lookup_root.so'; Label = 'x86_64'; End = 'elf_load_test all passed' },
   @{ Exe = 'arm64_elf_test.exe'; Library = 'lookup_root_arm64.so'; Label = 'translated ARM64'; End = 'arm64_elf_test all passed' }

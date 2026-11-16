@@ -342,7 +342,8 @@ try {
                     $window.Show(); $window.UpdateLayout(); Update-PanelWindowLayout; $window.UpdateLayout()
                     Assert-Update ([string]$window.FlowDirection -eq $flowDirection) 'WPF window direction does not follow the UI language'
                     Assert-Update ($applicationsSection.ActualHeight -ge 120) "Application area was squeezed out at $language $($size -join 'x')"
-                    Assert-Update ($window.FindName('AppsViewport').ViewportHeight -ge 36) 'The inner application viewport clipped every app row'
+                    $appList = $window.FindName('AppsList')
+                    Assert-Update ($appList.Template.FindName('AppsViewport', $appList).ViewportHeight -ge 36) 'The inner application viewport clipped every app row'
                     foreach ($button in $btnCheckUpdate, $btnInstallUpdate, $automaticUpdateChecks) {
                         $bounds = $button.TransformToAncestor($panelScroll).TransformBounds([Windows.Rect]::new(0, 0, $button.ActualWidth, $button.ActualHeight))
                         Assert-Update ($button.ActualWidth -gt 0 -and $bounds.Left -ge -1 -and $bounds.Right -le $panelScroll.ViewportWidth + 1) 'Update controls overflowed the viewport horizontally'

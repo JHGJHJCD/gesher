@@ -14,8 +14,15 @@ def main():
   e=dict(base,GITHUB_JOB=job)
   if job!='linux-reference':e['TCP_SUPPLIER_ROLE']='selected-minimum'
   assert c.context(e,job)['GITHUB_SHA']==source
+  for ref in ('refs/heads/'+c.BRANCH,'refs/heads/main'):
+   for event_name in ('push','workflow_dispatch'):
+    for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+     arbitrary=dict(e,GITHUB_REF=ref,GITHUB_EVENT_NAME=event_name,
+      GITHUB_WORKFLOW_REF=c.REPOSITORY+'/'+c.PATH+'@'+ref,
+      GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+     assert c.context(arbitrary,job)['GITHUB_SHA']==source
   for k in e:
-   b=copy.copy(e);b[k]='invalid'
+   b=copy.copy(e);b[k]='' if k in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR') else 'invalid'
    try:c.context(b,job)
    except (AssertionError,KeyError):count+=1
    else:raise AssertionError('wrong role identity accepted '+job+'/'+k)
@@ -36,9 +43,11 @@ def main():
   e=dict(pr,GITHUB_JOB=job)
   if job!='linux-reference':e['TCP_SUPPLIER_ROLE']='selected-minimum'
   assert c.context(e,job,event,parents)['GITHUB_SHA']==source
+  for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+   arbitrary=dict(e,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+   assert c.context(arbitrary,job,event,parents)['GITHUB_SHA']==source
   for k in e:
-   if k in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR'):continue
-   b=dict(e);b[k]='invalid'
+   b=dict(e);b[k]='' if k in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR') else 'invalid'
    try:c.context(b,job,event,parents)
    except (AssertionError,KeyError):count+=1
    else:raise AssertionError('wrong PR role identity accepted '+job+'/'+k)
@@ -60,6 +69,6 @@ def main():
    try:c.context(contributor,job,bad,parents)
    except AssertionError:count+=1
    else:raise AssertionError('different fork merge parents accepted')
- print('COHERENT_TCP_CONTEXT_PURE_PASS roles=4 negatives='+str(count)+' actual_authority=false')
+ print('COHERENT_TCP_CONTEXT_PURE_PASS roles=4 arbitrary_actor_pairs=2 events=3 negatives='+str(count)+' actual_authority=false')
 
 if __name__=='__main__':main()

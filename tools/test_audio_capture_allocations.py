@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 
@@ -40,7 +41,7 @@ def generate(ref: str | None) -> str:
         "@TYPES@": section(engine_header, "enum class PcmFormat :", "// Android's stream types"),
         "@STATUSES@": "\n".join(re.findall(r"constexpr int (?:kOk|kInvalidOperation) = [^;]+;", engine_header)),
         "@BYTES@": section(engine_source, "size_t BytesPerSample(", "// --- Stream volume groups"),
-        "@MEMBERS@": section(source, "CaptureStream::CaptureStream(", "std::shared_ptr<CaptureStream> OpenCapture("),
+        "@MEMBERS@": section(source, "CaptureStream::CaptureStream(", "std::shared_ptr<CaptureStream> OpenCapture(").replace("memcpy(", "CaptureReadCopy("),
         "@PCM@": source[source.index("void FloatToPcm("):source.rindex("}  // namespace gesher::media")],
     }
     fixture = (ROOT / "tests/media/audio_capture_allocations_host.cc.in").read_text()
@@ -67,8 +68,15 @@ def main() -> int:
             record = work / (label + ".pcm")
             command = shlex.split(args.cxx) + ["-std=c++20", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
                                              "-fno-exceptions", "-pthread", str(cpp), "-o", str(binary)]
+            if os.name == "nt" and not args.sanitize:
+                command += ["-static"]
             if args.sanitize:
                 command += ["-fsanitize=address,undefined", "-fno-sanitize-recover=all", "-fno-omit-frame-pointer"]
+                if os.name == "nt":
+                    for name in ("libclang_rt.asan_dynamic-x86_64.dll", "libc++.dll", "libunwind.dll"):
+                        runtime = Path(command[0]).parent / name
+                        if runtime.is_file():
+                            shutil.copyfile(runtime, work / name)
             runtime_env = os.environ.copy()
             compiler = Path(command[0])
             if os.name == "nt" and compiler.is_absolute():
