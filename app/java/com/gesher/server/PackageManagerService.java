@@ -130,6 +130,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     /** Adds or replaces a package (an install or an update). */
     synchronized void add(ApkPackage p) {
         Map<String, ApkPackage> map = new LinkedHashMap<>(mPackages);
+        p.inheritComponentStates(map.get(p.packageName));
         map.put(p.packageName, p);
         mPackages = map;
         PackageManager.invalidatePackageInfoCache();
@@ -140,7 +141,10 @@ public final class PackageManagerService extends IPackageManager.Default {
         Map<String, ApkPackage> map = new LinkedHashMap<>(mPackages);
         ApkPackage p = map.remove(packageName);
         mPackages = map;
-        if (p != null) PackageManager.invalidatePackageInfoCache();
+        if (p != null) {
+            p.clearComponentStates();
+            PackageManager.invalidatePackageInfoCache();
+        }
         return p;
     }
 
@@ -404,6 +408,29 @@ public final class PackageManagerService extends IPackageManager.Default {
         return new ParceledListSlice<>(receivers(intent, resolvedType, flags));
     }
 
+    /** No mainline (APEX/module) packages: Gesher's framework is not updated by modules. */
+    @Override
+    public List<android.content.pm.ModuleInfo> getInstalledModules(int flags) {
+        return new ArrayList<>();
+    }
+
+    /** Usage hints for dexopt scheduling; Gesher compiles on install, not by use. */
+    @Override
+    public void notifyPackageUse(String packageName, int reason) {
+    }
+
+    @Override
+    public ParceledListSlice queryIntentContentProviders(Intent intent, String resolvedType,
+            long flags, int userId) {
+        List<ResolveInfo> result = new ArrayList<>();
+        if (intent == null || userId != 0) return new ParceledListSlice<>(result);
+        for (ApkPackage p : mPackages.values()) {
+            if (isRemovalPending(p.packageName)) continue;
+            result.addAll(p.queryIntentContentProviders(intent, resolvedType, flags));
+        }
+        return new ParceledListSlice<>(result);
+    }
+
     @Override
     public ServiceInfo getServiceInfo(ComponentName className, long flags, int userId) {
         if (isRemovalPending(className.getPackageName())) return null;
@@ -492,9 +519,110 @@ public final class PackageManagerService extends IPackageManager.Default {
         return new ParceledListSlice<>(result);
     }
 
+    /**
+     * Components an app enabled or disabled at run time (setComponentEnabledSetting): a
+     * launcher alias it hides, a boot receiver it turns on once set up. Kept for the
+     * device's lifetime and dropped with the package; a disabled component no longer
+     * resolves (unless MATCH_DISABLED_COMPONENTS), as on Android. Not persisted across
+     * device restarts: apps that toggle components set them again as they start.
+     */
     @Override
     public int getComponentEnabledSetting(ComponentName componentName, int userId) {
+        if (componentName == null) throw new IllegalArgumentException("componentName is null");
+        String pkg = componentName.getPackageName();
+        ApkPackage installed = get(pkg);
+        if (installed != null) return installed.componentEnabledState(componentName.getClassName());
+        // As Settings.getComponentEnabledSettingLPr: an unknown package throws, an unknown
+        // class of a known package is DEFAULT. Gesher's synthetic GMS/Play and browser
+        // packages are known packages whose components keep their manifest state.
+        if (get(pkg) == null && !synthetic(pkg) && !BrowserPackageSupport.isBrowserPackage(pkg)) {
+            throw new IllegalArgumentException("Unknown package: " + pkg);
+        }
         return PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+    }
+
+    @Override
+    public synchronized void setComponentEnabledSetting(ComponentName componentName, int newState, int flags,
+            int userId, String callingPackage) {
+        setComponentState(componentName, newState);
+    }
+
+    @Override
+    public synchronized void setComponentEnabledSettings(
+            List<PackageManager.ComponentEnabledSetting> settings, int userId,
+            String callingPackage) {
+        if (settings == null) throw new IllegalArgumentException("settings is null");
+        // Android checks every entry before changing any of them.
+        for (PackageManager.ComponentEnabledSetting setting : settings) {
+            if (setting.isComponent()) checkComponentState(setting.getComponentName(),
+                    setting.getEnabledState());
+        }
+        for (PackageManager.ComponentEnabledSetting setting : settings) {
+            if (setting.isComponent()) {
+                setComponentState(setting.getComponentName(), setting.getEnabledState());
+            }
+        }
+    }
+
+    private void setComponentState(ComponentName component, int state) {
+        checkComponentState(component, state);
+        if (state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+                || state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
+            // As PackageManagerService: these are application states; for a component
+            // the request is logged and ignored.
+            SystemServer.log("setComponentEnabledSetting: state " + state
+                    + " is not valid for component " + component.flattenToShortString());
+            return;
+        }
+        get(component.getPackageName()).setComponentEnabledState(component.getClassName(), state);
+        PackageManager.invalidatePackageInfoCache();
+    }
+
+    /** Android's checks: a known state, a component of the package, its own app or the system. */
+    private void checkComponentState(ComponentName component, int state) {
+        if (component == null) throw new IllegalArgumentException("componentName is null");
+        if (state != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
+                && state != PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED
+                && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
+                && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
+            throw new IllegalArgumentException("Invalid new component state: " + state);
+        }
+        ApkPackage p = get(component.getPackageName());
+        if (p == null || isRemovalPending(p.packageName)) {
+            throw new IllegalArgumentException("Unknown package: " + component.getPackageName());
+        }
+        int callingUid = Binder.getCallingUid();
+        if (callingUid != p.uid() && callingUid != android.os.Process.SYSTEM_UID
+                && callingUid != android.os.Process.ROOT_UID
+                && callingUid != android.os.Process.myUid()
+                && mPermissions.checkProcessPermission(
+                        "android.permission.CHANGE_COMPONENT_ENABLED_STATE",
+                        Binder.getCallingPid(), callingUid) != PackageManager.PERMISSION_GRANTED) {
+            throw new SecurityException("Attempt to change component state; pid="
+                    + Binder.getCallingPid() + ", uid=" + callingUid
+                    + ", package=" + component.getPackageName());
+        }
+        if (!hasComponent(component)) {
+            throw new IllegalArgumentException("Component class " + component.getClassName()
+                    + " does not exist in " + component.getPackageName());
+        }
+    }
+
+    /** Whether the package declares the component (activity or alias, service, receiver, provider). */
+    private boolean hasComponent(ComponentName component) {
+        ApkPackage p = get(component.getPackageName());
+        if (p == null) return false;
+        long all = PackageManager.MATCH_DISABLED_COMPONENTS;
+        String name = component.getClassName();
+        if (p.activityInfo(name, all) != null || p.serviceInfo(name, all) != null
+                || p.receiverInfo(name, all) != null) {
+            return true;
+        }
+        for (ProviderInfo info : p.providers(all)) {
+            if (name.equals(info.name)) return true;
+        }
+        return false;
     }
 
     @Override

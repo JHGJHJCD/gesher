@@ -214,6 +214,15 @@ public final class InputMethodManagerService extends IInputMethodManager.Default
 
     // ---- IInputMethodManager ----
 
+    /**
+     * No IME visibility tracker (a debugging/latency service): IInputMethodManagerGlobalInvoker
+     * answers a null tracker with ImeTracker's empty tokens, as on a device without one.
+     */
+    @Override
+    public com.android.internal.inputmethod.IImeTracker getImeTrackerService() {
+        return null;
+    }
+
     @Override
     public void addClient(IInputMethodClient client, IRemoteInputConnection inputConnection,
             int untrustedDisplayId) {

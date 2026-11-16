@@ -309,6 +309,28 @@ no service, nothing was ever enabled and nothing read an app's views. Now:
 - Limits: bounds ignore view scale/rotation; nodes are read on demand (a 200 ms cache);
   no Android accessibility services (TalkBack-like apps) run: UI Automation is the client.
 
+## Settings screens (ADR 0087)
+
+There is no Settings APK. `ActivityTaskManagerService` answers implicit `android.settings.*`
+intents nothing resolves (`SettingsIntents`):
+
+- **One installed app's screen** (App info, all-files access, unknown sources, battery
+  optimization, overlay, write settings, exact alarms, app locale, open by default...;
+  the app as `package:` data or the APP_PACKAGE extra): Gesher's Control Center on that
+  app's details (`ControlCenter`: `data/system/control-panel-request`, opened through
+  `data/system/gesher-control-panel.lnk`). A Control Center already open shows it.
+- **List screens** (apps, sync, accounts, Settings itself): the Control Center.
+- **Device screens**: a fixed Windows Settings page (Wi-Fi `ms-settings:network-wifi`,
+  Bluetooth, location, date, language, display, sound, storage, battery...); the app and
+  channel notification screens open `ms-settings:notifications` as before.
+- Anything else, an app that is not installed, and explicit components stay unresolved
+  (`ActivityNotFoundException`). A `startActivityForResult` gets RESULT_CANCELED at once.
+
+`storagestats` (StorageStatsService) measures apps' code, data and cache directories and
+the shared view's media on the host files. Component enabled states, memory info, the SIM
+state and provider intent queries answer as Android (ADR 0087). Tests:
+tests/dex-services `SettingsIntentsTest` (tests/windows/tracks/95-browser.ps1).
+
 ## Status and next steps
 
 ### Done and verified
