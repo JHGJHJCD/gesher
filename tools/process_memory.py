@@ -227,8 +227,10 @@ class WindowsProcess:
     def identify_images(self, regions: list[dict], images: dict):
         discoveries = []
         for region in regions:
+            # PAGE_EXECUTE may be resident, but it does not permit header reads.
+            readable = (region["protect"] & 0xff) in (0x02, 0x04, 0x08, 0x20, 0x40, 0x80)
             if (region["type"] != "anonymous" or not region["first_page_resident"]
-                    or region["protect"] & 0x101 or region["size"] < ART_HEADER_SIZE):
+                    or not readable or region["protect"] & 0x100 or region["size"] < ART_HEADER_SIZE):
                 continue
             data = c.create_string_buffer(ART_HEADER_SIZE)
             read = c.c_size_t()

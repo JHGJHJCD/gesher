@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Portable parser/aggregation and resource-lifetime tests for process_memory.py."""
 import importlib.util
+import os
 from pathlib import Path
+import queue
 import struct
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SPEC = importlib.util.spec_from_file_location("process_memory", Path(__file__).with_name("process_memory.py"))
 memory = importlib.util.module_from_spec(SPEC)
@@ -165,6 +170,79 @@ class AggregationTests(unittest.TestCase):
     def test_parser_import_does_not_require_windows_dlls(self):
         self.assertEqual(memory.aggregate_regions([]), [])
         self.assertEqual(memory.parse_art_header(header())["version"], "118")
+
+
+class HeaderAccessTests(unittest.TestCase):
+    def process(self):
+        process = memory.WindowsProcess.__new__(memory.WindowsProcess)
+        process.page_size, process.handle = 4096, 1
+        process.kernel = Mock()
+        return process
+
+    def item(self, protect):
+        item = region(allocation=0x60000000)
+        item.update(protect=protect, first_page_resident=True)
+        return item
+
+    def test_unreadable_or_guarded_resident_regions_are_not_read(self):
+        process = self.process()
+        process.kernel.ReadProcessMemory.side_effect = OSError("Unreadable region")
+        # PAGE_EXECUTE, PAGE_NOACCESS and guarded readable/executable pages.
+        items = [self.item(protect) for protect in (0x10, 0x01, 0x102, 0x110, 0x140)]
+        process.identify_images(items, {})
+        process.kernel.ReadProcessMemory.assert_not_called()
+        self.assertTrue(all("art_image" not in item for item in items))
+
+    def test_readable_protections_still_identify_only_the_header(self):
+        process = self.process()
+        payload = header()
+
+        def read(handle, address, buffer, size, received):
+            self.assertEqual((handle, address, size), (1, 0x60000000, len(payload)))
+            memory.c.memmove(buffer, payload, size)
+            memory.c.cast(received, memory.c.POINTER(memory.c.c_size_t))[0] = size
+            return True
+
+        process.kernel.ReadProcessMemory.side_effect = read
+        catalog = {memory.image_identity(memory.parse_art_header(payload)): ["boot.art"]}
+        for protect in (0x02, 0x04, 0x08, 0x20, 0x40, 0x80, 0x204):
+            with self.subTest(protect=protect):
+                item = self.item(protect)
+                process.identify_images([item], catalog)
+                self.assertEqual(item["art_image"]["file"], "boot.art")
+        self.assertEqual(process.kernel.ReadProcessMemory.call_count, 7)
+
+
+@unittest.skipUnless(os.name == "nt" and memory.c.sizeof(memory.c.c_void_p) == 8,
+                     "Windows memory API integration requires 64-bit Windows")
+class WindowsCaptureTests(unittest.TestCase):
+    def test_capture_of_an_owned_idle_process(self):
+        # The child stays idle after reporting readiness, avoiding address-map
+        # mutations from the measurement code's own temporary allocations.
+        child = subprocess.Popen([sys.executable, "-u", "-c",
+            "import ctypes, sys; page = ctypes.create_string_buffer(4096); "
+            "page[0] = b'X'; print('ready'); sys.stdin.readline()"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            ready = queue.Queue()
+            reader = threading.Thread(target=lambda: ready.put(child.stdout.readline()), daemon=True)
+            reader.start()
+            self.assertEqual(ready.get(timeout=10).strip(), "ready")
+            result = memory.capture(child.pid, [])
+            self.assertEqual(result["pid"], child.pid)
+            self.assertGreater(result["page_size"], 0)
+            self.assertGreater(result["process_counters_before"]["private_commit_bytes"], 0)
+            totals = result["sampled_totals"]
+            self.assertGreater(totals["resident_bytes"], 0)
+            self.assertGreater(totals["private_resident_bytes"], 0)
+            self.assertLessEqual(totals["private_resident_bytes"], totals["resident_bytes"])
+            self.assertLessEqual(totals["resident_bytes"], totals["committed_region_bytes"])
+        finally:
+            try:
+                child.communicate("\n", timeout=10)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.communicate(timeout=10)
 
 
 if __name__ == "__main__":
