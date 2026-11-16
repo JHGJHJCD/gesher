@@ -10,10 +10,14 @@ import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.os.Binder;
 import android.os.IBinder;
+import android.os.IInterface;
+import android.os.Parcel;
+import android.os.RemoteException;
 import android.view.Display;
 import com.android.internal.pm.parsing.pkg.PackageImpl;
 import com.android.internal.pm.pkg.component.ParsedActivityImpl;
 import com.gesher.server.ApkPackage;
+import com.gesher.server.StandIn;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -125,7 +129,18 @@ public final class TaskStackContractTest {
             set(process, "processName", PKG);
             set(process, "ready", true);
             ((List<Object>)get(tasks, "mProcesses")).add(process);
-            api = (IActivityTaskManager) tasks;
+            IBinder target = StandIn.of(IActivityTaskManager.class,
+                    (IActivityTaskManager) tasks).asBinder();
+            IBinder transport = new Binder() {
+                @Override public IInterface queryLocalInterface(String descriptor) { return null; }
+                @Override protected boolean onTransact(int code, Parcel request, Parcel reply, int flags)
+                        throws RemoteException {
+                    return target.transact(code, request, reply, flags);
+                }
+            };
+            api = IActivityTaskManager.Stub.asInterface(transport);
+            check(api != tasks && api.asBinder() == transport,
+                    "TaskStack calls did not enter the generated AIDL Parcel transport");
         }
         void asApp(Checked action) throws Exception {
             long previous = Binder.clearCallingIdentity();
