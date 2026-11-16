@@ -727,7 +727,11 @@ public final class PackageManagerService extends IPackageManager.Default {
             return true;
         }
         ApkPackage pkg = get(packageName);
-        return pkg != null && pkg.parsed.getRequestedPermissions()
+        // Android exposes this capability only to installers targeting O or later.
+        // Gesher permits the request; PackageInstallerService still asks the host
+        // for fresh consent on every commit, regardless of this query's result.
+        return pkg != null && pkg.parsed.getTargetSdkVersion() >= android.os.Build.VERSION_CODES.O
+                && pkg.parsed.getRequestedPermissions()
                 .contains(android.Manifest.permission.REQUEST_INSTALL_PACKAGES);
     }
 

@@ -20,12 +20,37 @@ class SourceIdentityTest(unittest.TestCase):
 
     def test_merge_source_and_api_head_stay_distinct(self):
         self.assertEqual(source_identity(self.env, self.event, self.parents),
-                         {'checkout_sha': 'a' * 40, 'api_head_sha': 'b' * 40})
+                         {'checkout_sha': 'a' * 40, 'api_head_sha': 'b' * 40,
+                          'head_repository_id': self.env['GITHUB_REPOSITORY_ID']})
 
     def test_push_and_dispatch_use_the_checkout(self):
         for kind in ('push', 'workflow_dispatch'):
             self.assertEqual(source_identity(dict(self.env, GITHUB_EVENT_NAME=kind)),
-                             {'checkout_sha': 'a' * 40, 'api_head_sha': 'a' * 40})
+                             {'checkout_sha': 'a' * 40, 'api_head_sha': 'a' * 40,
+                              'head_repository_id': self.env['GITHUB_REPOSITORY_ID']})
+
+    def test_fork_keeps_target_merge_and_source_repository_distinct(self):
+        event = copy.deepcopy(self.event)
+        event['pull_request']['head']['repo'] = {'id': 1459959585, 'full_name': 'ztcebuck/gesher'}
+        self.assertEqual(source_identity(self.env, event, self.parents),
+                         {'checkout_sha': 'a' * 40, 'api_head_sha': 'b' * 40,
+                          'head_repository_id': '1459959585'})
+        for key, value in (('id', 0), ('id', True), ('id', '1459959585'),
+                           ('full_name', '../gesher/extra'), ('full_name', ''),
+                           ('full_name', self.env['GITHUB_REPOSITORY'])):
+            bad = copy.deepcopy(event)
+            bad['pull_request']['head']['repo'][key] = value
+            with self.subTest(field=key, value=value), self.assertRaises(AssertionError):
+                source_identity(self.env, bad, self.parents)
+        for key in ('base', 'head'):
+            bad = copy.deepcopy(event)
+            bad['pull_request'][key]['sha'] = 'f' * 40
+            with self.subTest(changed_parent=key), self.assertRaises(AssertionError):
+                source_identity(self.env, bad, self.parents)
+        bad = copy.deepcopy(event)
+        bad['pull_request']['base']['repo'] = dict(event['pull_request']['head']['repo'])
+        with self.assertRaises(AssertionError):
+            source_identity(self.env, bad, self.parents)
 
     def test_wrong_or_missing_pr_identity_is_rejected(self):
         mutants = []

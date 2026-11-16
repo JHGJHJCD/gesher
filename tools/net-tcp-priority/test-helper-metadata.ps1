@@ -12,8 +12,8 @@ $reviewed=@{
  'tools/windows4/test-tsf-job-supervisor.ps1'='3b0f7ebb636b91859b86797f94136c0b6dccd5fd'
  'tools/net-tcp-priority/qualified/TsfJobSupervisor.cs'='625be4d5906bb48dd02d6103382fd2e85ac88738'
  'tools/native3-locks/artifact/download-verified-artifact.py'='cd5cc415e53102c664edac22b1604df639c8804b'
- 'tools/ci/receipt-diagnostics.ps1'='80f33415a4c57c42c99f74ae61fc5da1316195ef'
- 'tools/ci/source_identity.py'='efa44e058d4ca09fc556661967c7fdc13f8515ba'
+ 'tools/ci/receipt-diagnostics.ps1'='b89f2f3f8a54a8b23937bae48ad900c85d4d49e9'
+ 'tools/ci/source_identity.py'='e93808b2890bf8ad4bfc969b92262b6629894def'
 }
 function ExactMap($Value){
  if($Value.Count -ne $reviewed.Count){return $false}

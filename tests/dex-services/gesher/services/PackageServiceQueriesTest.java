@@ -48,6 +48,7 @@ public final class PackageServiceQueriesTest {
         field(pkg, "packageName", name);
         field(pkg, "mUid", uid);
         PackageImpl parsed = (PackageImpl) PackageImpl.forTesting(name, "/fixture/" + name + ".apk");
+        parsed.setTargetSdkVersion(android.os.Build.VERSION_CODES.O);
         for (String permission : permissions) {
             parsed.addUsesPermission(
                     new ParsedUsesPermissionImpl(permission, 0, Collections.emptySet()));
@@ -86,6 +87,13 @@ public final class PackageServiceQueriesTest {
         require(listedTouchscreen, "Available features list omitted touchscreen");
         require(service.canRequestPackageInstalls("fixture.one", 0),
                 "Package declaring REQUEST_INSTALL_PACKAGES could not request installs");
+        PackageImpl installer = (PackageImpl) packages.get("fixture.one").parsed;
+        installer.setTargetSdkVersion(android.os.Build.VERSION_CODES.O - 1);
+        require(!service.canRequestPackageInstalls("fixture.one", 0),
+                "Installer targeting pre-O Android acquired the O-only capability");
+        installer.setTargetSdkVersion(android.os.Build.VERSION_CODES.O);
+        require(service.canRequestPackageInstalls("fixture.one", 0),
+                "Installer targeting Android O lost the capability at its API boundary");
         require(!service.canRequestPackageInstalls("fixture.two", 0)
                         && !service.canRequestPackageInstalls("fixture.absent", 0)
                         && !service.canRequestPackageInstalls(null, 0)
