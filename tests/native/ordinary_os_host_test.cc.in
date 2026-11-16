@@ -26,9 +26,15 @@ int FailWithLastError() { errno = EIO; return -1; }
 static bool controlled_clock;
 static int64_t monotonic_ns;
 static __int128 realtime_ns;
-struct WaitAction { int64_t advance_ns; int64_t wall_change_ns; bool interrupted; };
+struct WaitAction {
+  int64_t advance_ns;
+  int64_t wall_change_ns;
+  bool interrupted;
+  int64_t handler_ns = 0;
+};
 static std::vector<WaitAction> actions;
 static std::vector<uint32_t> waits;
+static int pending_signal_polls;
 static bool QueryPerformanceFrequency(LARGE_INTEGER* value) {
   value->QuadPart = 1000000000;
   return true;
@@ -50,14 +56,17 @@ LinuxTimespec RealtimeNow() {
   if (::clock_gettime(CLOCK_REALTIME, &now) != 0) std::abort();
   return {now.tv_sec, now.tv_nsec};
 }
-bool InterruptibleSleep(uint32_t milliseconds, uint32_t* left_ms) {
+bool TestSleep(uint32_t milliseconds, uint32_t* left_ms,
+               void (*observe)(void*), void* context) {
   if (!controlled_clock) {
     timespec request{milliseconds / 1000, static_cast<long>(milliseconds % 1000) * 1000000};
     timespec remain{};
     int result = ::nanosleep(&request, &remain);
     if (left_ms != nullptr)
       *left_ms = static_cast<uint32_t>(remain.tv_sec * 1000 + remain.tv_nsec / 1000000);
-    return result == -1 && errno == EINTR;
+    const bool interrupted = result == -1 && errno == EINTR;
+    if (interrupted && observe != nullptr) observe(context);
+    return interrupted;
   }
   size_t index = waits.size();
   if (index >= 16) { std::fputs("FAIL runaway controlled wait\n", stderr); std::abort(); }
@@ -67,12 +76,24 @@ bool InterruptibleSleep(uint32_t milliseconds, uint32_t* left_ms) {
   monotonic_ns += action.advance_ns;
   realtime_ns += action.advance_ns + static_cast<__int128>(action.wall_change_ns);
   if (left_ms != nullptr) *left_ms = 0;
+  if (action.interrupted && observe != nullptr) observe(context);
+  monotonic_ns += action.handler_ns;
+  realtime_ns += action.handler_ns;
   errno = ERANGE;  // Witness Android's errno-restoring wrapper.
   return action.interrupted;
 }
+bool InterruptibleSleep(uint32_t milliseconds, uint32_t* left_ms) {
+  return TestSleep(milliseconds, left_ms, nullptr, nullptr);
+}
+bool InterruptibleSleepObserved(uint32_t milliseconds, void (*observe)(void*), void* context) {
+  return TestSleep(milliseconds, nullptr, observe, context);
+}
 // Kept for --source baseline rejection: the old function used raw Sleep.
 [[maybe_unused]] static void Sleep(DWORD milliseconds) { InterruptibleSleep(milliseconds, nullptr); }
-void DeliverPendingSignals() {}
+void DeliverPendingSignals() {
+  ++pending_signal_polls;
+  errno = ERANGE;  // A handler must not replace clock_nanosleep's saved errno.
+}
 namespace {
 @CLOCK_HELPERS@
 // The adjacent helper is needed only when verifying the unmodified baseline.
@@ -134,6 +155,7 @@ static void reset_clock() {
   realtime_ns = static_cast<__int128>(1000) * 1000000000;
   actions.clear();
   waits.clear();
+  pending_signal_polls = 0;
   errno = EDOM;
 }
 static void test_clock_validation() {
@@ -199,6 +221,13 @@ static void test_clock_budgets() {
     result = public_clock_sleep(clock, 1, &request, &remain);
     check("expired absolute deadline performs no wait and preserves remainder",
           result == 0 && waits.empty() && remain.tv_sec == 111 && remain.tv_nsec == 222);
+    check("expired absolute deadline retains the pending-signal delivery point",
+          pending_signal_polls == 1 && errno == EDOM);
+    reset_clock();
+    result = public_clock_sleep(clock, 0, &request, &remain);
+    check("zero relative clock sleep polls pending signals while preserving success",
+          result == 0 && waits.empty() && pending_signal_polls == 1 && errno == EDOM &&
+          remain.tv_sec == 111 && remain.tv_nsec == 222);
   }
 }
 static void test_clock_interruption() {
@@ -226,9 +255,26 @@ static void test_clock_interruption() {
     request = {seconds, 999999999};
     actions.push_back({1000, 0, true});
     result = public_clock_sleep(1, 0, &request, &remain);
-    check("full signed time_t duration is preserved without millisecond overflow",
+    const int64_t left = INT64_MAX - 10000001000LL;
+    check("extreme signed time_t saturates at Android hrtimer deadline",
           result == EINTR && errno == EDOM && waits == std::vector<uint32_t>({2147483646u}) &&
-          remain.tv_sec == seconds && remain.tv_nsec == 999998999);
+          remain.tv_sec == left / 1000000000 && remain.tv_nsec == left % 1000000000);
+  }
+  for (int clock : {0, 1, 7}) {
+    reset_clock();
+    request = {2, 987654321};
+    actions.push_back({1234567, 0, true, 5000000000});
+    result = public_clock_sleep(clock, 0, &request, &remain);
+    check("relative clock sleep excludes handler duration and restores errno",
+          result == EINTR && errno == EDOM && remain.tv_sec == 2 && remain.tv_nsec == 986419754);
+  }
+  for (int clock : {0, 1, 7}) {
+    reset_clock();
+    request = {clock == 0 ? 1002 : 12, 987654321}; remain = {111, 222};
+    actions.push_back({1234567, 0, true, 5000000000});
+    result = public_clock_sleep(clock, 1, &request, &remain);
+    check("absolute clock sleep retains unused remainder after long handler",
+          result == EINTR && errno == EDOM && remain.tv_sec == 111 && remain.tv_nsec == 222);
   }
   for (int clock : {0, 1, 7}) {
     reset_clock();

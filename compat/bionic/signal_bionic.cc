@@ -620,17 +620,57 @@ void InstallSignalHook(bool authoritative) {
   gesher_signal_hook = &GesherBaseHook;
 }
 
-bool InterruptibleSleep(uint32_t ms, uint32_t* left_ms) {
+namespace {
+bool SleepWithObservation(uint32_t ms, uint32_t* left_ms,
+                          void (*observe)(void*), void* context) {
   ThreadState* self = Self();
-  DeliverAll(self);
+  // Preserve the older wait entry's delivery behavior. The observed entry
+  // must see an already-pending signal as an interruption too, before any
+  // handler runs; otherwise nanosleep would silently consume it and sleep.
+  if (observe == nullptr) DeliverAll(self);
   auto start = std::chrono::steady_clock::now();
   auto deadline = start + std::chrono::milliseconds(ms);
   bool interrupted = false;
+  int interrupted_signal = 0;
+  BionicSiginfo interrupted_info{};
   {
     std::unique_lock<std::mutex> lock(S().mutex);
     for (;;) {
       uint64_t deliverable = (self->pending | S().process_pending) & ~self->mask;
+      if (observe != nullptr && deliverable != 0) {
+        // Ignored signals do not interrupt nanosleep. Discard these pending
+        // instances while holding the same lock as the action/queue state.
+        for (int sig = 1; sig < kNsig; ++sig) {
+          if ((deliverable & Bit(sig)) == 0) continue;
+          uintptr_t handler = S().actions[sig].handler;
+          if (handler == kSigIgn || (handler == kSigDfl && DefaultIgnores(sig))) {
+            self->pending &= ~Bit(sig);
+            S().process_pending &= ~Bit(sig);
+            deliverable &= ~Bit(sig);
+          }
+        }
+        self->any_pending.store(self->pending != 0, std::memory_order_relaxed);
+        g_process_pending.store(S().process_pending != 0, std::memory_order_relaxed);
+      }
       if (deliverable != 0) {
+        if (observe != nullptr) {
+          // Claim the waking signal before unlocking. Another waiting thread
+          // may otherwise consume a process signal before our handler runs.
+          for (int sig = 1; sig < kNsig; ++sig) {
+            if ((deliverable & Bit(sig)) == 0) continue;
+            interrupted_signal = sig;
+            if ((self->pending & Bit(sig)) != 0) {
+              self->pending &= ~Bit(sig);
+              interrupted_info = self->info[sig];
+            } else {
+              S().process_pending &= ~Bit(sig);
+              interrupted_info = S().process_info[sig];
+            }
+            self->any_pending.store(self->pending != 0, std::memory_order_relaxed);
+            g_process_pending.store(S().process_pending != 0, std::memory_order_relaxed);
+            break;
+          }
+        }
         interrupted = true;
         break;
       }
@@ -645,8 +685,21 @@ bool InterruptibleSleep(uint32_t ms, uint32_t* left_ms) {
                                : static_cast<uint32_t>(
                                      std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count());
   }
-  if (interrupted) DeliverAll(self);
+  if (interrupted) {
+    if (observe != nullptr) observe(context);
+    if (interrupted_signal != 0) Run(self, interrupted_signal, interrupted_info);
+    DeliverAll(self);
+  }
   return interrupted;
+}
+}  // namespace
+
+bool InterruptibleSleep(uint32_t ms, uint32_t* left_ms) {
+  return SleepWithObservation(ms, left_ms, nullptr, nullptr);
+}
+
+bool InterruptibleSleepObserved(uint32_t ms, void (*observe)(void*), void* context) {
+  return SleepWithObservation(ms, nullptr, observe, context);
 }
 
 void DeliverPendingSignals() {
