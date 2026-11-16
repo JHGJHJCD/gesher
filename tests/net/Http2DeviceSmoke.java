@@ -22,8 +22,11 @@ public class Http2DeviceSmoke {
         b.write(name.getBytes("US-ASCII")); b.write(value.length()); b.write(value.getBytes("US-ASCII")); return b.toByteArray();
     }
     public static void main(String[] args) throws Exception {
-        boolean gzip=args.length>0 && args[0].equals("gzip");
-        boolean unary=gzip || (args.length>0 && args[0].equals("unary"));
+        boolean gzipHeaders=args.length>0 && args[0].equals("gzip-headers");
+        boolean earlyRead=args.length>0 && args[0].equals("early-read");
+        boolean readOnly=args.length>0 && args[0].equals("readonly-write");
+        boolean gzip=gzipHeaders || (args.length>0 && args[0].equals("gzip"));
+        boolean unary=gzip || earlyRead || readOnly || (args.length>0 && args[0].equals("unary"));
         boolean tls=args.length>0 && !unary;
         ServerSocket server=tls ? null : new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"));
         Throwable[] failure=new Throwable[1];
@@ -66,6 +69,7 @@ public class Http2DeviceSmoke {
         CountDownLatch done=new CountDownLatch(1);
         StringBuilder body=new StringBuilder();
         boolean[] trailers={false}, secondWrite={false};
+        int[] completedWrites={0};
         String url=tls ? args[0] : "http://127.0.0.1:"+server.getLocalPort()+"/grpc";
         if (tls && args.length>1) java.net.ProxySelector.setDefault(new java.net.ProxySelector() {
             public List<java.net.Proxy> select(java.net.URI uri) { return Collections.singletonList(new java.net.Proxy(java.net.Proxy.Type.HTTP,InetSocketAddress.createUnresolved("127.0.0.1",Integer.parseInt(args[1])))); }
@@ -73,13 +77,23 @@ public class Http2DeviceSmoke {
         });
         BidirectionalStream stream=engine.newBidirectionalStreamBuilder(url,executor,new BidirectionalStream.Callback() {
             public void onStreamReady(BidirectionalStream s) {
-                if (!tls) { ByteBuffer b=ByteBuffer.allocateDirect(4); b.put(new byte[]{'p','i','n','g'}).flip(); s.write(b,unary); }
+                if (earlyRead) s.read(ByteBuffer.allocateDirect(32));
+                if (!tls && !gzipHeaders) {
+                    ByteBuffer b=ByteBuffer.allocateDirect(4); b.put(new byte[]{'p','i','n','g'}).flip();
+                    s.write(readOnly ? b.asReadOnlyBuffer() : b,unary);
+                }
                 s.flush();
             }
             public void onResponseHeadersReceived(BidirectionalStream s,UrlResponseInfo i) {
                 if (!tls && (i.getHttpStatusCode()!=200 || !Collections.singletonList("200").equals(i.getHeaders().getAsMap().get(":status"))))
                     throw new IllegalStateException("HTTP/2 :status metadata is missing");
-                s.read(ByteBuffer.allocateDirect(32));
+                // The peer sends response headers before it receives any DATA.
+                // Decoding gzip must not delay this callback until body bytes.
+                if (gzipHeaders) {
+                    ByteBuffer b=ByteBuffer.allocateDirect(4); b.put(new byte[]{'p','i','n','g'}).flip();
+                    s.write(b,true); s.flush();
+                }
+                if (!earlyRead) s.read(ByteBuffer.allocateDirect(32));
             }
             public void onReadCompleted(BidirectionalStream s,UrlResponseInfo i,ByteBuffer b,boolean end) {
                 b.flip(); while (b.hasRemaining()) body.append((char)b.get()); b.clear();
@@ -89,16 +103,22 @@ public class Http2DeviceSmoke {
                 if (!end && !unary) s.read(b);
             }
             public void onResponseTrailersReceived(BidirectionalStream s,UrlResponseInfo i,HeaderBlock h) { trailers[0]=h.getAsMap().get("grpc-status").equals(Collections.singletonList("0")); }
-            public void onWriteCompleted(BidirectionalStream s,UrlResponseInfo i,ByteBuffer b,boolean end) {}
-            public void onSucceeded(BidirectionalStream s,UrlResponseInfo i) { done.countDown(); }
+            public void onWriteCompleted(BidirectionalStream s,UrlResponseInfo i,ByteBuffer b,boolean end) { completedWrites[0]++; }
+            public void onSucceeded(BidirectionalStream s,UrlResponseInfo i) {
+                if (!tls && completedWrites[0]!=(unary?1:2)) failure[0]=new AssertionError("Completed before write callbacks");
+                done.countDown();
+            }
             public void onFailed(BidirectionalStream s,UrlResponseInfo i,HttpException e) { failure[0]=e; done.countDown(); }
             public void onCanceled(BidirectionalStream s,UrlResponseInfo i) { failure[0]=new IOException("Canceled"); done.countDown(); }
         }).setHttpMethod(tls?"GET":"POST").setDelayRequestHeadersUntilFirstFlushEnabled(true).build();
-        stream.start();
-        if (!done.await(20,TimeUnit.SECONDS)) { stream.cancel(); throw new AssertionError("HTTP/2 timeout"); }
-        if (failure[0]!=null) throw new AssertionError("HTTP/2 failed",failure[0]);
-        if (!tls && (!body.toString().equals(unary?"ping":"pingpong") || !trailers[0] || (!unary && !secondWrite[0]))) throw new AssertionError("Duplex/trailers failed: "+body);
-        engine.shutdown(); executor.shutdown(); if (server!=null) server.close();
-        System.out.println(tls ? "Http2DeviceSmoke passed: TLS ALPN and HTTP/2 via configured proxy" : "Http2DeviceSmoke passed: full duplex, flush, direct buffers and gRPC trailers");
+        try {
+            stream.start();
+            if (!done.await(20,TimeUnit.SECONDS)) throw new AssertionError("HTTP/2 timeout");
+            if (failure[0]!=null) throw new AssertionError("HTTP/2 failed",failure[0]);
+            if (!tls && (!body.toString().equals(unary?"ping":"pingpong") || !trailers[0] || (!unary && !secondWrite[0]))) throw new AssertionError("Duplex/trailers failed: "+body);
+            System.out.println(tls ? "Http2DeviceSmoke passed: TLS ALPN and HTTP/2 via configured proxy" : "Http2DeviceSmoke passed: full duplex, flush, direct buffers and gRPC trailers");
+        } finally {
+            stream.cancel(); engine.shutdown(); executor.shutdownNow(); if (server!=null) server.close();
+        }
     }
 }

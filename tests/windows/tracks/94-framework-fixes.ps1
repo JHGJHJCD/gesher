@@ -30,6 +30,16 @@ Check 'network: HTTP/2 full duplex, direct buffers, flush and gRPC trailers' {
   $http2Out
 } @('Http2DeviceSmoke passed:')
 
+$http2ContractModes = @('gzip-headers', 'early-read', 'readonly-write')
+foreach ($http2ContractMode in $http2ContractModes) {
+  $http2ContractOut = FixesRun ($dvmFixes + 'Http2DeviceSmoke' + $http2ContractMode) 45
+  $http2ContractCode = $LASTEXITCODE
+  Check "network: HTTP/2 $http2ContractMode callback and buffer contract" {
+    $global:LASTEXITCODE = $http2ContractCode
+    $http2ContractOut
+  } @('Http2DeviceSmoke passed:')
+}
+
 $http2GzipOut = FixesRun ($dvmFixes + 'Http2DeviceSmoke' + 'gzip') 45
 $http2GzipCode = $LASTEXITCODE
 Check 'network: HTTP/2 content decoding before gRPC message delivery' {

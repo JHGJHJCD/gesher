@@ -21,7 +21,8 @@ final class Http2Transport implements Closeable {
     private Socket socket;
     private Object connection, stream, source, sink;
     private boolean closed;
-    private InputStream decodedBody;
+    private volatile InputStream decodedBody;
+    private String responseEncoding="";
     private final Class<?> bufferClass=Class.forName(IO+"Buffer");
     private final Class<?> sourceClass=Class.forName(IO+"Source");
     private final Class<?> sinkClass=Class.forName(IO+"Sink");
@@ -122,7 +123,9 @@ final class Http2Transport implements Closeable {
         encoded.add(constructor.newInstance(":method",method));
         encoded.add(constructor.newInstance(":scheme",url.getProtocol()));
         encoded.add(constructor.newInstance(":authority",host));
-        encoded.add(constructor.newInstance(":path",url.getFile().isEmpty()?"/":url.getFile()));
+        String path=url.getFile();
+        if (path.isEmpty() || path.charAt(0)=='?') path="/"+path;
+        encoded.add(constructor.newInstance(":path",path));
         boolean hasAgent=false;
         for (Map.Entry<String,String> h:headers) {
             String name=h.getKey().toLowerCase(Locale.ROOT);
@@ -148,6 +151,12 @@ final class Http2Transport implements Closeable {
         return result;
     }
     void setResponseEncoding(String encoding) throws IOException {
+        if (!encoding.isEmpty() && !encoding.equalsIgnoreCase("identity")
+                && !encoding.equalsIgnoreCase("gzip") && !encoding.equalsIgnoreCase("deflate"))
+            throw new IOException("Unsupported HTTP content encoding");
+        responseEncoding=encoding;
+    }
+    private void initDecodedBody() throws IOException {
         InputStream raw=new InputStream() {
             @Override public int read() throws IOException {
                 byte[] one=new byte[1]; int n=read(one,0,1); return n<0 ? -1 : one[0]&255;
@@ -162,10 +171,15 @@ final class Http2Transport implements Closeable {
                 catch (Exception e) { throw new IOException("HTTP/2 body read failed",e); }
             }
         };
-        if (encoding.equalsIgnoreCase("gzip")) decodedBody=new GZIPInputStream(raw);
-        else if (encoding.equalsIgnoreCase("deflate")) decodedBody=new InflaterInputStream(raw);
-        else if (!encoding.isEmpty() && !encoding.equalsIgnoreCase("identity"))
-            throw new IOException("Unsupported HTTP content encoding");
+        // GZIPInputStream reads its header in the constructor. Do that only in
+        // the body pump, after the response-header callback has been dispatched:
+        // a duplex peer may wait for a write from that callback before its body.
+        InputStream decoded=responseEncoding.equalsIgnoreCase("gzip") ? new GZIPInputStream(raw)
+                : new InflaterInputStream(raw);
+        synchronized (this) {
+            if (closed) { decoded.close(); throw new IOException("Stream closed"); }
+            decodedBody=decoded;
+        }
     }
     private byte[] readRaw(int capacity) throws Exception {
         Object buffer=bufferClass.getConstructor().newInstance();
@@ -173,6 +187,8 @@ final class Http2Transport implements Closeable {
         return n<0 ? null : (byte[])call(bufferClass,buffer,"readByteArray",new Class<?>[]{long.class},n);
     }
     byte[] read(int capacity) throws Exception {
+        if (decodedBody==null && (responseEncoding.equalsIgnoreCase("gzip")
+                || responseEncoding.equalsIgnoreCase("deflate"))) initDecodedBody();
         if (decodedBody==null) return readRaw(capacity);
         byte[] bytes=new byte[capacity]; int n=decodedBody.read(bytes);
         return n<0 ? null : n==bytes.length ? bytes : Arrays.copyOf(bytes,n);
@@ -188,7 +204,10 @@ final class Http2Transport implements Closeable {
     @Override public synchronized void close() throws IOException {
         closed=true;
         // Closing the socket first wakes blocked HTTP/2 reads and flow-control writers.
-        if (socket!=null) socket.close();
-        if (connection!=null) ((Closeable)connection).close();
+        try { if (socket!=null) socket.close(); }
+        finally {
+            try { if (decodedBody!=null) decodedBody.close(); }
+            finally { if (connection!=null) ((Closeable)connection).close(); }
+        }
     }
 }

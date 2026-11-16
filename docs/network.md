@@ -43,6 +43,16 @@ cancellation and one terminal callback. Application callbacks are serialized on
 the supplied executor; callback failures become `CallbackException`. Headers and
 URL chains are immutable snapshots. Redirects across origins remove explicit
 Authorization, Cookie and Host headers. HTTP error status codes remain responses.
+Canceled asynchronous uploads retain their provider until its pending read or
+rewind reports sink completion. Uploads reuse one direct buffer of at most 32 KiB.
+Bidirectional reads may be queued from `onStreamReady`, and direct read-only
+buffers are accepted for writes. Gzip headers are decoded after dispatching the
+response-header callback so a duplex peer can wait for that callback's upload.
+
+Each bidirectional stream currently opens a separate HTTP/2 connection; connection
+pooling across streams is not implemented. The adapter copies bounded 32 KiB
+chunks, while AOSP OkHttp also retains its own flow-control buffers and reader
+threads. The current implementation has no high-concurrency throughput benchmark.
 
 The transport does not implement QUIC, Brotli or engine-private disk caches.
 Protocol/DNS/cache tuning is advisory and does not install process-global settings;
@@ -54,7 +64,10 @@ adapter; they do not account per-request Windows traffic. The native Android
 Cronet module is not shipped.
 
 `tools/test_http_engine.py --java-home <JDK>` tests the production adapter over
-real local HTTP sockets in CI. `tests/net/HttpEngineDeviceSmoke.java` and
+real local HTTP sockets in CI. Adding `--okhttp-source <AOSP external/okhttp>`
+compiles the pinned Android 16 framing and Okio sources for host HTTP/2 wire
+tests, including gzip-header ordering and direct-buffer callback contracts.
+`tests/net/HttpEngineDeviceSmoke.java` and
 `Http2DeviceSmoke.java` also run on Gesher ART in Windows track 94, with an
 independent local HTTP/2 wire peer. `GESHER_HTTP_ENGINE_TRACE=1` logs numeric
 HTTP/gRPC status codes and failure types/code locations, never request URLs,

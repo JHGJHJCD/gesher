@@ -55,6 +55,25 @@ public class HttpEngineHostTest {
         @Override public void rewind(UploadDataSink sink) { offset=0; rewinds.incrementAndGet(); sink.onRewindSucceeded(); }
         @Override public void close() { closes.incrementAndGet(); }
     }
+    static class AsyncUpload extends UploadDataProvider {
+        final boolean deferRewind;
+        final CountDownLatch pending=new CountDownLatch(1), closed=new CountDownLatch(1);
+        final AtomicInteger closes=new AtomicInteger();
+        volatile UploadDataSink sink;
+        volatile ByteBuffer buffer;
+        AsyncUpload(boolean deferRewind) { this.deferRewind=deferRewind; }
+        @Override public long getLength() { return 1; }
+        @Override public void read(UploadDataSink value, ByteBuffer target) {
+            if (deferRewind) { target.put((byte)'x'); value.onReadSucceeded(false); }
+            else { sink=value; buffer=target; pending.countDown(); }
+        }
+        @Override public void rewind(UploadDataSink value) { sink=value; pending.countDown(); }
+        void complete() {
+            if (deferRewind) sink.onRewindSucceeded();
+            else { buffer.put((byte)'x'); sink.onReadSucceeded(false); }
+        }
+        @Override public void close() { closes.incrementAndGet(); closed.countDown(); }
+    }
     static Result get(HttpEngine e, String url, Executor ex) throws Exception {
         Result r=new Result(); e.newUrlRequestBuilder(url,ex,r).build().start(); return r.await();
     }
@@ -146,6 +165,18 @@ public class HttpEngineHostTest {
             pending.cancel(); canceled.await(); release.countDown();
             check("canceled".equals(canceled.outcome) && pending.isDone(),"Cancel pending response");
             check(get(engine,base+"/",callbacks).outcome.equals("success"),"Engine usable after cancellation");
+            for (boolean deferRewind:new boolean[]{false,true}) {
+                AsyncUpload async=new AsyncUpload(deferRewind); Result result=new Result();
+                UrlRequest request=engine.newUrlRequestBuilder(base+(deferRewind?"/redirect307":"/echo"),callbacks,result)
+                        .addHeader("Content-Type","text/plain").setUploadDataProvider(async,uploads).build();
+                request.start();
+                check(async.pending.await(5,TimeUnit.SECONDS),"Asynchronous upload operation started");
+                request.cancel(); result.await();
+                boolean closedBeforeCompletion=async.closed.await(150,TimeUnit.MILLISECONDS);
+                async.complete();
+                check(!closedBeforeCompletion,"Canceled upload stays open until asynchronous sink completion");
+                check(async.closed.await(5,TimeUnit.SECONDS) && async.closes.get()==1,"Upload closes once after sink completion");
+            }
             try { engine.newUrlRequestBuilder("file:///tmp/x",callbacks,new Result()); throw new AssertionError("Non HTTP URL"); }
             catch (IllegalArgumentException expected) { checks++; }
             try { engine.newUrlRequestBuilder(base,callbacks,new Result()).addHeader("bad","x\r\ny"); throw new AssertionError("Header injection"); }

@@ -2,8 +2,9 @@
 # Copyright (C) 2026 The Gesher Authors; SPDX-License-Identifier: Apache-2.0
 """Exercise production android.net.http over real HTTP sockets on a host JVM.
 
-Only Context and Network are host fixtures. All engine/request/upload/callback
-code is compiled unchanged from app/java/android/net/http.
+Context and Network are host fixtures. Optional HTTP/2 checks compile the pinned
+AOSP framing and Okio sources unchanged, with platform policy/annotation/logger
+fixtures. All engine/request/upload/callback code is production code.
 """
 import argparse
 from pathlib import Path
@@ -16,6 +17,10 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--java-home', type=Path, required=True)
+    p.add_argument('--okhttp-source', type=Path,
+                   help='Optional pinned AOSP external/okhttp checkout for real HTTP/2 wire tests')
+    p.add_argument('--http2-mode', action='append',
+                   help='Run selected HTTP/2 smoke mode(s), instead of the full mode list')
     args = p.parse_args()
     with tempfile.TemporaryDirectory(prefix='gesher-httpengine-') as temporary:
         work = Path(temporary)
@@ -39,6 +44,35 @@ def main():
         # actual process-global installation separately from ordinary requests.
         subprocess.run([str(args.java_home / 'bin/java'), '-cp', str(work), 'HttpEngineHostTest',
                         'global-factory'], check=True, timeout=30)
+        if args.okhttp_source:
+            wrapper = work / 'android/content/ContextWrapper.java'
+            wrapper.write_text('package android.content; public class ContextWrapper extends Context {'
+                               'public ContextWrapper(Context base) {}}')
+            policy = work / 'android/security/NetworkSecurityPolicy.java'
+            policy.parent.mkdir(parents=True)
+            policy.write_text('package android.security; public class NetworkSecurityPolicy {'
+                              'public static NetworkSecurityPolicy getInstance() { return new NetworkSecurityPolicy(); }'
+                              'public boolean isCleartextTrafficPermitted(String host) { return true; }}')
+            annotation = work / 'android/compat/annotation/UnsupportedAppUsage.java'
+            annotation.parent.mkdir(parents=True)
+            annotation.write_text('package android.compat.annotation; public @interface UnsupportedAppUsage {}')
+            logger = work / 'com/android/okhttp/internal/Internal.java'
+            logger.parent.mkdir(parents=True)
+            logger.write_text('package com.android.okhttp.internal; public final class Internal {'
+                              'public static final java.util.logging.Logger logger='
+                              'java.util.logging.Logger.getLogger("OkHttp"); }')
+            http = args.okhttp_source / 'repackaged/okhttp/src/main/java/com/android/okhttp'
+            framing = list((http / 'internal/framed').glob('*.java'))
+            framing += [http / p for p in ('HttpUrl.java', 'Protocol.java',
+                                           'internal/Util.java', 'internal/NamedRunnable.java')]
+            framing += list((args.okhttp_source / 'repackaged/okio/okio/src/main/java').rglob('*.java'))
+            subprocess.run([str(args.java_home / 'bin/javac'), '--release', '17', '-encoding', 'UTF-8',
+                            '-cp', str(work), '-d', str(work), str(wrapper), str(policy), str(annotation), str(logger),
+                            *map(str, framing), str(ROOT / 'tests/net/Http2DeviceSmoke.java')],
+                           check=True, timeout=60)
+            for mode in args.http2_mode or ['', 'unary', 'gzip', 'gzip-headers', 'early-read', 'readonly-write']:
+                subprocess.run([str(args.java_home / 'bin/java'), '-cp', str(work), 'Http2DeviceSmoke',
+                                *([mode] if mode else [])], check=True, timeout=35)
 
 
 if __name__ == '__main__':

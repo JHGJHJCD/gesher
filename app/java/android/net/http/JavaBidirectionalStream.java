@@ -21,7 +21,7 @@ final class JavaBidirectionalStream extends BidirectionalStream {
     final ArrayDeque<Write> writes=new ArrayDeque<>();
     volatile Http2Transport transport;
     volatile boolean done;
-    private boolean started, ready, headersSent, readPending, readReady, readEnded, writeEnded, endQueued;
+    private boolean started, ready, headersSent, readPending, readEnded, writeEnded, endQueued;
     private ByteBuffer pendingRead;
     private Response info;
     private int initialHeaderCount;
@@ -49,6 +49,9 @@ final class JavaBidirectionalStream extends BidirectionalStream {
     private interface Action { void run() throws Exception; }
     private void callback(Action action) {
         synchronized (this) { pendingCallbacks++; }
+        dispatchCallback(action);
+    }
+    private void dispatchCallback(Action action) {
         try { callbacks.execute(() -> {
             try {
                 if (!done) action.run();
@@ -102,15 +105,15 @@ final class JavaBidirectionalStream extends BidirectionalStream {
             }
             transport.setResponseEncoding(encoding);
             Response response=new Response(url.toExternalForm(),code,new JavaHttpEngine.Headers(values));
-            synchronized (this) { if (done) return; info=response; readReady=true; }
+            synchronized (this) { if (done) return; info=response; }
             callback(() -> callback.onResponseHeadersReceived(this,response));
             pump();
         },false);
     }
     @Override public synchronized void write(ByteBuffer buffer, boolean endOfStream) {
         Objects.requireNonNull(buffer);
-        if (!buffer.isDirect() || buffer.isReadOnly() || (!buffer.hasRemaining() && !endOfStream))
-            throw new IllegalArgumentException("A nonempty writable direct buffer is required");
+        if (!buffer.isDirect() || (!buffer.hasRemaining() && !endOfStream))
+            throw new IllegalArgumentException("A nonempty direct buffer is required");
         if (done) return;
         if (!ready || endQueued) throw new IllegalStateException("Stream cannot accept a write");
         writes.add(new Write(buffer,endOfStream));
@@ -123,14 +126,22 @@ final class JavaBidirectionalStream extends BidirectionalStream {
         io(() -> {
             sendHeaders();
             for (Write write:batch) {
-                while (write.buffer.hasRemaining() && !done) {
-                    byte[] bytes=new byte[Math.min(32768,write.buffer.remaining())];
-                    write.buffer.get(bytes); transport.write(bytes);
+                for (;;) {
+                    byte[] bytes;
+                    synchronized (this) {
+                        if (done) return;
+                        if (!write.buffer.hasRemaining()) break;
+                        bytes=new byte[Math.min(32768,write.buffer.remaining())];
+                        write.buffer.get(bytes);
+                    }
+                    transport.write(bytes);
                 }
                 if (done) return;
                 transport.flush(write.end);
-                synchronized (this) { if (write.end) writeEnded=true; }
-                callback(() -> callback.onWriteCompleted(this,info,write.buffer,write.end));
+                // Reserve the callback before exposing END_STREAM to the reader.
+                // Otherwise its EOF can complete the stream and drop this write.
+                synchronized (this) { if (write.end) writeEnded=true; pendingCallbacks++; }
+                dispatchCallback(() -> callback.onWriteCompleted(this,info,write.buffer,write.end));
             }
             callbacks.execute(this::succeedIfComplete);
         },true);
@@ -140,7 +151,7 @@ final class JavaBidirectionalStream extends BidirectionalStream {
         if (!buffer.isDirect() || buffer.isReadOnly() || !buffer.hasRemaining())
             throw new IllegalArgumentException("A nonempty writable direct buffer is required");
         if (done) return;
-        if (!readReady || readPending) throw new IllegalStateException("Stream cannot accept a read");
+        if (!ready || readPending) throw new IllegalStateException("Stream cannot accept a read");
         if (readEnded) { callback(() -> callback.onReadCompleted(this,info,buffer,true)); return; }
         readPending=true; pendingRead=buffer; notifyAll();
     }
@@ -169,8 +180,11 @@ final class JavaBidirectionalStream extends BidirectionalStream {
                     callback(() -> callback.onResponseTrailersReceived(this,info,trailers));
                 }
                 ByteBuffer buffer;
-                synchronized (this) { readEnded=true; buffer=pendingRead; pendingRead=null; readPending=false; }
-                if (buffer!=null) callback(() -> callback.onReadCompleted(this,info,buffer,true));
+                synchronized (this) {
+                    readEnded=true; buffer=pendingRead; pendingRead=null; readPending=false;
+                    if (buffer!=null) pendingCallbacks++;
+                }
+                if (buffer!=null) dispatchCallback(() -> callback.onReadCompleted(this,info,buffer,true));
                 callbacks.execute(this::succeedIfComplete);
                 return;
             }

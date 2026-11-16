@@ -201,6 +201,7 @@ final class JavaHttpEngine extends HttpEngine {
         volatile InputStream input;
         volatile Response response;
         volatile CompletableFuture<?> pendingUpload;
+        final CompletableFuture<Void> uploadCanceled=new CompletableFuture<>();
         Request(RequestBuilder b) {
             engine=b.engine; callback=b.callback; callbacks=new SerialExecutor(b.executor);
             uploads=b.uploadExecutor==null ? null : new SerialExecutor(b.uploadExecutor);
@@ -321,27 +322,58 @@ final class JavaHttpEngine extends HttpEngine {
             });
         }
         private <T> T await(CompletableFuture<T> future) throws Exception {
-            pendingUpload=future;
             try {
                 if (isDone()) throw new CancellationException();
-                return future.get(30,TimeUnit.SECONDS);
+                // Cancel the wait, not the provider's operation. An asynchronous
+                // read/rewind still owns its resources until it calls its sink.
+                CompletableFuture.anyOf(future,uploadCanceled).get(30,TimeUnit.SECONDS);
+                return future.get();
             } catch (ExecutionException e) {
                 throw new CallbackException("Exception in upload provider", e.getCause()) {};
-            } finally { pendingUpload=null; }
+            }
+        }
+        private <T> CompletableFuture<T> uploadFuture() {
+            CompletableFuture<T> future=new CompletableFuture<>();
+            synchronized (this) {
+                if (isDone()) throw new CancellationException();
+                pendingUpload=future;
+            }
+            future.whenComplete((value,error) -> {
+                synchronized (this) { if (pendingUpload==future) pendingUpload=null; }
+                closeUploadWhenReady();
+            });
+            return future;
+        }
+        private void submitUpload(CompletableFuture<?> future, CallbackAction action) {
+            try { uploads.execute(() -> {
+                try {
+                    if (isDone()) throw new CancellationException();
+                    action.run();
+                } catch (Exception e) { future.completeExceptionally(e); }
+            }); } catch (RuntimeException e) { future.completeExceptionally(e); }
+        }
+        private void closeUploadWhenReady() {
+            synchronized (this) {
+                if (provider==null || !isDone() || pendingUpload!=null || !uploadClosed.compareAndSet(false,true)) return;
+            }
+            try { uploads.execute(() -> { try { provider.close(); } catch (IOException ignored) {} }); }
+            catch (RuntimeException ignored) {}
         }
         private void upload(HttpURLConnection opened) throws Exception {
-            CompletableFuture<Long> lengthResult=new CompletableFuture<>();
-            uploads.execute(() -> { try { lengthResult.complete(provider.getLength()); }
-                                    catch (Exception e) { lengthResult.completeExceptionally(e); } });
+            CompletableFuture<Long> lengthResult=uploadFuture();
+            submitUpload(lengthResult,() -> lengthResult.complete(provider.getLength()));
             long length=await(lengthResult);
             if (length < -1) throw new IllegalArgumentException("Invalid upload length");
             opened.setDoOutput(true);
             if (length>=0) opened.setFixedLengthStreamingMode(length); else opened.setChunkedStreamingMode(32768);
             long sent=0;
+            ByteBuffer buffer=ByteBuffer.allocateDirect((int)(length<0 ? 32768 : Math.min(32768,length)));
+            byte[] bytes=new byte[buffer.capacity()];
             try (OutputStream output=opened.getOutputStream()) {
                 while (!isDone() && (length<0 || sent<length)) {
-                    ByteBuffer buffer=ByteBuffer.allocateDirect((int)(length<0 ? 32768 : Math.min(32768,length-sent)));
-                    CompletableFuture<Boolean> result=new CompletableFuture<>();
+                    buffer.clear();
+                    if (length>=0) buffer.limit((int)Math.min(buffer.capacity(),length-sent));
+                    CompletableFuture<Boolean> result=uploadFuture();
                     int limit=buffer.limit();
                     UploadDataSink sink=new UploadDataSink() {
                         @Override public void onReadSucceeded(boolean last) { result.complete(last); }
@@ -349,25 +381,25 @@ final class JavaHttpEngine extends HttpEngine {
                         @Override public void onRewindSucceeded() { result.completeExceptionally(new IOException("Unexpected rewind completion")); }
                         @Override public void onRewindError(Exception e) { result.completeExceptionally(e); }
                     };
-                    uploads.execute(() -> { try { provider.read(sink,buffer); } catch (Exception e) { result.completeExceptionally(e); } });
+                    submitUpload(result,() -> provider.read(sink,buffer));
                     boolean last=await(result);
                     if (buffer.limit()!=limit || (length>=0 && last)) throw new IOException("Invalid upload completion");
                     int count=buffer.position();
                     if (count==0 && !last) throw new IOException("Upload provider made no progress");
-                    byte[] bytes=new byte[count]; buffer.flip(); buffer.get(bytes); output.write(bytes); sent+=count;
+                    buffer.flip(); buffer.get(bytes,0,count); output.write(bytes,0,count); sent+=count;
                     if (last) break;
                 }
             }
         }
         private void rewind() throws Exception {
-            CompletableFuture<Void> result=new CompletableFuture<>();
+            CompletableFuture<Void> result=uploadFuture();
             UploadDataSink sink=new UploadDataSink() {
                 @Override public void onReadSucceeded(boolean last) { result.completeExceptionally(new IOException("Unexpected read completion")); }
                 @Override public void onReadError(Exception e) { result.completeExceptionally(e); }
                 @Override public void onRewindSucceeded() { result.complete(null); }
                 @Override public void onRewindError(Exception e) { result.completeExceptionally(e); }
             };
-            uploads.execute(() -> { try { provider.rewind(sink); } catch (Exception e) { result.completeExceptionally(e); } });
+            submitUpload(result,() -> provider.rewind(sink));
             await(result);
         }
         @Override public void cancel() { if (phase!=NEW) finish(null,true); }
@@ -386,8 +418,7 @@ final class JavaHttpEngine extends HttpEngine {
         }
         private void finish(HttpException error, boolean canceled) {
             synchronized (this) { if (phase==DONE) return; phase=DONE; }
-            CompletableFuture<?> pending=pendingUpload;
-            if (pending!=null) pending.cancel(false);
+            uploadCanceled.completeExceptionally(new CancellationException());
             // Do not close a stream on the application's callback thread: Android
             // StrictMode can reject network I/O there, and a read may still block.
             try { engine.io.execute(() -> {
@@ -397,10 +428,7 @@ final class JavaHttpEngine extends HttpEngine {
                 if (s!=null) try { s.close(); } catch (IOException ignored) {}
             }); } catch (RejectedExecutionException ignored) {}
             engine.release(this);
-            if (provider!=null && uploadClosed.compareAndSet(false,true)) {
-                try { uploads.execute(() -> { try { provider.close(); } catch (IOException ignored) {} }); }
-                catch (RuntimeException ignored) {}
-            }
+            closeUploadWhenReady();
             try { callbacks.execute(() -> {
                 try {
                     if (canceled) callback.onCanceled(this,response);
