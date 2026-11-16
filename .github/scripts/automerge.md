@@ -11,30 +11,32 @@ event also removes a label already present in its opening snapshot, even when
 the snapshot's update timestamp is later than creation. A delayed opening
 event preserves a later explicit replacement label.
 
-The PR author's first automerge label application also cannot approve it,
-even if the opening workflow has already finished. GitHub CLI creates the PR
-and adds requested labels in separate API operations, so a label supplied with
-`gh pr create --label automerge` can arrive after opening initialization. The
-controller removes that first author application. An author with merge access
-can deliberately reapply the label later: the complete event history must
-contain a distinct, strictly earlier automerge label application by the same
-account ID. Same-second applications, another account's labels and unrelated
-labels do not count. An authorized collaborator other than the author can
-approve with their first explicit label after initialization.
-
-The author's identity and earlier application are checked again before merge;
-an existing approval receipt cannot bypass this rule. Missing author identity
-blocks approval. This is asynchronous label removal and approval enforcement,
-not a restriction on GitHub's label-assignment UI or API.
+The author's first explicit label after initialization can approve the PR,
+provided that account has merge access. No earlier author label is required.
+The same timing, permission and approval checks apply to all collaborators.
+Missing author identity blocks approval. This is asynchronous label removal
+and approval enforcement, not a restriction on GitHub's label-assignment UI.
 
 The controller first records an unedited bot opening receipt, bound to the
 repository, PR number, creation time and an approval boundary. A new unlabelled
-PR is initialized by its opened event. If a label event arrives first, or the
-PR predates this policy, initialization instead covers the current label and
+PR is initialized by its opened event. Scheduled sweeps also initialize open
+PRs without the automerge label, covering older PRs and missed opening events before review.
+If a label event arrives before initialization, initialization covers it and
 removes it. Apply the label once more after initialization. This one-time
 reapproval prevents webhook ordering from turning an initial label into an
-approval. Concurrent initialization receipts use their latest boundary; a
-late opening event cannot relax it. The boundary is checked again before merge.
+approval. The effective boundary includes the immutable bot receipt's creation
+time and the current PR update observed during initialization, so a label
+already added while initialization was pending cannot approve it. Same-second
+receipt and label timestamps require a later application. Concurrent receipts
+use their latest boundary; a late opening event cannot relax it. The boundary
+is checked again before merge.
+
+GitHub CLI may add labels through a separate request after creating a PR.
+Those labels are rejected if observed during initialization or timestamped no
+later than its receipt. An application strictly after completed initialization
+is an explicit opt-in observable to the controller; GitHub does not expose
+whether that later API request came from the original CLI command or a new
+manual action. The controller does not infer intent from the author's identity.
 
 The label workflow records a small, unedited github-actions bot comment containing the repository, PR, head SHA, target branch, label event ID and actor ID. A later workflow completion or scheduled sweep can use only that recorded approval. It cannot infer approval from a label that predates installation, a missed label delivery, an edited comment or ambiguous history. Remove and reapply the label if no approval was recorded. The delivered update timestamp must be zero or one second after the label timestamp, with exactly one label event in that interval and the same sender. Ambiguous same- or adjacent-second relabels require a fresh application.
 
