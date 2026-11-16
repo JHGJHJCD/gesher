@@ -226,11 +226,51 @@ static void test_backend_errors() {
     accounting = false;
   }
 }
+static void test_flags() {
+  // Preserve all existing flag translations, including V4MAPPED's legacy alias.
+  const struct { int guest; int host; } supported[] = {
+    {0x1, AI_PASSIVE}, {0x2, AI_CANONNAME}, {0x4, AI_NUMERICHOST},
+    {0x8, AI_NUMERICSERV}, {0x100, AI_ALL}, {0x200, AI_V4MAPPED},
+    {0x400, AI_ADDRCONFIG}, {0x800, AI_V4MAPPED}
+  };
+  for (int route = 0; route < 3; ++route) {
+    int accepted_mask = 0;
+    for (const auto& flag : supported) {
+      accepted_mask |= flag.guest;
+      reset(0);
+      addrinfo_contract_row hints{};
+      hints.flags = flag.guest;
+      addrinfo_contract_row* result = nullptr;
+      int rc = query(route, &hints, &result);
+      check("getaddrinfo: supported flag reaches backend with its host value",
+            rc == 0 && result != nullptr && backend_calls == 1 && had_hints &&
+            last_hints.ai_flags == flag.host);
+      release_guest(result);
+    }
+    for (unsigned bit = 0; bit < 32; ++bit) {
+      uint32_t flag = uint32_t{1} << bit;
+      if ((flag & static_cast<uint32_t>(accepted_mask)) != 0) continue;
+      reset(0);
+      addrinfo_contract_row hints{};
+      hints.flags = static_cast<int32_t>(flag | 0xc); // otherwise valid numeric flags
+      auto* result = reinterpret_cast<addrinfo_contract_row*>(uintptr_t{1});
+      errno = EDOM;
+      int rc = query(route, &hints, &result);
+      char label[128];
+      std::snprintf(label, sizeof(label), "getaddrinfo: route=%d unknown flag=0x%08x fails before lookup/allocation", route, flag);
+      check(label, rc == 3 && result == nullptr && errno == EDOM &&
+            backend_calls == 0 && backend_frees == 0 && allocation_calls == 0);
+      if (result != reinterpret_cast<addrinfo_contract_row*>(uintptr_t{1})) release_guest(result);
+    }
+    accounting = false;
+  }
+}
 int main(int argc, char** argv) {
   if (argc != 2) return 2;
   if (std::strcmp(argv[1], "public") == 0) test_addrinfo_contracts();
   else if (std::strcmp(argv[1], "allocation") == 0) test_allocations();
   else if (std::strcmp(argv[1], "backend_errors") == 0) test_backend_errors();
+  else if (std::strcmp(argv[1], "flags") == 0) test_flags();
   else return 2;
   return failures == 0 ? 0 : 1;
 }

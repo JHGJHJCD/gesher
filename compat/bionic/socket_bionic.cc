@@ -228,6 +228,7 @@ struct BionicAddrinfo {
 };
 
 // bionic (BSD) AI_* values -> gesher-base's (glibc's).
+constexpr int kBionicAiFlags = 0x1 | 0x2 | 0x4 | 0x8 | 0x100 | 0x200 | 0x400 | 0x800;
 int AiFlagsIn(int f) {
   int out = 0;
   if (f & 0x1) out |= AI_PASSIVE;
@@ -288,6 +289,10 @@ int GetaddrinfoOnInterface(const char* node, const char* service, const BionicAd
   *res = nullptr;
   addrinfo h{};
   if (hints != nullptr) {
+    // Translating only known bits would silently discard invalid guest flags
+    // before the host resolver can report EAI_BADFLAGS. Keep both historical
+    // V4MAPPED spellings accepted by AiFlagsIn.
+    if ((hints->ai_flags & ~kBionicAiFlags) != 0) return EaiOut(EAI_BADFLAGS);
     h.ai_flags = AiFlagsIn(hints->ai_flags);
     h.ai_family = hints->ai_family;
     h.ai_socktype = hints->ai_socktype;

@@ -47,6 +47,19 @@ static void test_addrinfo_contracts(void) {
   check("getaddrinfo: default-network wrapper retains numeric results", rc == 0 && addrinfo_contract_numeric_list(result));
   release(result);
   release(NULL);
+  const int32_t invalid_flags[] = {0x10, 0x20, 0x1000, 0x40000000, -1};
+  for (unsigned i = 0; i < sizeof(invalid_flags) / sizeof(invalid_flags[0]); ++i) {
+    hints.flags = 0x4 | 0x8 | invalid_flags[i];
+    result = (struct addrinfo_contract_row*)(uintptr_t)1;
+    rc = get("127.0.0.1", "80", &hints, &result);
+    check("getaddrinfo: unknown guest flags report EAI_BADFLAGS and null output", rc == 3 && result == NULL);
+    if (result != (struct addrinfo_contract_row*)(uintptr_t)1) release(result);
+    result = (struct addrinfo_contract_row*)(uintptr_t)1;
+    rc = network(0, "127.0.0.1", "80", &hints, &result);
+    check("getaddrinfo: network wrapper rejects unknown guest flags", rc == 3 && result == NULL);
+    if (result != (struct addrinfo_contract_row*)(uintptr_t)1) release(result);
+  }
+  hints.flags = 0x4 | 0x8;
   check("getaddrinfo: null result pointer is a reported error", get("127.0.0.1", "80", &hints, NULL) == 4);
   result = NULL;
   errno = 0;
