@@ -1,5 +1,7 @@
 # Runtime contracts added by the November 14 Android/Windows audit.
 # Track 50 supplies bounded RunTimed; track 94 supplies the framework boot path.
+. "$PSScriptRoot/../pthread-attribute-contracts.ps1"
+
 # Exercise synthetic Hebrew/English permission dialogs on a never-shown desktop.
 # This is the production dialog implementation, with denial/keyboard/scroll checks.
 $permissionDialogOut = RunTimed "$Dir/permission_dialog_test.exe" @() 60
@@ -33,7 +35,8 @@ try {
     Check "media: $aaudioGuest actual negotiation, callbacks and clock errors" {
       $global:LASTEXITCODE = $aaudioCode
       $aaudioOut
-    } @('AAudio builder guest contracts:', ' checks, 0 failures')
+    } @('AAudio builder guest contracts:', ' checks, 0 failures',
+        'AAudio lifecycle guest contracts: all passed')
   }
 } finally {
   if ($null -eq $aaudioSaved) { Remove-Item Env:GESHER_AUDIO -ErrorAction SilentlyContinue }

@@ -21,7 +21,7 @@ def main() -> None:
     for option in ("framework-classes", "core-classes", "app-classes", "java-home"):
         parser.add_argument("--" + option, required=True, type=Path)
     parser.add_argument("--source-ref")
-    parser.add_argument("--case", default="all", choices=["all", "basic", "identity", "timeouts", "teardown"])
+    parser.add_argument("--case", default="all", choices=["all", "basic", "identity", "timeouts", "teardown", "subscriptions", "pending", "pending-cancel", "freshness"])
     args = parser.parse_args()
     cc = shutil.which("cc")
     if not cc:
@@ -35,15 +35,19 @@ def main() -> None:
         subprocess.run([cc, "-std=c11", "-D_POSIX_C_SOURCE=200809L", "-shared", "-fPIC",
                         "-I" + str(args.java_home / "include"), "-I" + str(args.java_home / "include/linux"),
                         str(ROOT / "tests/connectivity-callback/framework_host.c"), "-o", str(native)], check=True)
-        relative = "app/java/android/net/ConnectivityManager.java"
-        source = ROOT / relative
-        if args.source_ref:
-            source = work / "ConnectivityManager.java"
-            source.write_bytes(subprocess.run(["git", "show", args.source_ref + ":" + relative],
-                                             cwd=ROOT, capture_output=True, check=True).stdout)
-        subprocess.run([str(args.java_home / "bin/javac"), "-encoding", "UTF-8", "-cp", classpath,
-                        "-d", str(classes), str(source),
+        sources = []
+        for relative in ("app/java/android/net/ConnectivityManager.java",
+                         "app/java/com/gesher/server/ConnectivityService.java"):
+            source = ROOT / relative
+            if args.source_ref:
+                source = work / source.name
+                source.write_bytes(subprocess.run(["git", "show", args.source_ref + ":" + relative],
+                                                 cwd=ROOT, capture_output=True, check=True).stdout)
+            sources.append(str(source))
+        subprocess.run([str(args.java_home / "bin/javac"), "-J-XX:-UsePerfData", "-encoding", "UTF-8", "-cp", classpath,
+                        "-d", str(classes), *sources,
                         str(ROOT / "tests/connectivity-callback/ConnectivityCallbackHost.java"),
+                        str(ROOT / "tests/connectivity-callback/ConnectivityServiceSnapshotHost.java"),
                         str(ROOT / "tests/dex-services/gesher/services/ConnectivityCallbackContractTest.java")], check=True)
         # Android NativeAllocationRegistry uses its Cleaner in jdk.unsupported.
         cleaner = work / "cleaner" / "sun" / "misc"; cleaner.mkdir(parents=True)

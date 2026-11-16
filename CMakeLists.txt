@@ -173,6 +173,11 @@ add_executable(elf_load_test tests/native/elf_load_test.cc)
 target_compile_options(elf_load_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(elf_load_test PRIVATE gesher_bionic gesher_elf)
 
+# Compare guest pthread metadata with independently observed Win32 target stacks.
+add_executable(pthread_attributes_target_test tests/native/pthread_attributes_target_test.cc)
+target_compile_options(pthread_attributes_target_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(pthread_attributes_target_test PRIVATE gesher_bionic gesher_elf)
+
 # ADR 0086: the stand-in libart.so as a packer's shell finds and hooks it
 # (tests/native/art_hook_test.so, built with the NDK by native-libs.yml).
 add_executable(art_shim_test tests/native/art_shim_test.cc)

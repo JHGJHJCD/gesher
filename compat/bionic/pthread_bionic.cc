@@ -19,6 +19,7 @@
 #include <atomic>
 #include <array>
 #include <climits>
+#include <condition_variable>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -124,19 +125,50 @@ void RunThreadExit() {
 constexpr uint32_t kAttrDetached = 1;  // bionic PTHREAD_ATTR_FLAG_DETACHED
 constexpr uint64_t kDefaultStack = 1024 * 1024;
 
+bionic_pthread_attr_t DefaultThreadAttributes() {
+  bionic_pthread_attr_t attr{};
+  attr.stack_size = kDefaultStack;
+  attr.guard_size = 4096;
+  return attr;
+}
+
+bionic_pthread_attr_t CurrentThreadAttributes() {
+  // Only the system-allocated stack interval is observed here. Guard and
+  // scheduling fields retain this adapter's compatibility defaults: Windows'
+  // moving guard page is not a separately allocated POSIX guard region, and
+  // custom stack/guard/scheduling requests are not implemented by CreateThread.
+  bionic_pthread_attr_t attr = DefaultThreadAttributes();
+  ULONG_PTR low = 0, high = 0;
+  GetCurrentThreadStackLimits(&low, &high);
+  attr.stack_base = reinterpret_cast<void*>(low);
+  attr.stack_size = high - low;
+  return attr;
+}
+
 struct ThreadRecord {
   HANDLE handle = nullptr;
   void* retval = nullptr;
   int32_t tid = 0;
   bool detached = false;
+  bionic_pthread_attr_t attributes{};
+  bool attributes_ready = false;
+  bionic_pthread_attr_t translated_attributes{};
+  bool translated_attributes_ready = false;
 };
 
 std::mutex g_threads_mutex;
+std::condition_variable g_thread_attributes_changed;
 std::unordered_map<bionic_pthread_t, ThreadRecord*> g_threads;
 // Host/ART-created threads can enter bionic without pthread_create. Keep
 // their self identities authoritative too; reclaim terminated objects on
 // subsequent identity/clock operations. No TID is reopened after exit.
-std::unordered_map<bionic_pthread_t, HANDLE> g_external_threads;
+struct ExternalThreadRecord {
+  HANDLE handle = nullptr;
+  bionic_pthread_attr_t attributes{};
+  bionic_pthread_attr_t translated_attributes{};
+  bool translated_attributes_ready = false;
+};
+std::unordered_map<bionic_pthread_t, ExternalThreadRecord> g_external_threads;
 std::atomic<bionic_pthread_t> g_next_id{1};
 
 thread_local bionic_pthread_t t_self = 0;
@@ -156,8 +188,9 @@ int64_t g_next_cpu_clock = -65536;
 
 void ReapCpuClocks() {
   for (auto it = g_external_threads.begin(); it != g_external_threads.end();) {
-    if (it->second != nullptr && WaitForSingleObject(it->second, 0) != WAIT_TIMEOUT) {
-      CloseHandle(it->second);
+    if (it->second.handle != nullptr &&
+        WaitForSingleObject(it->second.handle, 0) != WAIT_TIMEOUT) {
+      CloseHandle(it->second.handle);
       it = g_external_threads.erase(it);
     } else {
       ++it;
@@ -229,6 +262,15 @@ DWORD WINAPI ThreadTrampoline(void* raw) {
   delete static_cast<StartArg*>(raw);
   t_self = sa.id;
   t_record = sa.record;
+  {
+    // CreateThread can start before its creator has published the handle.
+    // The same registry lock makes that publication and this snapshot ordered.
+    // Publish before TLS initialization or any caller-supplied function runs.
+    std::lock_guard<std::mutex> lock(g_threads_mutex);
+    t_record->attributes = CurrentThreadAttributes();
+    t_record->attributes_ready = true;
+  }
+  g_thread_attributes_changed.notify_all();
   gesher::elf::SetupThreadTls();  // the thread's TLS block for loaded code
   void* ret = sa.start(sa.arg);
   FinishThread(ret);
@@ -245,9 +287,35 @@ bionic_pthread_t SelfId() {
                     THREAD_QUERY_LIMITED_INFORMATION | THREAD_SET_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, 0);
     // A null entry records resource exhaustion without confusing this valid
     // pthread identity with an unknown one. Acquisition then returns EAGAIN.
-    g_external_threads.emplace(t_self, retained);
+    g_external_threads.emplace(t_self,
+                               ExternalThreadRecord{retained, CurrentThreadAttributes()});
   }
   return t_self;
+}
+
+int ThreadAttributes(bionic_pthread_t thread, bionic_pthread_attr_t* attr, bool translated) {
+  if (attr == nullptr) return kEINVAL;
+  std::unique_lock<std::mutex> lock(g_threads_mutex);
+  ReapCpuClocks();
+  for (;;) {
+    auto found = g_threads.find(thread);
+    if (found == g_threads.end()) break;
+    ThreadRecord* record = found->second;
+    if (!record->attributes_ready) {
+      g_thread_attributes_changed.wait(lock);
+      continue;
+    }
+    if (translated && !record->translated_attributes_ready) return kEAGAIN;
+    *attr = translated ? record->translated_attributes : record->attributes;
+    if (record->detached) attr->flags |= kAttrDetached;
+    return 0;
+  }
+  auto external = g_external_threads.find(thread);
+  if (external == g_external_threads.end()) return kESRCH;
+  if (external->second.handle == nullptr && thread != t_self) return kEAGAIN;
+  if (translated && !external->second.translated_attributes_ready) return kEAGAIN;
+  *attr = translated ? external->second.translated_attributes : external->second.attributes;
+  return 0;
 }
 
 // --- mutex -----------------------------------------------------------------
@@ -351,17 +419,17 @@ extern "C" {
 // Threads.
 
 int BIONIC_SYSV gesher_bionic_pthread_attr_init(bionic_pthread_attr_t* attr) {
-  std::memset(attr, 0, sizeof(*attr));
-  attr->stack_size = kDefaultStack;
-  attr->guard_size = 4096;
+  *attr = DefaultThreadAttributes();
   return 0;
 }
 int BIONIC_SYSV gesher_bionic_pthread_attr_destroy(bionic_pthread_attr_t*) { return 0; }
 int BIONIC_SYSV gesher_bionic_pthread_attr_setdetachstate(bionic_pthread_attr_t* attr, int s) {
-  if (s) {
+  if (s == 1) {
     attr->flags |= kAttrDetached;
-  } else {
+  } else if (s == 0) {
     attr->flags &= ~kAttrDetached;
+  } else {
+    return kEINVAL;
   }
   return 0;
 }
@@ -405,7 +473,10 @@ int BIONIC_SYSV gesher_bionic_pthread_attr_getschedparam(const bionic_pthread_at
   *param = attr->sched_priority;
   return 0;
 }
-int BIONIC_SYSV gesher_bionic_pthread_attr_setscope(bionic_pthread_attr_t*, int) { return 0; }
+int BIONIC_SYSV gesher_bionic_pthread_attr_setscope(bionic_pthread_attr_t*, int scope) {
+  if (scope == 0) return 0;  // PTHREAD_SCOPE_SYSTEM
+  return scope == 1 ? kEOPNOTSUPP : kEINVAL;  // PTHREAD_SCOPE_PROCESS
+}
 int BIONIC_SYSV gesher_bionic_pthread_attr_getstack(const bionic_pthread_attr_t* attr,
                                                    void** base, uint64_t* size) {
   *base = attr->stack_base;
@@ -413,14 +484,44 @@ int BIONIC_SYSV gesher_bionic_pthread_attr_getstack(const bionic_pthread_attr_t*
   return 0;
 }
 
-// The calling thread's stack, for pthread_getattr_np(pthread_self()).
-int BIONIC_SYSV gesher_bionic_pthread_getattr_np(bionic_pthread_t, bionic_pthread_attr_t* attr) {
-  gesher_bionic_pthread_attr_init(attr);
-  ULONG_PTR low = 0, high = 0;
-  GetCurrentThreadStackLimits(&low, &high);
-  attr->stack_base = reinterpret_cast<void*>(low);
-  attr->stack_size = high - low;
+// Snapshots belong to retained pthread identities, not the querying thread or
+// a reopened Windows TID. A newly created target may not have run yet; wait for
+// its publication without retaining a record pointer across the unlocked wait.
+int BIONIC_SYSV gesher_bionic_pthread_getattr_np(bionic_pthread_t thread,
+                                                bionic_pthread_attr_t* attr) {
+  return ThreadAttributes(thread, attr, false);
+}
+
+// A translated stack has a different allocation from its native callback
+// stack. Publish values by retained pthread identity, never an Env pointer or
+// a reopened Windows TID, so a pooled Env cannot revive a retired pthread ID.
+int BIONIC_SYSV gesher_bionic___gesher_arm64_set_thread_stack(
+    void* base, uint64_t size, uint64_t guard) {
+  if (base == nullptr || size == 0 || guard >= size ||
+      size > UINTPTR_MAX - reinterpret_cast<uintptr_t>(base)) return kEINVAL;
+  bionic_pthread_t id = SelfId();
+  std::lock_guard<std::mutex> lock(g_threads_mutex);
+  bionic_pthread_attr_t* attr = nullptr;
+  bool* ready = nullptr;
+  if (auto found = g_threads.find(id); found != g_threads.end()) {
+    attr = &found->second->translated_attributes;
+    ready = &found->second->translated_attributes_ready;
+  } else if (auto external = g_external_threads.find(id); external != g_external_threads.end()) {
+    attr = &external->second.translated_attributes;
+    ready = &external->second.translated_attributes_ready;
+  } else {
+    return kESRCH;
+  }
+  *attr = DefaultThreadAttributes();
+  attr->stack_base = base;
+  attr->stack_size = size;
+  attr->guard_size = guard;
+  *ready = true;
   return 0;
+}
+int BIONIC_SYSV gesher_bionic___gesher_arm64_pthread_getattr_np(
+    bionic_pthread_t thread, bionic_pthread_attr_t* attr) {
+  return ThreadAttributes(thread, attr, true);
 }
 
 int BIONIC_SYSV gesher_bionic_pthread_create(bionic_pthread_t* thread,
@@ -858,7 +959,7 @@ HANDLE NameTarget(uint64_t thread, uint64_t self) {
     auto found = g_threads.find(thread);
     if (found != g_threads.end()) target = found->second->handle;
     auto external = g_external_threads.find(thread);
-    if (external != g_external_threads.end()) target = external->second;
+    if (external != g_external_threads.end()) target = external->second.handle;
   }
   if (!target || GetProcessIdOfThread(target) != GetCurrentProcessId() ||
       WaitForSingleObject(target, 0) != WAIT_TIMEOUT) return nullptr;
@@ -918,7 +1019,7 @@ int PthreadCpuClock(uint64_t thread, int* clock_id) {
     if (found != g_threads.end()) target = found->second->handle;
     auto external = g_external_threads.find(thread);
     if (external != g_external_threads.end()) {
-      target = external->second;
+      target = external->second.handle;
       if (target == nullptr) return kEAGAIN;
     }
   }
@@ -975,6 +1076,8 @@ void RegisterPthread(SymbolTable& t) {
   P(pthread_attr_setscope);
   P(pthread_attr_getstack);
   P(pthread_getattr_np);
+  P(__gesher_arm64_set_thread_stack);
+  P(__gesher_arm64_pthread_getattr_np);
   P(pthread_create);
   P(pthread_join);
   P(pthread_detach);

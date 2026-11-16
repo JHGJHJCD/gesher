@@ -195,6 +195,10 @@ public final class ConnectivityService extends IConnectivity.Stub {
     }
 
     private synchronized String snapshot() {
+        // Queries alone do not start the watcher. Do not cache their first answer
+        // forever, or an app polling after a reconnect will keep seeing startup
+        // state. Once subscribed, the watcher owns the shared snapshot instead.
+        if (mWatcher == null) return WindowsNetworks.snapshot();
         if (mSnapshot == null) mSnapshot = WindowsNetworks.snapshot();
         return mSnapshot;
     }

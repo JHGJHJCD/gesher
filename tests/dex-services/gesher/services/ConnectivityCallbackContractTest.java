@@ -1,11 +1,22 @@
 /* Copyright (C) 2026 The Gesher Authors; SPDX-License-Identifier: Apache-2.0 */
 package gesher.services;
 
+import android.app.ActivityManager;
+import android.app.ActivityThread;
+import android.app.IActivityManager;
+import android.app.IApplicationThread;
+import android.app.PendingIntent;
+import android.content.ContentResolver;
+import android.content.ContextWrapper;
+import android.content.IIntentReceiver;
+import android.content.IIntentSender;
+import android.content.Intent;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.NetworkRequest;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.RemoteException;
@@ -112,14 +123,21 @@ public final class ConnectivityCallbackContractTest {
         String snapshot = EMPTY;
         int adds, removes, snapshots;
         boolean rejectSnapshot, failRemoval;
+        boolean failAfterAdd;
+        Runnable beforeAdd, duringSnapshot;
         volatile Removal beforeRemoval;
         @Override public synchronized String getSnapshot() {
             snapshots++;
             if (rejectSnapshot) throw new SecurityException("controlled permission denial");
-            return snapshot;
+            String answer = snapshot;
+            Runnable action = duringSnapshot;
+            if (action != null) action.run();
+            return answer;
         }
-        @Override public synchronized void addListener(IConnectivity.IListener listener) {
+        @Override public synchronized void addListener(IConnectivity.IListener listener) throws RemoteException {
+            if (beforeAdd != null) beforeAdd.run();
             adds++; listeners.add(listener);
+            if (failAfterAdd) throw new RemoteException("controlled partial attachment");
         }
         @Override public void removeListener(IConnectivity.IListener listener) throws RemoteException {
             Removal before = beforeRemoval;
@@ -141,15 +159,20 @@ public final class ConnectivityCallbackContractTest {
         }
     }
     private static final class Harness implements AutoCloseable {
-        final ConnectivityManager manager = new ConnectivityManager(null);
+        final ConnectivityManager manager = new ConnectivityManager(new ContextWrapper(null) {
+            @Override public ContentResolver getContentResolver() { return null; }
+        });
         final ControlledHandler handler = ControlledHandler.create();
         final Object lock = value("sLock");
         final Service service = new Service();
         final Object previousService = value("sService"), previousHandler = value("sConnectivityHandler");
         @SuppressWarnings("unchecked") final Map<ConnectivityManager.NetworkCallback, ?> registrations =
                 (Map<ConnectivityManager.NetworkCallback, ?>)value("sCallbacks");
+        @SuppressWarnings("unchecked") final Map<PendingIntent, ConnectivityManager.NetworkCallback> pending =
+                (Map<PendingIntent, ConnectivityManager.NetworkCallback>)value("sIntentCallbacks");
         Harness(boolean parcel) throws Exception {
-            check(registrations.isEmpty() && value("sListener") == null, "fixture starts without existing registrations");
+            check(registrations.isEmpty() && pending.isEmpty() && value("sListener") == null,
+                    "fixture starts without existing registrations");
             IConnectivity connection = service;
             if (parcel) {
                 IBinder remote = (IBinder)Proxy.newProxyInstance(IBinder.class.getClassLoader(), new Class<?>[]{IBinder.class},
@@ -169,6 +192,9 @@ public final class ConnectivityCallbackContractTest {
         }
         @Override public void close() throws Exception {
             service.beforeRemoval = null; service.failRemoval = false;
+            for (PendingIntent operation : new ArrayList<>(pending.keySet())) {
+                manager.releaseNetworkRequest(operation);
+            }
             List<ConnectivityManager.NetworkCallback> copy;
             synchronized (lock) { copy = new ArrayList<>(registrations.keySet()); }
             for (ConnectivityManager.NetworkCallback callback : copy) manager.unregisterNetworkCallback(callback);
@@ -184,16 +210,240 @@ public final class ConnectivityCallbackContractTest {
             h.service.rejectSnapshot = true;
             rejects(SecurityException.class, () -> h.register(never), "permission denied registration");
             rejects(IllegalArgumentException.class, () -> h.manager.unregisterNetworkCallback(never), "failed registration is still never registered");
+            check(h.count() == 0 && h.service.count() == 0 && value("sListener") == null,
+                    "failed initialization releases its partial service listener");
             h.service.rejectSnapshot = false;
+            int addsBefore = h.service.adds, removesBefore = h.service.removes;
             h.register(never); h.handler.immediate();
             check(h.count() == 1 && h.service.count() == 1 && never.available == 0, "successful registration");
             h.manager.unregisterNetworkCallback(never);
             h.manager.unregisterNetworkCallback(never);
-            check(h.count() == 0 && h.service.removes == 1 && h.service.count() == 0, "repeated unregister is a no-op");
+            check(h.count() == 0 && h.service.removes == removesBefore + 1 && h.service.count() == 0, "repeated unregister is a no-op");
             h.register(never); h.manager.unregisterNetworkCallback(never);
-            check(h.service.adds == 2 && h.service.removes == 2, "same callback can be reused immediately");
+            check(h.service.adds == addsBefore + 2 && h.service.removes == removesBefore + 2, "same callback can be reused immediately");
         }
     }
+    private static void subscriptions(boolean parcel) throws Exception {
+        try (Harness h = new Harness(parcel)) {
+            // Advance between the old pre-subscription read and attachment. A
+            // listener is not entitled to receive that earlier event.
+            h.service.beforeAdd = () -> h.service.snapshot = ONLINE;
+            Callback callback = new Callback(); h.register(callback); h.handler.immediate();
+            check(callback.available == 1 && h.manager.getActiveNetwork() != null,
+                    "registration observes a change before listener attachment without another event");
+            h.manager.unregisterNetworkCallback(callback);
+        }
+        try (Harness h = new Harness(parcel)) {
+            // A same-process Binder can publish during getSnapshot while that
+            // call still returns its previously captured value.
+            h.service.duringSnapshot = () -> {
+                h.service.duringSnapshot = null;
+                try { h.service.emit(ONLINE); }
+                catch (RemoteException failure) { throw new AssertionError(failure); }
+            };
+            Callback callback = new Callback(); h.register(callback); h.handler.immediate();
+            check(callback.available == 1 && h.manager.getActiveNetwork() != null,
+                    "reentrant newer publication wins over the captured initial answer");
+        }
+        try (Harness h = new Harness(parcel)) {
+            Callback callback = new Callback(); h.service.failAfterAdd = true;
+            h.service.beforeRemoval = listener -> check(!Thread.holdsLock(h.lock),
+                    "failed-attachment cleanup is outside the registration lock");
+            rejects(RuntimeException.class, () -> h.register(callback), "partial remote attachment failure");
+            check(h.count() == 0 && h.service.count() == 0 && value("sListener") == null,
+                    "partial attachment failure leaves neither a callback nor listener");
+            h.service.failAfterAdd = false;
+            h.register(callback); h.service.emit(ONLINE); h.handler.immediate();
+            check(callback.available == 1 && h.count() == 1 && h.service.count() == 1,
+                    "a failed attachment does not poison retry");
+        }
+        try (Harness h = new Harness(parcel)) {
+            h.service.snapshot = ONLINE;
+            h.service.duringSnapshot = () -> {
+                h.service.duringSnapshot = null;
+                try { h.service.emit(EMPTY); }
+                catch (RemoteException failure) { throw new AssertionError(failure); }
+            };
+            Callback callback = new Callback(); h.register(callback); h.handler.immediate();
+            check(callback.available == 0 && h.manager.getActiveNetwork() == null,
+                    "reentrant disconnect cannot be overwritten by an older online answer");
+        }
+        try (Harness h = new Harness(parcel)) {
+            Callback callback = new Callback(); h.service.failAfterAdd = true;
+            CountDownLatch removing = new CountDownLatch(1), permitRemoval = new CountDownLatch(1);
+            CountDownLatch registered = new CountDownLatch(1);
+            AtomicReference<IConnectivity.IListener> retired = new AtomicReference<>();
+            AtomicReference<Throwable> firstFailure = new AtomicReference<>(), retryFailure = new AtomicReference<>();
+            h.service.beforeRemoval = listener -> {
+                if (!retired.compareAndSet(null, listener)) return;
+                removing.countDown(); await(permitRemoval, "failed listener cleanup unblocked");
+            };
+            Thread first = new Thread(() -> {
+                try { h.register(callback); }
+                catch (Throwable failure) { firstFailure.set(failure); }
+            }, "connectivity-failed-attach");
+            Thread retry = new Thread(() -> {
+                try { h.register(callback); registered.countDown(); }
+                catch (Throwable failure) { retryFailure.set(failure); }
+            }, "connectivity-attach-retry");
+            boolean concurrent;
+            first.start();
+            try {
+                await(removing, "failed attachment reaches listener cleanup");
+                h.service.failAfterAdd = false;
+                retry.start(); concurrent = registered.await(2, TimeUnit.SECONDS);
+            } finally {
+                permitRemoval.countDown(); first.join(5000); retry.join(5000);
+                h.service.beforeRemoval = null;
+            }
+            check(!first.isAlive() && !retry.isAlive() && firstFailure.get() instanceof RuntimeException
+                            && retryFailure.get() == null,
+                    "failed attachment and retry finish independently");
+            check(concurrent && h.count() == 1 && h.service.count() == 1
+                            && h.service.first().asBinder() != retired.get().asBinder(),
+                    "failed attachment cleanup neither blocks nor detaches its replacement");
+            retired.get().onSnapshot(ONLINE); h.handler.immediate();
+            check(callback.available == 0 && h.manager.getActiveNetwork() == null,
+                    "failed old listener cannot publish into a successful retry");
+            h.service.emit(ONLINE); h.handler.immediate();
+            check(callback.available == 1, "retry listener receives subsequent network changes");
+        }
+    }
+
+    /** Actual PendingIntent.send with its declared ActivityManager IPC boundary controlled. */
+    private static final class PendingRuntime extends IActivityManager.Default implements AutoCloseable {
+        final Object singleton;
+        final Field instance, current;
+        final Object previousManager, previousThread;
+        final Harness harness;
+        int sends;
+        boolean cancelNext;
+        Runnable sending;
+        Intent last;
+        PendingRuntime(Harness harness) throws Exception {
+            this.harness = harness;
+            Field manager = ActivityManager.class.getDeclaredField("IActivityManagerSingleton");
+            manager.setAccessible(true); singleton = manager.get(null);
+            instance = android.util.Singleton.class.getDeclaredField("mInstance"); instance.setAccessible(true);
+            previousManager = instance.get(singleton);
+            current = ActivityThread.class.getDeclaredField("sCurrentActivityThread"); current.setAccessible(true);
+            previousThread = current.get(null);
+            current.set(null, UNSAFE.allocateInstance(ActivityThread.class));
+            instance.set(singleton, this);
+        }
+        @Override public ActivityManager.PendingIntentInfo getInfoForIntentSender(IIntentSender target) {
+            return new ActivityManager.PendingIntentInfo("gesher.connectivity.fixture", 1000, false,
+                    ActivityManager.INTENT_SENDER_BROADCAST);
+        }
+        @Override public int sendIntentSender(IApplicationThread caller, IIntentSender target,
+                IBinder allowlist, int code, Intent intent, String type, IIntentReceiver finished,
+                String permission, Bundle options) {
+            check(!Thread.holdsLock(harness.lock), "PendingIntent dispatch is outside the registration lock");
+            sends++; last = new Intent(intent);
+            boolean canceled = cancelNext; cancelNext = false;
+            Runnable action = sending; sending = null;
+            if (action != null) action.run();
+            return canceled ? ActivityManager.START_CANCELED : 0;
+        }
+        PendingIntent token() {
+            return new PendingIntent(new IIntentSender.Stub() {
+                @Override public void send(int code, Intent intent, String type, IBinder allowlist,
+                        IIntentReceiver finished, String permission, Bundle options) {
+                    throw new AssertionError("The public API must go through ActivityManager");
+                }
+            });
+        }
+        @Override public void close() throws Exception {
+            current.set(null, previousThread); instance.set(singleton, previousManager);
+        }
+    }
+
+    private static void pending(boolean parcel, boolean cancellationOnly) throws Exception {
+        if (!cancellationOnly) try (Harness h = new Harness(parcel); PendingRuntime runtime = new PendingRuntime(h)) {
+            PendingIntent operation = runtime.token();
+            h.manager.registerNetworkCallback(request(), operation);
+            // Interleave a second replacement in the old split release/register
+            // sequence's unlocked service-removal window. That sequence orphans it.
+            AtomicInteger interleaved = new AtomicInteger();
+            h.service.beforeRemoval = listener -> {
+                if (interleaved.getAndIncrement() != 0) return;
+                AtomicReference<Throwable> failure = new AtomicReference<>();
+                Thread peer = new Thread(() -> {
+                    try { h.manager.requestNetwork(request(), operation); }
+                    catch (Throwable error) { failure.set(error); }
+                }, "pending-network-replacement");
+                peer.start();
+                try { peer.join(5000); }
+                catch (InterruptedException failureToWait) { throw new AssertionError(failureToWait); }
+                check(!peer.isAlive() && failure.get() == null, "replacement during retired listener cleanup");
+            };
+            h.manager.registerNetworkCallback(request(), operation);
+            h.service.beforeRemoval = null;
+            if (interleaved.get() == 0) h.manager.requestNetwork(request(), operation);
+            check(h.count() == 1 && h.pending.size() == 1 && h.service.count() == 1,
+                    "same-token replacements retain exactly one owned callback");
+            h.service.emit(ONLINE); h.handler.immediate();
+            check(runtime.sends == 1, "only the surviving PendingIntent registration delivers");
+            check(runtime.last.getParcelableExtra(ConnectivityManager.EXTRA_NETWORK, Network.class) != null
+                    && runtime.last.getParcelableExtra(ConnectivityManager.EXTRA_NETWORK_REQUEST, NetworkRequest.class) != null,
+                    "PendingIntent retains its public network and request extras");
+            h.manager.releaseNetworkRequest(operation); h.manager.unregisterNetworkCallback(operation);
+            check(h.count() == 0 && h.pending.isEmpty() && h.service.count() == 0,
+                    "release retires the token and its callback exactly once");
+        }
+        try (Harness h = new Harness(parcel); PendingRuntime runtime = new PendingRuntime(h)) {
+            PendingIntent operation = runtime.token(); h.service.snapshot = ONLINE;
+            h.manager.requestNetwork(request(), operation);
+            runtime.cancelNext = true;
+            runtime.sending = () -> h.manager.registerNetworkCallback(request(), operation);
+            h.handler.immediate();
+            check(runtime.sends == 2 && h.count() == 1 && h.pending.size() == 1,
+                    "a canceled in-flight old send cannot retire its replacement");
+            runtime.cancelNext = true;
+            h.service.emit(EMPTY); h.handler.immediate();
+            h.service.emit(ONLINE); h.handler.immediate();
+            check(h.count() == 0 && h.pending.isEmpty() && h.service.count() == 0,
+                    "cancellation of the current token does retire its own registration");
+        }
+        if (!cancellationOnly) try (Harness h = new Harness(parcel); PendingRuntime runtime = new PendingRuntime(h)) {
+            PendingIntent operation = runtime.token(); h.manager.requestNetwork(request(), operation);
+            CountDownLatch start = new CountDownLatch(1);
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            Runnable replace = () -> {
+                try { await(start, "concurrent replacements released"); h.manager.requestNetwork(request(), operation); }
+                catch (Throwable error) { failure.set(error); }
+            };
+            Thread first = new Thread(replace, "pending-replace-a"), second = new Thread(replace, "pending-replace-b");
+            first.start(); second.start(); start.countDown(); first.join(5000); second.join(5000);
+            check(!first.isAlive() && !second.isAlive() && failure.get() == null, "concurrent replacements complete");
+            check(h.count() == 1 && h.pending.size() == 1 && h.service.count() == 1,
+                    "concurrent same-token registration has one owner");
+            h.service.emit(ONLINE); h.handler.immediate();
+            check(runtime.sends == 1, "concurrent replacement has one delivery");
+        }
+        if (!cancellationOnly) try (Harness h = new Harness(parcel); PendingRuntime runtime = new PendingRuntime(h)) {
+            PendingIntent original = runtime.token();
+            PendingIntent alias = new PendingIntent(original.getTarget());
+            PendingIntent peer = runtime.token();
+            check(original != alias && original.equals(alias),
+                    "distinct PendingIntent wrappers refer to the same binder token");
+            h.manager.requestNetwork(request(), original);
+            h.manager.registerNetworkCallback(request(), alias);
+            h.manager.requestNetwork(request(), peer);
+            check(h.count() == 2 && h.pending.size() == 2 && h.service.adds == 1,
+                    "equal-token replacement keeps a separate token and the shared listener");
+            h.manager.releaseNetworkRequest(original);
+            check(h.count() == 1 && h.pending.size() == 1 && h.pending.containsKey(peer)
+                            && h.service.count() == 1,
+                    "release through an equivalent wrapper preserves a distinct token");
+            h.service.emit(ONLINE); h.handler.immediate();
+            check(runtime.sends == 1, "only the independent token delivers after alias release");
+            h.manager.unregisterNetworkCallback(new PendingIntent(peer.getTarget()));
+            check(h.count() == 0 && h.pending.isEmpty() && h.service.count() == 0,
+                    "equivalent wrapper releases the last token and listener");
+        }
+    }
+
     private static void identity(boolean parcel) throws Exception {
         try (Harness h = new Harness(parcel)) {
             Callback first = new EqualCallback(), second = new EqualCallback();
@@ -292,6 +542,10 @@ public final class ConnectivityCallbackContractTest {
         if (selected.equals("all") || selected.equals("identity")) identity(parcel);
         if (selected.equals("all") || selected.equals("timeouts")) timeouts(parcel);
         if (selected.equals("all") || selected.equals("teardown")) teardown(parcel);
+        if (selected.equals("all") || selected.equals("subscriptions")) subscriptions(parcel);
+        if (selected.equals("all") || selected.equals("pending") || selected.equals("pending-cancel")) {
+            pending(parcel, selected.equals("pending-cancel"));
+        }
         if (parcel) liveHandler();
         System.out.println("ConnectivityCallbackContractTest all passed: " + checks.get() + ", parcel=" + parcel);
     }

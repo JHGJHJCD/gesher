@@ -149,6 +149,7 @@ public class ConnectivityManager {
     /** Receives the service's snapshots while callbacks are registered. */
     private static final class Listener extends IConnectivity.IListener.Stub {
         final IConnectivity service;
+        long generation; // Guarded by sLock, including local Binder reentry.
 
         Listener(IConnectivity service) {
             this.service = service;
@@ -160,6 +161,7 @@ public class ConnectivityManager {
             List<CallbackRecord> records;
             synchronized (sLock) {
                 if (sListener != this) return;
+                generation++;
                 sCurrent = s;
                 records = new ArrayList<>(sCallbacks.values());
             }
@@ -452,7 +454,6 @@ public class ConnectivityManager {
     private void intentCallback(NetworkRequest request, PendingIntent operation, Kind kind) {
         if (request == null) throw new IllegalArgumentException("null NetworkRequest");
         if (operation == null) throw new NullPointerException("PendingIntent cannot be null.");
-        releaseNetworkRequest(operation);
         final Context context = mContext;
         NetworkCallback cb = new NetworkCallback() {
             @Override
@@ -463,14 +464,13 @@ public class ConnectivityManager {
                 try {
                     operation.send(context, 0, fill);
                 } catch (PendingIntent.CanceledException e) {
-                    releaseNetworkRequest(operation);
+                    // A send admitted before replacement must not cancel the
+                    // replacement when its own PendingIntent later fails.
+                    releaseNetworkRequest(operation, this);
                 }
             }
         };
-        register(request, cb, null, kind, 0);
-        synchronized (sLock) {
-            sIntentCallbacks.put(operation, cb);
-        }
+        register(request, cb, null, kind, 0, operation);
     }
 
     /**
@@ -542,17 +542,22 @@ public class ConnectivityManager {
 
     public void releaseNetworkRequest(PendingIntent operation) {
         if (operation == null) throw new NullPointerException("PendingIntent cannot be null.");
-        NetworkCallback cb;
+        releaseNetworkRequest(operation, null);
+    }
+
+    /** Retire the token and its exact callback as one operation. */
+    private void releaseNetworkRequest(PendingIntent operation, NetworkCallback expected) {
+        Listener retiredListener = null;
         synchronized (sLock) {
-            cb = sIntentCallbacks.remove(operation);
-        }
-        if (cb != null) {
-            try {
-                unregisterNetworkCallback(cb);
-            } catch (IllegalArgumentException e) {
-                // already gone
+            NetworkCallback cb = sIntentCallbacks.get(operation);
+            if (cb == null || expected != null && cb != expected) return;
+            sIntentCallbacks.remove(operation);
+            CallbackRecord r = sCallbacks.get(cb);
+            if (r != null) {
+                retiredListener = retireLocked(r);
             }
         }
+        removeListener(retiredListener);
     }
 
     public void unregisterNetworkCallback(PendingIntent operation) {
@@ -598,6 +603,11 @@ public class ConnectivityManager {
 
     private void register(NetworkRequest request, NetworkCallback cb, Handler handler, Kind kind,
             int timeoutMs) {
+        register(request, cb, handler, kind, timeoutMs, null);
+    }
+
+    private void register(NetworkRequest request, NetworkCallback cb, Handler handler, Kind kind,
+            int timeoutMs, PendingIntent operation) {
         if (cb == null) throw new IllegalArgumentException("null NetworkCallback");
         if (kind != Kind.DEFAULT && request == null) {
             throw new IllegalArgumentException("null NetworkRequest");
@@ -606,26 +616,56 @@ public class ConnectivityManager {
         WindowsNetworks.Snapshot first;
         CallbackRecord r = new CallbackRecord(request, cb,
                 handler != null ? handler : connectivityHandler(), kind);
-        synchronized (sLock) {
-            if (sCallbacks.containsKey(cb)) {
-                throw new IllegalArgumentException("NetworkCallback was already registered");
-            }
-            if (service != null && sListener == null) {
-                Listener l = new Listener(service);
-                try {
-                    // Checks ACCESS_NETWORK_STATE: a SecurityException leaves nothing registered.
-                    sCurrent = WindowsNetworks.parse(service.getSnapshot());
-                    service.addListener(l);
-                } catch (RemoteException e) {
-                    sCurrent = null;
-                    throw e.rethrowFromSystemServer();
+        Listener failedListener = null;
+        try {
+            synchronized (sLock) {
+                if (sCallbacks.containsKey(cb)) {
+                    throw new IllegalArgumentException("NetworkCallback was already registered");
                 }
-                sListener = l;
+                if (service != null && sListener == null) {
+                    Listener l = new Listener(service);
+                    boolean initialized = false;
+                    try {
+                        // Subscribe before reading the initial state. A change
+                        // between a pre-subscription read and addListener would
+                        // otherwise be missed until the next network change.
+                        sListener = l;
+                        service.addListener(l);
+                        long generation = l.generation;
+                        WindowsNetworks.Snapshot initial =
+                                WindowsNetworks.parse(service.getSnapshot());
+                        // A local Binder can deliver a newer snapshot reentrantly
+                        // during getSnapshot. Do not overwrite that publication.
+                        if (l.generation == generation) sCurrent = initial;
+                        initialized = true;
+                    } finally {
+                        if (!initialized) {
+                            sListener = null;
+                            sCurrent = null;
+                            failedListener = l;
+                        }
+                    }
+                }
+                if (operation != null) {
+                    NetworkCallback previous = sIntentCallbacks.put(operation, cb);
+                    CallbackRecord old = sCallbacks.remove(previous);
+                    // Keep the shared listener while replacing the token. Its
+                    // queued callbacks will observe this exact record's retirement.
+                    if (old != null) old.active = false;
+                }
+                sCallbacks.put(cb, r);
+                cb.mWasRegistered = true;
+                first = sCurrent != null ? sCurrent : NO_NETWORK;
+                // The PendingIntent owner is already visible before delivery can
+                // cancel/release it, and concurrent replacements cannot orphan it.
+                r.post(first);
             }
-            sCallbacks.put(cb, r);
-            cb.mWasRegistered = true;
-            first = sCurrent != null ? sCurrent : NO_NETWORK;
-            r.post(first);  // before any later snapshot the listener posts
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        } finally {
+            // Failed partial service attachment must not leak a remote listener.
+            // Its removal may block/reenter and therefore stays outside sLock.
+            removeListener(failedListener);
         }
         if (timeoutMs > 0) {
             r.handler.postDelayed(() -> {

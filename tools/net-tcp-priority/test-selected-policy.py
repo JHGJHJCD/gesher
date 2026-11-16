@@ -60,7 +60,7 @@ FCNTL_REPLACEMENTS=(
   }
 '''),
 )
-# The reviewed TCP fixture change adds failure-only select diagnostics and two
+# The reviewed TCP fixture changes add select/thread diagnostics and two
 # final call-site labels. Derive the complete expected file from BASE using
 # only these unique literal replacements; no function region is excluded.
 # All assertion predicates, deadlines and other fixture bytes remain exact.
@@ -115,6 +115,24 @@ TCP_DIAGNOSTIC_REPLACEMENTS=(
   ready(a.receiver, false, 30, "delayed-consumed");
 '''),
 )
+TCP_OWNER_DIAGNOSTIC_REPLACEMENTS=(
+ (b'''namespace gesher::test { int NativeUdpErrorControl(bool blocking); void NativeSupplierRetirement(); void DumpOwnHandleTypes(int mode, uintptr_t caller = 0, uintptr_t observer = 0); }
+''',
+  b'''namespace gesher::test { int NativeUdpErrorControl(bool blocking); void NativeSupplierRetirement(); void DumpOwnHandleTypes(int mode, uintptr_t caller = 0, uintptr_t observer = 0); }
+namespace gesher::test { void ObserveOwnerThreads(int mode, bool failed); }
+'''),
+ (b'''    require(actual.handles == baseline.handles && actual.threads == baseline.threads, "repeated real ownership returns to warm handle and thread baseline");
+''',
+  b'''    gesher::test::ObserveOwnerThreads(mode, actual.handles != baseline.handles || actual.threads != baseline.threads);
+    require(actual.handles == baseline.handles && actual.threads == baseline.threads, "repeated real ownership returns to warm handle and thread baseline");
+'''),
+)
+# A separate HOST-only observer records bounded post-census TIDs. It queries
+# thread start modules only after a mismatch, then returns to the unchanged
+# assertion. Every production POSIX byte, supplier and deadline stays pinned.
+OWNER_THREAD_DIAGNOSTIC_PATH='tests/net-tcp-priority/owner_thread_diagnostics.h'
+OWNER_THREAD_DIAGNOSTIC_SHA256='83bdda8c98bc35761d5d2df001990ec155dcabda6a571d75b5057f1f25653f1b'
+OWNER_THREAD_DIAGNOSTIC_INCLUDE=b'#include "owner_thread_diagnostics.h"\n'
 # Only the successful protocol fixture's startup budget changed. Pin its exact
 # reviewed bytes separately; controller, worker and execution gates retain BASE.
 CONTROL_BASE='c62c0ea4f88447c64608851ecf661f630e259442'
@@ -132,6 +150,7 @@ RECEIPT_SOURCE_BLOCK=b'''  if ($null -ne $SourceIdentity) {
 '''
 def old(path):return subprocess.check_output(['git','-C',str(ROOT),'show',BASE+':'+path])
 def check():
+ assert hashlib.sha256((ROOT/OWNER_THREAD_DIAGNOSTIC_PATH).read_bytes()).hexdigest()==OWNER_THREAD_DIAGNOSTIC_SHA256,OWNER_THREAD_DIAGNOSTIC_PATH
  paths=subprocess.check_output(['git','-C',str(ROOT),'diff','1745e99d7f2849ba81784545e07d60cb2b7800c3^','1745e99d7f2849ba81784545e07d60cb2b7800c3','--name-only'],text=True).splitlines()
  paths+=['.github/workflows/net-tcp-coherent-component.yml','tests/net-tcp-priority/contract.cc','tests/net-tcp-priority/native_udp_control.cc','tests/native2/net_udp_trunc.cpp','tests/native2/net_udp_fault_observer.c','tools/net-tcp-priority/qualified/TsfJobSupervisor.cs','tools/windows4/TsfJobSupervisor.cs','tools/windows4/TsfJobWorker.cs','tools/windows4/test-tsf-job-supervisor.ps1','tools/ci/receipt-diagnostics.ps1','tools/net-tcp-priority/import-policy.json','tools/net-tcp-priority/import_policy.py','tools/net-tcp-priority/build-guests.py','tools/net-tcp-priority/prepare-ndk.py']
  for path in paths:
@@ -158,7 +177,14 @@ def check():
     assert expected.count(before)==actual.count(after)==1,path
     assert after not in expected and before not in actual,path
     expected=expected.replace(before,after,1)
+   for before,after in TCP_OWNER_DIAGNOSTIC_REPLACEMENTS:
+    assert expected.count(before)==actual.count(after)==1 and after not in expected,path
+    expected=expected.replace(before,after,1)
    assert actual==expected,path
+  elif path=='tests/net-tcp-priority/native_udp_control.cc':
+   anchor=b'#include "../../compat/posix/src/socket_internal.h"\n'
+   assert expected.count(anchor)==1 and actual.count(OWNER_THREAD_DIAGNOSTIC_INCLUDE)==1,path
+   assert actual.replace(OWNER_THREAD_DIAGNOSTIC_INCLUDE,b'',1)==expected,path
   elif path=='compat/posix/src/system.cc':
    for before,after in FCNTL_REPLACEMENTS:
     assert expected.count(before)==actual.count(after)==1,path
@@ -194,5 +220,5 @@ def check():
  assert pin['ordered_patch_sha256']=={'minimum-detached-retirement.patch':'ebc5aac990c6ec075431d0c25a9b74ecadc0940da1bdad9503f358d4fe3431ad','minimum-noattach-join.patch':'c4f47903af720542a584fa743932316d86c45683da70a4c8620d7a71d3eb7f96'}
  for name,digest in pin['ordered_patch_sha256'].items():assert hashlib.sha256((ROOT/'tools/host-pthread-authority'/name).read_bytes()).hexdigest()==digest
  for path in ['tools/net-tcp-priority/manifest.py','tools/host-pthread-authority/minimum_receipt.py']:ast.parse((ROOT/path).read_text(encoding='utf-8'))
- print('TCP_SELECTED_POLICY_PASS original_product3 reviewed_nested_epoll_fd reviewed_device_lookup_only reviewed_sendmsg_control reviewed_statvfs_affinity_file_allocation_writev_and_memfd_only reviewed_fcntl_argument_selection_only canonical_Recv originalworkflow original_fixture_assertions_deadlines=EXACT reviewed_select_diagnostics_only controller_execution_tail original_import_NDK_build_roles=EXACT new_two_supplier_DAG=BOUNDED source12_patch2_exact native_processes_started=0')
+ print('TCP_SELECTED_POLICY_PASS original_product3 reviewed_nested_epoll_fd reviewed_device_lookup_only reviewed_sendmsg_control reviewed_statvfs_affinity_file_allocation_writev_and_memfd_only reviewed_fcntl_argument_selection_only canonical_Recv originalworkflow original_fixture_assertions_deadlines=EXACT reviewed_select_and_owner_thread_diagnostics_only controller_execution_tail original_import_NDK_build_roles=EXACT new_two_supplier_DAG=BOUNDED source12_patch2_exact native_processes_started=0')
 if __name__=='__main__':check()
