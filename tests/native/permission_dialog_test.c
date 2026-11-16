@@ -1,6 +1,8 @@
 /* Copyright (C) 2026 The Gesher Authors. SPDX-License-Identifier: Apache-2.0 */
 /* Exercises only synthetic dialogs on a private desktop that is never shown. */
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <stdio.h>
 #include <wchar.h>
