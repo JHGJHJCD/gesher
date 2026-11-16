@@ -380,6 +380,7 @@ final class ActiveServices {
         ServiceRecord r;
         IntentBindRecord b;
         IBinder published = null;
+        boolean received;
         ConnectionRecord connectionRecord;
         synchronized (this) {
             if (!sender.acceptance.getAsBoolean() || target == null
@@ -395,7 +396,8 @@ final class ActiveServices {
             connectionRecord = c;
             b.connections.add(c);
             mConnections.computeIfAbsent(connection.asBinder(), k -> new ArrayList<>()).add(c);
-            if (b.received) published = b.binder;
+            received = b.received;
+            if (received) published = b.binder;
             // A new client: the idle reaper must not take this as an unused process.
             if (r.app != null) r.app.markActive(SystemClock.uptimeMillis());
         }
@@ -403,7 +405,9 @@ final class ActiveServices {
                 + Long.toHexString(flags) + ")");
         long identity = Binder.clearCallingIdentity();
         try {
-            if (published != null) {
+            // onBind may have completed with null. That is a published null binding,
+            // not a pending bind: every later client must receive onNullBinding too.
+            if (received) {
                 connected(connectionRecord, published);
             } else if ((flags & Context.BIND_AUTO_CREATE) != 0 || r.created) {
                 bringUp(r);

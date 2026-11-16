@@ -52,7 +52,7 @@ def generate(component: str, source_ref: str | None) -> str:
     else:
         source = read("compat/media/jni/soundpool_jni.cc")
         replacements = {
-            "@STREAM@": section(source, "struct Stream {", "class Pool {"),
+            "@STREAM@": section(source, "struct Stream {", "class Pool :" if "class Pool :" in source else "class Pool {"),
             "@AUTO_PAUSE@": section(source, "  void AutoPause(bool pause)", "  void Mute("),
             "@CONTROLS@": section(source, "void JNICALL SP_pause(", "void JNICALL SP_autoPause("),
         }

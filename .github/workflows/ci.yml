@@ -137,6 +137,7 @@ jobs:
           python3 tools/test_bionic_allocations.py --sanitize
           python3 tools/test_bionic_system_contracts.py --sanitize
           python3 tools/test_socket_control_contract.py --sanitize
+          python3 tools/test_socket_timeout_contracts.py --sanitize --linux-reference
           python3 tools/test_bionic_directory_contracts.py --sanitize
           python3 tools/test_bionic_semaphore_contracts.py --sanitize
           python3 tools/test_file_allocation_contracts.py --sanitize
@@ -256,6 +257,7 @@ jobs:
         run: |
           python3 tools/test_audio_buffer_contracts.py
           python3 tools/test_media_callback_contracts.py --java-home "$JAVA_HOME"
+          python3 tools/test_media_receiver_lifetimes.py
 
       - name: Android HttpEngine requests over real HTTP sockets
         run: python3 tools/test_http_engine.py --java-home "$JAVA_HOME"

@@ -25,6 +25,7 @@
 #include "../player/decoder.h"
 #include "jni_util.h"
 #include "media_jni.h"
+#include "receiver_lease.h"
 
 namespace gesher::media {
 namespace {
@@ -34,6 +35,7 @@ constexpr size_t kMaxSampleBytes = 64u << 20;  // 64 MB of PCM per sound
 
 jfieldID gContext;    // long mNativeContext
 jmethodID gPostEvent;  // void postEventFromNative(int, int, int, Object)
+std::mutex gContextLock;
 
 struct Sound {
   std::vector<uint8_t> pcm;
@@ -52,13 +54,13 @@ struct Stream {
   bool auto_paused = false;
 };
 
-class Pool {
+class Pool : public ReceiverState {
  public:
   Pool(JNIEnv* env, jobject thiz, int max_streams, int stream_type)
       : self_(std::make_shared<WeakRef>(env, thiz)),
         max_streams_(std::max(max_streams, 1)),
         stream_type_(stream_type) {
-    loader_ = std::thread([this] { LoadLoop(); });
+    if (!env->ExceptionCheck()) loader_ = std::thread([this] { LoadLoop(); });
   }
 
   ~Pool() {
@@ -67,7 +69,7 @@ class Pool {
       quit_ = true;
     }
     cv_.notify_all();
-    loader_.join();
+    if (loader_.joinable()) loader_.join();
     for (auto& s : streams_) s.track->Release();
   }
 
@@ -173,7 +175,15 @@ class Pool {
     for (auto& s : streams_) s.track->SetVolume(mute ? 0 : s.left, mute ? 0 : s.right);
   }
 
-  bool muted() const { return muted_; }
+  void SetVolume(int stream_id, float left, float right) {
+    std::lock_guard<std::mutex> lock(mu_);
+    for (auto& s : streams_) {
+      if (s.id != stream_id) continue;
+      s.left = left;
+      s.right = right;
+      s.track->SetVolume(muted_ ? 0 : left, muted_ ? 0 : right);
+    }
+  }
 
  private:
   struct Job {
@@ -243,26 +253,23 @@ class Pool {
   std::thread loader_;
 };
 
-Pool* GetPool(JNIEnv* env, jobject thiz) {
-  return reinterpret_cast<Pool*>(env->GetLongField(thiz, gContext));
+ReceiverLease<Pool> GetPool(JNIEnv* env, jobject thiz) {
+  return ReceiverLease<Pool>::Acquire(env, thiz, gContext, gContextLock);
 }
 
 jint JNICALL SP_setup(JNIEnv* env, jobject thiz, jint maxStreams, jobject attributes, jstring) {
   EnsureAppName(env);
-  auto* pool = new Pool(env, thiz, maxStreams, LegacyStreamType(env, attributes));
-  env->SetLongField(thiz, gContext, reinterpret_cast<jlong>(pool));
-  return 0;
+  return ReceiverLease<Pool>::Setup(env, thiz, gContext, gContextLock,
+                                   env, thiz, maxStreams, LegacyStreamType(env, attributes)) ? 0 : -1;
 }
 
 void JNICALL SP_release(JNIEnv* env, jobject thiz) {
-  Pool* pool = GetPool(env, thiz);
-  env->SetLongField(thiz, gContext, 0);
-  delete pool;
+  ReceiverLease<Pool>::Release(env, thiz, gContext, gContextLock);
 }
 
 jint JNICALL SP_load(JNIEnv* env, jobject thiz, jobject fileDescriptor, jlong offset, jlong length,
                      jint) {
-  Pool* pool = GetPool(env, thiz);
+  auto pool = GetPool(env, thiz);
   if (pool == nullptr || fileDescriptor == nullptr) return 0;
   jclass fdc = env->FindClass("java/io/FileDescriptor");
   jint fd = env->GetIntField(fileDescriptor, env->GetFieldID(fdc, "descriptor", "I"));
@@ -276,18 +283,18 @@ jint JNICALL SP_load(JNIEnv* env, jobject thiz, jobject fileDescriptor, jlong of
 }
 
 jboolean JNICALL SP_unload(JNIEnv* env, jobject thiz, jint id) {
-  Pool* pool = GetPool(env, thiz);
+  auto pool = GetPool(env, thiz);
   return pool != nullptr && pool->Unload(id) ? JNI_TRUE : JNI_FALSE;
 }
 
 jint JNICALL SP_play(JNIEnv* env, jobject thiz, jint sound, jfloat left, jfloat right, jint priority,
                      jint loop, jfloat rate, jint) {
-  Pool* pool = GetPool(env, thiz);
+  auto pool = GetPool(env, thiz);
   return pool != nullptr ? pool->Play(sound, left, right, priority, loop, rate) : 0;
 }
 
 void JNICALL SP_pause(JNIEnv* env, jobject thiz, jint id) {
-  if (Pool* pool = GetPool(env, thiz)) {
+  if (auto pool = GetPool(env, thiz)) {
     pool->With(id, [](Stream& s) {
       if (!s.paused) {
         s.track->Pause();
@@ -298,7 +305,7 @@ void JNICALL SP_pause(JNIEnv* env, jobject thiz, jint id) {
 }
 
 void JNICALL SP_resume(JNIEnv* env, jobject thiz, jint id) {
-  if (Pool* pool = GetPool(env, thiz)) {
+  if (auto pool = GetPool(env, thiz)) {
     pool->With(id, [](Stream& s) {
       if (s.paused) {
         s.track->Start();
@@ -310,37 +317,30 @@ void JNICALL SP_resume(JNIEnv* env, jobject thiz, jint id) {
 }
 
 void JNICALL SP_autoPause(JNIEnv* env, jobject thiz) {
-  if (Pool* pool = GetPool(env, thiz)) pool->AutoPause(true);
+  if (auto pool = GetPool(env, thiz)) pool->AutoPause(true);
 }
 void JNICALL SP_autoResume(JNIEnv* env, jobject thiz) {
-  if (Pool* pool = GetPool(env, thiz)) pool->AutoPause(false);
+  if (auto pool = GetPool(env, thiz)) pool->AutoPause(false);
 }
 
 void JNICALL SP_stop(JNIEnv* env, jobject thiz, jint id) {
-  if (Pool* pool = GetPool(env, thiz)) pool->Stop(id);
+  if (auto pool = GetPool(env, thiz)) pool->Stop(id);
 }
 
 void JNICALL SP_setVolume(JNIEnv* env, jobject thiz, jint id, jfloat left, jfloat right) {
-  if (Pool* pool = GetPool(env, thiz)) {
-    bool muted = pool->muted();
-    pool->With(id, [=](Stream& s) {
-      s.left = left;
-      s.right = right;
-      if (!muted) s.track->SetVolume(left, right);
-    });
-  }
+  if (auto pool = GetPool(env, thiz)) pool->SetVolume(id, left, right);
 }
 
 void JNICALL SP_mute(JNIEnv* env, jobject thiz, jboolean mute) {
-  if (Pool* pool = GetPool(env, thiz)) pool->Mute(mute);
+  if (auto pool = GetPool(env, thiz)) pool->Mute(mute);
 }
 
 void JNICALL SP_setPriority(JNIEnv* env, jobject thiz, jint id, jint priority) {
-  if (Pool* pool = GetPool(env, thiz)) pool->With(id, [=](Stream& s) { s.priority = priority; });
+  if (auto pool = GetPool(env, thiz)) pool->With(id, [=](Stream& s) { s.priority = priority; });
 }
 
 void JNICALL SP_setLoop(JNIEnv* env, jobject thiz, jint id, jint loop) {
-  if (Pool* pool = GetPool(env, thiz)) {
+  if (auto pool = GetPool(env, thiz)) {
     pool->With(id, [=](Stream& s) {
       s.track->SetLoop(0, static_cast<uint32_t>(s.track->static_frames()), loop);
     });
@@ -348,7 +348,7 @@ void JNICALL SP_setLoop(JNIEnv* env, jobject thiz, jint id, jint loop) {
 }
 
 void JNICALL SP_setRate(JNIEnv* env, jobject thiz, jint id, jfloat rate) {
-  if (Pool* pool = GetPool(env, thiz)) {
+  if (auto pool = GetPool(env, thiz)) {
     pool->With(id, [=](Stream& s) {
       s.track->SetSampleRate(
           static_cast<uint32_t>(s.track->params().sample_rate * std::clamp(rate, 0.5f, 2.0f)));

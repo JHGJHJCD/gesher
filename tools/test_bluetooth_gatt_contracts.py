@@ -74,7 +74,7 @@ def main() -> None:
  parser=argparse.ArgumentParser(description=__doc__)
  parser.add_argument('--java-home',type=Path,required=True)
  parser.add_argument('--source-ref')
- parser.add_argument('--case',choices=('all','cancel','closed-callback','notifications','stale-read'),default='all')
+ parser.add_argument('--case',choices=('all','cancel','closed-callback','notifications','stale-read','requested-mtu','mtu-event'),default='all')
  args=parser.parse_args()
  with tempfile.TemporaryDirectory(prefix='gesher-gatt-') as tmp:
   work=Path(tmp);sources=[]
@@ -90,7 +90,7 @@ def main() -> None:
   sources += [str(p) for p in sorted((ROOT/'tests/bluetooth/gatt-host').glob('*.java'))]
   classes=work/'classes';classes.mkdir()
   subprocess.run([str(args.java_home/'bin/javac'),'-J-XX:-UsePerfData','-encoding','UTF-8','-d',str(classes),*sources],check=True,timeout=60)
-  cases=('cancel','closed-callback','notifications','stale-read') if args.case=='all' else (args.case,)
+  cases=('cancel','closed-callback','notifications','stale-read','requested-mtu','mtu-event') if args.case=='all' else (args.case,)
   for case in cases:
    subprocess.run([str(args.java_home/'bin/java'),'-XX:-UsePerfData','-cp',str(classes),'android.bluetooth.BluetoothGattHostTest',case],check=True,timeout=30)
 

@@ -97,15 +97,24 @@ public final class ActivityClientController extends IActivityClientController.De
         // An already removed managed Activity is already finished. Keep the
         // standalone driver fallback below for tokens without a managed record.
         if (r != null && !mAtm.requireActivityOwner(r)) return true;
-        // Activity.FINISH_TASK_WITH_ACTIVITY (finishAndRemoveTask, closing the window):
-        // the activity and the rest of its task.
-        if (r != null && finishTask == 2) {
-            if (mAtm.finishFromApp(r, code, data)) mAtm.removeTask(r.taskId);
-            return true;
-        }
-        if (r != null) return mAtm.finishFromApp(r, code, data) || mAtm.isActivityRetired(r);
+        if (r != null) return mAtm.finishFromApp(r, code, data, finishTask)
+                || mAtm.isActivityRetired(r);
         com.gesher.app.window.WindowSession session = com.gesher.app.window.WindowSession.get();
         return session == null || session.finishLocalActivity(token);
+    }
+
+    @Override
+    public boolean finishActivityAffinity(IBinder token) {
+        ActivityTaskManagerService.ActivityRecord r = mAtm.forToken(token);
+        return r != null && mAtm.requireActivityOwner(r) && mAtm.finishAffinity(r);
+    }
+
+    @Override
+    public void finishSubActivity(IBinder token, String resultWho, int requestCode) {
+        ActivityTaskManagerService.ActivityRecord r = mAtm.forToken(token);
+        if (r != null && mAtm.requireActivityOwner(r)) {
+            mAtm.finishSubActivities(r, resultWho, requestCode);
+        }
     }
 
     @Override

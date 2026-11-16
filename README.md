@@ -41,6 +41,11 @@ reductions, frame-cache lifetime repairs, regression coverage and remaining work
 
 ## Compatibility
 
+The [November 16 runtime contract audit](docs/research/android-runtime-contracts-2026-11-16.md)
+maps all tracked paths, records SDK/service/JNI review queues, and repairs
+socket, DNS, activity, binding, media lifetime and Bluetooth contracts with
+independent QA, reproducible evidence and explicit remaining Windows gates.
+
 The [November 14 contract audit](docs/research/android-contract-audit-2026-11-14.md)
 maps every tracked path, refreshes the SDK and service/JNI review queues, and
 repairs pthread clocks, location completion, NSD values, media callbacks and
