@@ -452,6 +452,14 @@
       "en": "Failed to install {0}.",
       "he": "התקנת {0} נכשלה."
     },
+    "cp_action_failed": {
+      "en": "The operation failed (exit code {0}).",
+      "he": "הפעולה נכשלה (קוד יציאה {0})."
+    },
+    "cp_action_finish": {
+      "en": "Wait for the current operation to finish before closing.",
+      "he": "יש להמתין לסיום הפעולה הנוכחית לפני הסגירה."
+    },
     "cp_dialog_ok": {
       "en": "OK",
       "he": "אישור"

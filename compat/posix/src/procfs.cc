@@ -107,8 +107,22 @@ std::vector<DWORD> ThreadIds() {
 }
 
 bool IsOwnThread(unsigned long tid) {
-  std::vector<DWORD> tids = ThreadIds();
-  return std::find(tids.begin(), tids.end(), tid) != tids.end();
+  if (tid == GetCurrentThreadId()) return true;
+  // A targeted task lookup must not enumerate every thread on the machine.
+  // An exited thread can still have a handle and an owner, so also check its
+  // signalled state. Holding this handle prevents reuse during both queries.
+  HANDLE thread = OpenThread(THREAD_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, tid);
+  if (thread == nullptr) {
+    // A custom thread DACL may deny even limited queries. Keep the previous
+    // directory-visibility contract for that uncommon case.
+    if (GetLastError() != ERROR_ACCESS_DENIED) return false;
+    const auto tids = ThreadIds();
+    return std::binary_search(tids.begin(), tids.end(), tid);
+  }
+  bool own = GetProcessIdOfThread(thread) == GetCurrentProcessId() &&
+             WaitForSingleObject(thread, 0) == WAIT_TIMEOUT;
+  CloseHandle(thread);
+  return own;
 }
 
 // The executable's name without its extension, at most 15 bytes (Linux's

@@ -548,14 +548,19 @@ class Env final : public A64::UserCallbacks {
 
   // Going into the pool: the stack's contents are dead, so its pages are
   // decommitted (out of the working set and the commit charge; the no-access
-  // guard pages at its low end stay as they are). Unpark() commits them again
-  // for the next thread; false if the system cannot (the Env is then freed).
+  // guard pages at its low end stay as they are). Detach() has also removed
+  // this thread's TLS block from publication, and Attach() reconstructs its
+  // TCB/module images, so those dead pages can be decommitted too. Addresses
+  // and translated code remain intact. Unpark() recommits both allocations
+  // before Attach(); false if the system cannot (the Env is then freed).
   void Park() {
     VirtualFree(stack_base_ + kGuardSize, kStackSize - kGuardSize, MEM_DECOMMIT);
+    VirtualFree(tls_block_, kTlsBlockSize, MEM_DECOMMIT);
   }
   bool Unpark() {
     return VirtualAlloc(stack_base_ + kGuardSize, kStackSize - kGuardSize, MEM_COMMIT,
-                        PAGE_READWRITE) != nullptr;
+                        PAGE_READWRITE) != nullptr &&
+           VirtualAlloc(tls_block_, kTlsBlockSize, MEM_COMMIT, PAGE_READWRITE) != nullptr;
   }
 
   // One Jit per nesting depth: dynarmic's Run() is not reentrant, so a

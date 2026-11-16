@@ -123,11 +123,28 @@ final class InstallSessionMetadata {
         if ((old == null ? 0 : old.length) != compared.size()) return false;
         for (File file : compared) {
             File previous = new File(installed, file.getName());
-            if (!previous.isFile() || !Arrays.equals(Files.readAllBytes(file.toPath()),
-                    Files.readAllBytes(previous.toPath()))) return false;
+            if (!sameContents(file, previous)) return false;
         }
         return true;
     }
+
+    /** Dex metadata can be much larger than the heap; compare without retaining it. */
+    private static boolean sameContents(File file, File previous) throws IOException {
+        if (!previous.isFile() || file.length() != previous.length()) return false;
+        int capacity = (int) Math.min(64 * 1024, Math.max(1, file.length()));
+        byte[] left = new byte[capacity], right = new byte[capacity];
+        try (InputStream source = new FileInputStream(file);
+                InputStream installed = new FileInputStream(previous)) {
+            while (true) {
+                int count = source.readNBytes(left, 0, capacity);
+                int other = installed.readNBytes(right, 0, capacity);
+                if (count != other) return false;
+                if (count == 0) return true;
+                if (!Arrays.equals(left, 0, count, right, 0, count)) return false;
+            }
+        }
+    }
+
     void copyTo(File installed) throws IOException {
         for (File file : files) Files.copy(file.toPath(), new File(installed, file.getName()).toPath());
     }

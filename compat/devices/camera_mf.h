@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,7 +38,12 @@ class Capture {
   virtual HRESULT Read(uint8_t* nv12) = 0;
   int width = 0, height = 0;
   const char* via = "";  // how frames are read, for the logs
-  TraceStats jni_read_trace{"JNI read", {"validate", "allocate", "capture", "copy to Java"}};
+  // nativeRead keeps one scratch frame for this capture. Its mutex also keeps
+  // a second caller from changing bytes before the first has published them.
+  // Width/height are fixed after opening; destruction releases the scratch.
+  std::mutex jni_read_mutex;
+  std::vector<uint8_t> jni_read_buffer;
+  TraceStats jni_read_trace{"JNI read", {"validate", "prepare buffer", "capture", "copy to Java"}};
 };
 
 // Opens `id` at the offered size nearest to width x height.

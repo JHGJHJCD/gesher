@@ -19,6 +19,7 @@
 #include <cstring>
 
 #include "gesher_window.h"
+#include "layered_bitmap.h"
 #include "input_pane.h"
 #include "drop_target.h"
 
@@ -452,6 +453,7 @@ void Window::Run(std::wstring title, int width, int height) {
       }
     }
   }
+  layered_bitmap_.reset();
   if (hwnd != nullptr) {
     gesher::windows::RevokeWindowDropTarget(hwnd);
   }

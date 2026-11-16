@@ -74,6 +74,8 @@ public final class WindowsCamera {
     /** An open device: NV12 frames of {@link #width} x {@link #height}. */
     public static final class Capture implements AutoCloseable {
         private long mHandle;
+        private long mRetiredHandle;
+        private int mReaders;
         public final int width;
         public final int height;
 
@@ -85,18 +87,39 @@ public final class WindowsCamera {
 
         /** The next frame into {@code nv12}; blocks until there is one. 0 or an HRESULT. */
         public int read(byte[] nv12) {
+            long handle;
             synchronized (this) {
                 if (mHandle == 0) return 0x80004004;  // E_ABORT
+                handle = mHandle;
+                ++mReaders;
             }
-            return nativeRead(mHandle, nv12);
+            try {
+                return nativeRead(handle, nv12);
+            } finally {
+                long retired = 0;
+                synchronized (this) {
+                    if (--mReaders == 0) {
+                        retired = mRetiredHandle;
+                        mRetiredHandle = 0;
+                    }
+                }
+                if (retired != 0) nativeClose(retired);
+            }
         }
 
         @Override
         public void close() {
             long handle;
             synchronized (this) {
+                if (mHandle == 0) return;
                 handle = mHandle;
                 mHandle = 0;
+                // ReadSample may block. Close rejects new reads immediately,
+                // while the last admitted reader releases the native pointer.
+                if (mReaders != 0) {
+                    mRetiredHandle = handle;
+                    handle = 0;
+                }
             }
             if (handle != 0) nativeClose(handle);
         }

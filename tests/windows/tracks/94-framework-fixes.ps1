@@ -16,6 +16,13 @@ $bcpFixes = (('core-oj', 'core-libart', 'core-icu4j', 'framework', 'gesher-app')
 $dvmFixes = @("-Xbootclasspath:$bcpFixes", "-Ximage:$(NoDrive "$root/system")/framework/boot.art", '-Xint', '-Xusejit:false',
   '-cp', (NoDrive "$Dir/services-tests.dex"))
 
+$launcherLogBoundsOut = FixesRun ($dvmFixes + 'gesher.services.LauncherLogBoundsTest') 90
+$launcherLogBoundsCode = $LASTEXITCODE
+Check 'launcher: Android file channels, UTF-8 tails and bounded diagnostic lines' {
+  $global:LASTEXITCODE = $launcherLogBoundsCode
+  $launcherLogBoundsOut
+} @('LauncherLogBoundsTest all passed:')
+
 # Constructed package/permission state uses the same explicit test capability as
 # the existing synthetic service fixtures. Keep it local to this fresh VM.
 $pendingSpoofPresent = Test-Path Env:GESHER_MICROG_SPOOF
