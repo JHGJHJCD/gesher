@@ -102,6 +102,9 @@ The query reports the existing virtual output ID 2 or input ID 3, agreeing with
 the scalar query. It does not imply additional physical routes or multi-device
 playback. Oracle assertions use nonnegative capacities; negative capacity is
 treated as insufficient locally and is outside those assertions.
+The pinned implementation compares against an unsigned vector size, so negative
+input can instead bypass its capacity error. That invalid-input behavior is not
+part of this parity claim; callers must supply the actual nonnegative array size.
 
 ## Verification
 
@@ -127,6 +130,21 @@ Observed local results:
 | Existing AAudio builder suite, UBSan | 103 checks, 0 failures |
 | Existing media API suite, ASan/UBSan | AAudio 37, extractor 17, YUV crop 32, YUV rows 180 checks; all passed |
 | Whitespace check | `git diff --check` passed |
+
+Independent QA repeated those candidate and old-source runs, checked all six
+primary-source fingerprints below, and compared the lifecycle admission tables
+and channel conversions with the pinned source. It also inspected the actual
+`Track::MixInto`, `CaptureStream::Push`, backend waits and release operations.
+No blocking production defect was found within this scope.
+
+The additional QA regression cases cover two simultaneous releases while a
+callback is held, same-stream versus other-stream callback collision rules, and
+a short backend write. The latter verifies that the public frame counter adds
+only accepted PCM. With those test-only additions, the production suite passes
+**221 checks, zero failures** under ASan/UBSan; the old-source control executes
+197 checks and produced 106 expected failures. Existing builder and media API
+suites also passed independently with the counts above. Concurrent destruction
+and arbitrary use after close remain outside the valid lifetime contract.
 
 Production-namespace SHA-256: candidate
 `dfb4361db1742ab46cc2ec1898cc9fd28ce70ac2159f3b919663d06956a4e98d`;
