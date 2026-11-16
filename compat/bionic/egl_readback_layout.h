@@ -29,6 +29,43 @@ inline bool HasGlExtension(const char* list, const char* name) {
   return false;
 }
 
+// Only the extension names relevant to the readback path are retained.
+// GLES2 exposes a space-separated list; GLES3 uses indexed glGetStringi,
+// so never depend on the legacy extension string for an ES3 context.
+struct ReadbackExtensions {
+  bool reverse_rows = false;
+  bool bgra_read = false;
+  bool es2_pack_buffer = false;
+};
+
+inline void RecordReadbackExtension(ReadbackExtensions* result, const char* name) {
+  if (name == nullptr) return;
+  if (std::strcmp(name, "GL_ANGLE_pack_reverse_row_order") == 0) result->reverse_rows = true;
+  if (std::strcmp(name, "GL_EXT_read_format_bgra") == 0) result->bgra_read = true;
+  if (std::strcmp(name, "GL_NV_pixel_buffer_object") == 0 ||
+      std::strcmp(name, "GL_EXT_pixel_buffer_object") == 0) result->es2_pack_buffer = true;
+}
+
+template <typename Legacy, typename Count, typename Indexed>
+inline ReadbackExtensions QueryReadbackExtensions(int client_version, Legacy legacy,
+                                                  Count count, Indexed indexed) {
+  ReadbackExtensions result;
+  if (client_version < 2) return result;
+  if (client_version < 3) {
+    const char* extensions = legacy();
+    result.reverse_rows = HasGlExtension(extensions, "GL_ANGLE_pack_reverse_row_order");
+    result.bgra_read = HasGlExtension(extensions, "GL_EXT_read_format_bgra");
+    result.es2_pack_buffer = HasGlExtension(extensions, "GL_NV_pixel_buffer_object") ||
+                             HasGlExtension(extensions, "GL_EXT_pixel_buffer_object");
+    return result;
+  }
+  // Bound an invalid driver-reported count rather than looping indefinitely.
+  const int size = count();
+  if (size < 0 || size > 16384) return result;
+  for (int i = 0; i < size; ++i) RecordReadbackExtension(&result, indexed(i));
+  return result;
+}
+
 struct ReadbackLayout {
   int width = 0;             // Clipped source/target intersection.
   int height = 0;

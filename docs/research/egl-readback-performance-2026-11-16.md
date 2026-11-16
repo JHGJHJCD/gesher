@@ -60,8 +60,10 @@ GLES2/GLES3, extension presence, alpha and color conversion, invalid
 dimensions. Sanitizers test the same operations, not physical GPU behavior.
 
 The Windows graphics suite continues to run GlBindingsTest and
-ImageReaderEglTest against real ART/ANGLE, and additionally reruns
-ImageReaderEglTest with the optimized path forced off. The ImageReader
+ImageReaderEglTest against real ART/ANGLE, including a GLES3 ImageReader
+case that checks indexed extension-query compatibility and unchanged GL
+error/pack state. It also reruns ImageReaderEglTest with the optimized path
+forced off. The ImageReader
 fixture deliberately leaves nondefault GL_PACK_ALIGNMENT and ANGLE
 reverse-row pack state active across swaps and, when GLES2 advertises a
 pixel pack buffer extension, binds a PBO. It checks that pixels remain
@@ -80,3 +82,13 @@ Completely eliminating it requires a larger GPU-backed consumer path
 with correct Android ImageReader and SurfaceTexture semantics. This PR
 does not alter ART, JNI, regular HWND swap chains or publication order.
 It is independent of the separate automatic HWUI GPU-selection PR #55.
+
+
+### GLES2 vs GLES3 extension discovery
+
+The implementation now uses the GLES2 legacy extension string only in
+GLES2 contexts. GLES3 uses GL_NUM_EXTENSIONS and glGetStringi, through
+an optional ANGLE export. If unavailable, optimization is disabled for
+that context and the staged path remains valid. This avoids depending
+on legacy extension-string behavior for GLES3 and is covered by bounded
+indexed-list and state tests in the host oracle.

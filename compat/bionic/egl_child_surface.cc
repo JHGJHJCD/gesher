@@ -50,6 +50,7 @@ struct Angle {
   EGLBoolean(EGLAPIENTRY* query_context)(EGLDisplay, EGLContext, EGLint, EGLint*);
   void(GL_APIENTRY* get_integerv)(GLenum, GLint*);
   const GLubyte*(GL_APIENTRY* get_string)(GLenum);
+  const GLubyte*(GL_APIENTRY* get_stringi)(GLenum, GLuint);
   void(GL_APIENTRY* pixel_storei)(GLenum, GLint);
   void(GL_APIENTRY* bind_framebuffer)(GLenum, GLuint);
   void(GL_APIENTRY* bind_buffer)(GLenum, GLuint);
@@ -65,6 +66,7 @@ const Angle* GetAngle() {
     a->query_context = Proc<decltype(a->query_context)>("eglQueryContext");
     a->get_integerv = Proc<decltype(a->get_integerv)>("glGetIntegerv");
     a->get_string = Proc<decltype(a->get_string)>("glGetString");
+    a->get_stringi = Proc<decltype(a->get_stringi)>("glGetStringi");  // optional on GLES2
     a->pixel_storei = Proc<decltype(a->pixel_storei)>("glPixelStorei");
     a->bind_framebuffer = Proc<decltype(a->bind_framebuffer)>("glBindFramebuffer");
     a->bind_buffer = Proc<decltype(a->bind_buffer)>("glBindBuffer");
@@ -306,14 +308,27 @@ void ChildSurfaceBeforeSwap(EGLDisplay display, EGLSurface surface) {
       gl->query_context(display, context, EGL_CONTEXT_CLIENT_VERSION, &version);
       if (context != c->last_context) {
         c->last_context = context;
-        const char* extensions = reinterpret_cast<const char*>(gl->get_string(GL_EXTENSIONS));
-        c->reverse_rows = HasGlExtension(extensions, "GL_ANGLE_pack_reverse_row_order");
-        c->bgra_read = HasGlExtension(extensions, "GL_EXT_read_format_bgra");
-        // GLES2 can expose PBOs through an extension; pointer arguments to
-        // glReadPixels are offsets while a pack buffer is bound.
-        c->es2_pack_buffer =
-            HasGlExtension(extensions, "GL_NV_pixel_buffer_object") ||
-            HasGlExtension(extensions, "GL_EXT_pixel_buffer_object");
+        // In GLES3, query each extension via glGetStringi; do not call the
+        // GLES2-only legacy extension-string path in an ES3 context.
+        const ReadbackExtensions extensions = QueryReadbackExtensions(
+            version,
+            [&]() -> const char* {
+              return reinterpret_cast<const char*>(gl->get_string(GL_EXTENSIONS));
+            },
+            [&]() -> int {
+              if (gl->get_stringi == nullptr) return 0;
+              GLint count = 0;
+              gl->get_integerv(GL_NUM_EXTENSIONS, &count);
+              return count;
+            },
+            [&](int i) -> const char* {
+              return reinterpret_cast<const char*>(
+                  gl->get_stringi(GL_EXTENSIONS, static_cast<GLuint>(i)));
+            });
+        c->reverse_rows = extensions.reverse_rows;
+        c->bgra_read = extensions.bgra_read;
+        // GLES2 may expose PBOs only through the optional extension.
+        c->es2_pack_buffer = extensions.es2_pack_buffer;
       }
       ReadbackLayout plan = PlanChildReadback(
           w, h, b.width, b.height, b.stride, b.format,

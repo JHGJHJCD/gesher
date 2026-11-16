@@ -16,6 +16,7 @@ import android.opengl.EGLContext;
 import android.opengl.EGLDisplay;
 import android.opengl.EGLSurface;
 import android.opengl.GLES20;
+import android.opengl.GLES30;
 import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.concurrent.CountDownLatch;
@@ -32,6 +33,69 @@ public final class ImageReaderEglTest {
 
     private static boolean hasExtension(String list, String name) {
         return list != null && (" " + list + " ").contains(" " + name + " ");
+    }
+
+
+    // GLES3 child readback uses glGetStringi/GL_NUM_EXTENSIONS rather than
+    // the GLES2 extension-string API. Run on ANGLE's ES3-capable adapters.
+    private static void gles3ImageReader(EGLDisplay display) {
+        final int EGL_OPENGL_ES3_BIT_KHR = 0x40;
+        EGLConfig[] configs = new EGLConfig[1];
+        int[] count = new int[1];
+        boolean chosen = EGL14.eglChooseConfig(display,
+                new int[] {EGL14.EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
+                        EGL14.EGL_SURFACE_TYPE, EGL14.EGL_WINDOW_BIT,
+                        EGL14.EGL_RED_SIZE, 8, EGL14.EGL_GREEN_SIZE, 8,
+                        EGL14.EGL_BLUE_SIZE, 8, EGL14.EGL_ALPHA_SIZE, 8,
+                        EGL14.EGL_NONE}, 0, configs, 0, 1, count, 0) && count[0] == 1;
+        if (!chosen) {
+            System.out.println("INFO GLES3 ImageReader skipped (no GLES3 window config)");
+            return;
+        }
+        EGLContext context = EGL14.eglCreateContext(display, configs[0], EGL14.EGL_NO_CONTEXT,
+                new int[] {EGL14.EGL_CONTEXT_CLIENT_VERSION, 3, EGL14.EGL_NONE}, 0);
+        if (context == EGL14.EGL_NO_CONTEXT) {
+            System.out.println("INFO GLES3 ImageReader skipped (no GLES3 context)");
+            return;
+        }
+        try (ImageReader reader = ImageReader.newInstance(8, 6, PixelFormat.RGBA_8888, 2)) {
+            EGLSurface surface = EGL14.eglCreateWindowSurface(display, configs[0], reader.getSurface(),
+                    new int[] {EGL14.EGL_NONE}, 0);
+            check(surface != EGL14.EGL_NO_SURFACE, "GLES3 reader EGL surface");
+            try {
+                check(EGL14.eglMakeCurrent(display, surface, surface, context), "GLES3 reader current");
+                int[] extensionCount = new int[1];
+                GLES30.glGetIntegerv(GLES30.GL_NUM_EXTENSIONS, extensionCount, 0);
+                check(extensionCount[0] >= 0, "GLES3 indexed extension count");
+                GLES30.glPixelStorei(GLES30.GL_PACK_ALIGNMENT, 1);
+                GLES30.glViewport(0, 0, 8, 6);
+                GLES30.glClearColor(1f, 0f, 1f, 1f);
+                GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT);
+                check(EGL14.eglSwapBuffers(display, surface), "GLES3 child surface swap");
+                int[] alignment = new int[1];
+                GLES30.glGetIntegerv(GLES30.GL_PACK_ALIGNMENT, alignment, 0);
+                check(alignment[0] == 1, "GLES3 pack alignment restored after child readback");
+                check(GLES30.glGetError() == GLES30.GL_NO_ERROR, "GLES3 internal extension query has no GL errors");
+                try (Image image = reader.acquireLatestImage()) {
+                    check(image != null, "GLES3 ImageReader received frame");
+                    ByteBuffer pixels = image.getPlanes()[0].getBuffer();
+                    int index = 3 * image.getPlanes()[0].getRowStride()
+                            + 4 * image.getPlanes()[0].getPixelStride();
+                    check((pixels.get(index) & 0xff) == 255 &&
+                            (pixels.get(index + 1) & 0xff) == 0 &&
+                            (pixels.get(index + 2) & 0xff) == 255 &&
+                            (pixels.get(index + 3) & 0xff) == 255,
+                            "GLES3 ImageReader pixels remain RGBA");
+                }
+                GLES30.glPixelStorei(GLES30.GL_PACK_ALIGNMENT, 4);
+            } finally {
+                EGL14.eglMakeCurrent(display, EGL14.EGL_NO_SURFACE,
+                        EGL14.EGL_NO_SURFACE, EGL14.EGL_NO_CONTEXT);
+                EGL14.eglDestroySurface(display, surface);
+            }
+        } finally {
+            EGL14.eglDestroyContext(display, context);
+        }
     }
 
     static void check(boolean value, String label) {
@@ -169,6 +233,7 @@ public final class ImageReaderEglTest {
                         && (image.getPlanes()[0].getBuffer().get(0) & 255) == 128, "direct camera YUV pixels");
             }
         }
+        gles3ImageReader(display);
         System.out.println("ImageReaderEglTest all passed");
     }
 }

@@ -98,6 +98,37 @@ int main() {
                         "GL_EXT_read_format_bgra"), "not a suffix");
   Check(!HasGlExtension(nullptr, "GL_A"), "null extension list");
   Check(!HasGlExtension("GL_A", ""), "empty name");
+  // Ensure ES3 indexed extension queries are used instead of a potentially
+  // unavailable legacy extension string; the two paths never mix.
+  int legacy = 0, counts = 0, indexed = 0;
+  auto es3 = QueryReadbackExtensions(3,
+      [&]() { ++legacy; return "GL_A"; },
+      [&]() { ++counts; return 4; },
+      [&](int i) -> const char* {
+        ++indexed;
+        static const char* names[] = {"GL_EXT_foo", "GL_EXT_read_format_bgra",
+            "GL_NV_pixel_buffer_object", "GL_ANGLE_pack_reverse_row_order"};
+        return names[i];
+      });
+  Check(legacy == 0 && counts == 1 && indexed == 4, "ES3 uses indexed extensions only");
+  Check(es3.reverse_rows && es3.bgra_read && es3.es2_pack_buffer, "ES3 indexed capabilities");
+  auto es2 = QueryReadbackExtensions(2,
+      [&]() { ++legacy; return "GL_ANGLE_pack_reverse_row_order GL_EXT_read_format_bgra"; },
+      [&]() { ++counts; return 1; },
+      [&](int) -> const char* { ++indexed; return "GL_NV_pixel_buffer_object"; });
+  Check(legacy == 1 && counts == 1 && indexed == 4, "ES2 uses legacy list only");
+  Check(es2.reverse_rows && es2.bgra_read && !es2.es2_pack_buffer, "ES2 capabilities");
+  auto malformed = QueryReadbackExtensions(3,
+      [&]() { ++legacy; return "GL_ANGLE_pack_reverse_row_order"; },
+      [&]() { ++counts; return 65536; },
+      [&](int) -> const char* { ++indexed; return "GL_ANGLE_pack_reverse_row_order"; });
+  Check(!malformed.reverse_rows && indexed == 4, "invalid extension count bounded");
+  auto unknown = QueryReadbackExtensions(0,
+      [&]() { ++legacy; return "GL_ANGLE_pack_reverse_row_order"; },
+      [&]() { ++counts; return 1; },
+      [&](int) -> const char* { ++indexed; return "GL_EXT_read_format_bgra"; });
+  Check(!unknown.reverse_rows && legacy == 1 && counts == 2 && indexed == 4,
+        "unknown GL version avoids invalid extension queries");
   std::mt19937 rng(0x61cafe42);
   std::array<int, 5> fmts = {1, 2, 4, 5, 99};
   int cases = 0;
