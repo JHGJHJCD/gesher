@@ -15,6 +15,7 @@ import java.nio.channels.SeekableByteChannel;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -29,14 +30,47 @@ public final class LogLines {
     private static final String TAIL_TRUNCATED = "[gesher: earlier log content omitted] ";
     private static final byte[] CONTINUED = "[gesher: continued log line] ".getBytes(StandardCharsets.US_ASCII);
     private static final byte[] CONTINUES = " [gesher: log line continues]\n".getBytes(StandardCharsets.US_ASCII);
+    private static final byte[] NEWLINE = {'\n'};
+    private static final byte[] NO_ENDING = {};
     private final PrintStream output;
     private final LineBuffer pending = new LineBuffer();
     private boolean continuation;
 
     /** The reader owns this buffer until a synchronous write finishes. */
     private static final class LineBuffer extends ByteArrayOutputStream {
+        private byte[] framed;
+        void append(byte[] bytes, int offset, int length) {
+            int needed = count + length;
+            if (needed > buf.length) {
+                // append() admits at most MAX_PENDING_BYTES. Clamp geometric
+                // growth too, so a near-limit chunk cannot retain twice the cap.
+                buf = Arrays.copyOf(buf, Math.min(MAX_PENDING_BYTES, Math.max(needed, buf.length * 2)));
+            }
+            write(bytes, offset, length);
+        }
         void writeTo(PrintStream output) { output.write(buf, 0, count); }
-        void writeTo(PrintStream output, int length) { output.write(buf, 0, length); }
+        void writeFramedTo(PrintStream output, int length, boolean continued, byte[] ending) {
+            if (!continued && ending == NEWLINE && length < buf.length) {
+                buf[length] = '\n';
+                output.write(buf, 0, length + 1);
+                return;
+            }
+            int prefix = continued ? CONTINUED.length : 0;
+            int needed = prefix + length + ending.length;
+            if (framed == null || framed.length < needed) {
+                // A full fragment reserves every decoration once; normal short
+                // final fragments need only their actual small transfer size.
+                int capacity = length >= MAX_PENDING_BYTES - 4
+                        ? MAX_PENDING_BYTES + CONTINUED.length + CONTINUES.length : needed;
+                framed = new byte[capacity];
+            }
+            if (continued) System.arraycopy(CONTINUED, 0, framed, 0, prefix);
+            System.arraycopy(buf, 0, framed, prefix, length);
+            System.arraycopy(ending, 0, framed, prefix + length, ending.length);
+            // JDK PrintStream can use an internal lock instead of its monitor.
+            // Publish the complete line in one write, including all decorations.
+            output.write(framed, 0, needed);
+        }
         void removePrefix(int length) {
             System.arraycopy(buf, length, buf, 0, count - length);
             count -= length;
@@ -164,7 +198,7 @@ public final class LogLines {
         while (count != 0) {
             if (pending.size() == MAX_PENDING_BYTES) emitFragment();
             int copied = Math.min(count, MAX_PENDING_BYTES - pending.size());
-            pending.write(bytes, offset, copied);
+            pending.append(bytes, offset, copied);
             offset += copied;
             count -= copied;
         }
@@ -174,9 +208,7 @@ public final class LogLines {
         if (pending.size() != 0) {
             // Separate an unterminated child fragment from the next parent line.
             synchronized (output) {
-                if (continuation) output.write(CONTINUED, 0, CONTINUED.length);
-                pending.writeTo(output);
-                output.write('\n');
+                pending.writeFramedTo(output, pending.size(), continuation, NEWLINE);
                 output.flush();
             }
             reset();
@@ -184,8 +216,8 @@ public final class LogLines {
     }
     private void emit() {
         synchronized (output) {
-            if (continuation) output.write(CONTINUED, 0, CONTINUED.length);
-            pending.writeTo(output);
+            if (continuation) pending.writeFramedTo(output, pending.size(), true, NO_ENDING);
+            else pending.writeTo(output);
             output.flush();
         }
         reset();
@@ -193,9 +225,7 @@ public final class LogLines {
     private void emitFragment() {
         int length = pending.fragmentLength();
         synchronized (output) {
-            if (continuation) output.write(CONTINUED, 0, CONTINUED.length);
-            pending.writeTo(output, length);
-            output.write(CONTINUES, 0, CONTINUES.length);
+            pending.writeFramedTo(output, length, continuation, CONTINUES);
             output.flush();
         }
         pending.removePrefix(length);

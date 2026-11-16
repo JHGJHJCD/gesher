@@ -4,7 +4,9 @@
 
 Real file I/O, UTF-8 decoding and PrintStream locking are retained. The streaming
 observer hashes payloads and validates every emitted UTF-8 fragment without keeping
-all output. Ordinary-output contracts remain in test_launcher_log_contracts.py.
+all output. A separate lock adapter deterministically schedules a parent write
+between logger calls, without assuming PrintStream uses its object monitor.
+Ordinary-output contracts remain in test_launcher_log_contracts.py.
 """
 from __future__ import annotations
 
@@ -21,7 +23,10 @@ def main() -> None:
     parser.add_argument('--java-home', type=Path, required=True)
     parser.add_argument('--source-ref')
     parser.add_argument('--case', choices=('all', 'tail', 'forward', 'concurrency'), default='all')
+    parser.add_argument('--concurrency-runs', type=int, default=1, help='repeat the bounded independent-lock and real-stream schedules (1-100)')
     args = parser.parse_args()
+    if not 1 <= args.concurrency_runs <= 100:
+        parser.error('--concurrency-runs must be between 1 and 100')
     path = 'app/java/com/gesher/app/LogLines.java'
     production = (subprocess.run(['git', 'show', args.source_ref + ':' + path], cwd=ROOT,
                                 check=True, capture_output=True, text=True).stdout
@@ -35,9 +40,11 @@ def main() -> None:
                         str(java), str(ROOT / 'tests/exec/java/com/gesher/app/LauncherLogBoundsTest.java')],
                        check=True, timeout=60)
         for case in ['tail', 'forward', 'concurrency'] if args.case == 'all' else [args.case]:
-            subprocess.run([str(args.java_home / 'bin/java'), '-XX:-UsePerfData', '-Xmx24m',
-                            '-cp', str(work), 'com.gesher.app.LauncherLogBoundsTest', case],
-                           check=True, timeout=90)
+            command = [str(args.java_home / 'bin/java'), '-XX:-UsePerfData', '-Xmx24m',
+                       '-cp', str(work), 'com.gesher.app.LauncherLogBoundsTest', case]
+            if case == 'concurrency':
+                command.append(str(args.concurrency_runs))
+            subprocess.run(command, check=True, timeout=90)
 
 
 if __name__ == '__main__':

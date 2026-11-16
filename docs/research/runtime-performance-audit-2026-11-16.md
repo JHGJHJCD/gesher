@@ -158,12 +158,18 @@ label accompanies truncation. A 64 MiB unterminated line reads 2,097,156 bytes
 discarded UTF-8 no longer suppresses valid retained diagnostics; retained invalid
 UTF-8 still fails. Append/truncate and CR/LF/CRLF boundaries are covered.
 
-Forwarding retains at most 256 KiB of source bytes, emitting visibly labelled
-UTF-8-safe fragments for extreme lines. Smaller lines remain unchanged and
-atomic under the output monitor. A 64 MiB Unicode stream without newlines passes
+Forwarding limits pending source bytes to 256 KiB, emitting visibly labelled
+UTF-8-safe fragments for extreme lines. Each decorated fragment is published in
+one synchronous bulk write, so a PrintStream with its own internal lock cannot
+interleave a parent line between the label, payload and ending. A reusable
+framing transfer buffer raises the total retained byte-buffer bound to about
+512 KiB plus 59 marker bytes; it adds a payload copy only on the decorated path.
+Smaller completed lines retain their existing single-buffer write. A 64 MiB
+Unicode stream without newlines passes
 under a 24 MiB host JVM heap, preserving every source byte after removing the
 explicit labels. Independent QA added every multibyte split position around the
-fragment boundary. Actual ART execution also passes Unicode/concurrent
+fragment boundary and a deterministic parent writer with an independent lock.
+Actual ART execution also passes Unicode/concurrent
 forwarding and the Android file-channel/tail regression in Windows track 94.
 
 ### Streamed installation metadata

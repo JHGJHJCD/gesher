@@ -13,6 +13,9 @@ import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 public final class LauncherLogBoundsTest {
     private static final int TAIL_BYTES = 1024 * 1024, FRAGMENT_BYTES = 256 * 1024;
@@ -23,6 +26,82 @@ public final class LauncherLogBoundsTest {
     private static void check(boolean ok, String description) {
         ++checks;
         if (!ok) throw new AssertionError(description);
+    }
+    private static String prefix(String text, int offset) {
+        StringBuilder result = new StringBuilder("chars=").append(text.length()).append(" offset=").append(offset).append(" codepoints=");
+        for (int at = Math.min(offset, text.length()), count = 0; at < text.length() && count < 16; ++count) {
+            int point = text.codePointAt(at);
+            result.append("U+").append(Integer.toHexString(point)).append(' ');
+            at += Character.charCount(point);
+        }
+        return result.toString();
+    }
+    private static void await(CountDownLatch latch) {
+        try { check(latch.await(5, TimeUnit.SECONDS), "independent PrintStream lock fixture timed out"); }
+        catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new AssertionError(interrupted); }
+    }
+    /** Models PrintStream implementations whose own lock is independent of their monitor. */
+    private static final class InternalLockStream extends PrintStream {
+        final ByteArrayOutputStream captured = new ByteArrayOutputStream();
+        final ReentrantLock internal = new ReentrantLock();
+        final CountDownLatch inject = new CountDownLatch(1), parentDone = new CountDownLatch(1);
+        final boolean continuationHook;
+        boolean injected;
+        InternalLockStream(boolean continuationHook) throws Exception {
+            super(OutputStream.nullOutputStream(), true, "UTF-8");
+            this.continuationHook = continuationHook;
+        }
+        @Override public void write(byte[] bytes, int offset, int count) {
+            boolean trigger = false;
+            internal.lock();
+            try {
+                captured.write(bytes, offset, count);
+                if (!injected && (!continuationHook || Observer.startsWith(bytes, offset, count, PREFIX))) {
+                    injected = true; trigger = true;
+                }
+            } finally { internal.unlock(); }
+            // Force a parent println between two logger writes even though the
+            // logger still holds synchronized(this). A single bulk frame is safe.
+            if (trigger) { inject.countDown(); await(parentDone); }
+        }
+        @Override public void write(int value) {
+            internal.lock();
+            try { captured.write(value); } finally { internal.unlock(); }
+        }
+        @Override public void println(String value) {
+            byte[] bytes = (value + "\n").getBytes(StandardCharsets.UTF_8);
+            internal.lock();
+            try { captured.write(bytes, 0, bytes.length); } finally { internal.unlock(); }
+        }
+    }
+    private static void forcedInterleaving(String source, boolean continuationHook) throws Exception {
+        try (InternalLockStream output = new InternalLockStream(continuationHook)) {
+            Thread parent = new Thread(() -> {
+                await(output.inject);
+                try { output.println("parent-forced"); } finally { output.parentDone.countDown(); }
+            });
+            parent.start();
+            LogLines lines = new LogLines(output);
+            byte[] input = source.getBytes(StandardCharsets.UTF_8);
+            lines.write(input, 0, input.length); lines.finish();
+            parent.join(5000);
+            check(!parent.isAlive() && output.injected, "forced parent writer did not complete");
+            String text = new String(output.captured.toByteArray(), StandardCharsets.UTF_8);
+            StringBuilder reconstructed = new StringBuilder();
+            int parents = 0, children = 0;
+            for (String line : text.split("\n")) {
+                if (line.equals("parent-forced")) { ++parents; continue; }
+                if (children != 0) {
+                    check(line.startsWith(PREFIX), "forced parent write spliced a continued line: " + prefix(line, 0));
+                    line = line.substring(PREFIX.length());
+                }
+                if (line.endsWith(END)) line = line.substring(0, line.length() - END.length());
+                check(!line.isEmpty(), "forced writer separated payload from its ending");
+                reconstructed.append(line); ++children;
+            }
+            check(parents == 1 && reconstructed.toString().equals(source),
+                    "payload/decorations were not one atomic write with an independent PrintStream lock");
+        }
     }
     private static void tail() throws Exception {
         Path path = Files.createTempFile("gesher-huge-log-line-", ".log");
@@ -77,26 +156,47 @@ public final class LauncherLogBoundsTest {
     }
     private static final class Observer extends PrintStream {
         final MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        final long sourceBytes;
         long bytes;
         int fragments, continuationPrefixes, finalNewlines;
         boolean held = true;
-        Observer() throws Exception { super(OutputStream.nullOutputStream(), true, "UTF-8"); }
-        private static boolean equal(byte[] input, int offset, int count, String marker) {
+        Observer(long sourceBytes) throws Exception {
+            super(OutputStream.nullOutputStream(), true, "UTF-8");
+            this.sourceBytes = sourceBytes;
+        }
+        private static boolean startsWith(byte[] input, int offset, int count, String marker) {
             byte[] encoded = marker.getBytes(StandardCharsets.US_ASCII);
-            return count == encoded.length && Arrays.equals(input, offset, offset + count, encoded, 0, encoded.length);
+            return count >= encoded.length && Arrays.equals(input, offset, offset + encoded.length, encoded, 0, encoded.length);
+        }
+        private static boolean endsWith(byte[] input, int offset, int count, String marker) {
+            byte[] encoded = marker.getBytes(StandardCharsets.US_ASCII);
+            return count >= encoded.length && Arrays.equals(input, offset + count - encoded.length, offset + count, encoded, 0, encoded.length);
         }
         @Override public void write(byte[] input, int offset, int count) {
             held &= Thread.holdsLock(this);
-            if (equal(input, offset, count, PREFIX)) { ++continuationPrefixes; return; }
-            if (equal(input, offset, count, END + "\n")) { ++fragments; return; }
+            check(count <= FRAGMENT_BYTES + PREFIX.length() + END.length() + 1, "framed transfer exceeded bounded storage");
+            if (startsWith(input, offset, count, PREFIX)) {
+                ++continuationPrefixes; offset += PREFIX.length(); count -= PREFIX.length();
+            }
+            if (endsWith(input, offset, count, END + "\n")) {
+                ++fragments; count -= END.length() + 1;
+            } else {
+                check(count != 0 && input[offset + count - 1] == '\n', "complete source/fragment newline was split across writes");
+            }
+            // The fixture knows the source byte count, so it can distinguish an
+            // inserted finish() newline from a newline already in the source.
+            if (bytes + count > sourceBytes) {
+                check(bytes + count == sourceBytes + 1 && input[offset + count - 1] == '\n', "framing inserted unexpected source bytes");
+                --count; ++finalNewlines;
+            }
             check(count <= FRAGMENT_BYTES, "oversized payload copied to PrintStream before splitting");
+            check(count != 0, "prefix or ending was emitted separately from its source payload");
             try { StandardCharsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(input, offset, count)); }
             catch (java.nio.charset.CharacterCodingException invalid) { throw new AssertionError("split valid UTF-8 character", invalid); }
             digest.update(input, offset, count); bytes += count;
         }
         @Override public void write(int value) {
-            held &= Thread.holdsLock(this);
-            check(value == '\n', "unexpected individual output byte"); ++finalNewlines;
+            throw new AssertionError("line endings must share the source payload's bulk write");
         }
     }
     private static void forward() throws Exception {
@@ -104,7 +204,7 @@ public final class LauncherLogBoundsTest {
         byte[] input = new byte[16381];
         long total = 64L * 1024 * 1024 / pattern.length * pattern.length;
         MessageDigest expected = MessageDigest.getInstance("SHA-256");
-        try (Observer output = new Observer()) {
+        try (Observer output = new Observer(total)) {
             LogLines lines = new LogLines(output);
             for (long at = 0; at < total;) {
                 int count = (int) Math.min(input.length, total - at);
@@ -123,7 +223,7 @@ public final class LauncherLogBoundsTest {
         }
         // One large incoming array is also split before ByteArrayOutputStream grows.
         byte[] single = new byte[3 * FRAGMENT_BYTES + 1]; Arrays.fill(single, (byte) 'a');
-        try (Observer output = new Observer()) {
+        try (Observer output = new Observer(single.length)) {
             LogLines lines = new LogLines(output);
             lines.write(single, 0, single.length); lines.finish();
             check(output.bytes == single.length && output.fragments == 3, "single write bypassed pending-byte cap");
@@ -140,7 +240,7 @@ public final class LauncherLogBoundsTest {
                 System.arraycopy("-tail\n".getBytes(StandardCharsets.US_ASCII), 0, boundary,
                         prefix + encoded.length, 6);
                 for (boolean chunked : new boolean[] {false, true}) {
-                    try (Observer output = new Observer()) {
+                    try (Observer output = new Observer(boundary.length)) {
                         LogLines lines = new LogLines(output);
                         if (chunked) {
                             lines.write(boundary, 0, prefix + 1);
@@ -158,7 +258,7 @@ public final class LauncherLogBoundsTest {
         }
         byte[] exactLine = new byte[FRAGMENT_BYTES];
         Arrays.fill(exactLine, (byte) 'x'); exactLine[exactLine.length - 1] = '\n';
-        try (Observer output = new Observer()) {
+        try (Observer output = new Observer(exactLine.length)) {
             LogLines lines = new LogLines(output);
             lines.write(exactLine, 0, exactLine.length); lines.finish();
             check(output.bytes == exactLine.length && output.fragments == 0
@@ -166,6 +266,9 @@ public final class LauncherLogBoundsTest {
         }
     }
     private static void concurrency() throws Exception {
+        forcedInterleaving("child-unterminated🙂א", false);
+        forcedInterleaving("child🙂א".repeat(60000), false);
+        forcedInterleaving("child🙂א".repeat(60000), true);
         ByteArrayOutputStream captured = new ByteArrayOutputStream();
         PrintStream output = new PrintStream(captured, true, "UTF-8");
         LogLines lines = new LogLines(output);
@@ -184,12 +287,14 @@ public final class LauncherLogBoundsTest {
         for (String line : text.split("\n")) {
             if (line.matches("parent-\\d+")) { ++parentLines; continue; }
             if (childLines != 0) {
-                check(line.startsWith(PREFIX), "parent/source text spliced into a continuation marker");
+                check(line.startsWith(PREFIX), "parent/source text spliced into a continuation marker: " + prefix(line, 0));
                 line = line.substring(PREFIX.length());
             }
             if (line.endsWith(END)) line = line.substring(0, line.length() - END.length());
             check(line.startsWith("child") || line.startsWith("🙂") || line.startsWith("א") || line.startsWith("hild")
-                    || line.startsWith("ild") || line.startsWith("ld") || line.startsWith("d"), "unlabelled or interleaved fragment");
+                    || line.startsWith("ild") || line.startsWith("ld") || line.startsWith("d"),
+                    "unlabelled or interleaved fragment: child_line=" + childLines + " actual=" + prefix(line, 0)
+                    + " expected=" + prefix(source, reconstructed.length()) + " os=" + System.getProperty("os.arch"));
             reconstructed.append(line); ++childLines;
         }
         check(parentLines == 400 && childLines > 1, "concurrent lines lost/duplicated");
@@ -205,7 +310,10 @@ public final class LauncherLogBoundsTest {
         switch (args[0]) {
             case "tail": tail(); break;
             case "forward": forward(); break;
-            case "concurrency": concurrency(); break;
+            case "concurrency":
+                int runs = args.length > 1 ? Integer.parseInt(args[1]) : 1;
+                for (int run = 0; run < runs; ++run) concurrency();
+                break;
             default: throw new IllegalArgumentException(args[0]);
         }
         System.out.println("Launcher bounded log " + args[0] + " PASS: " + checks + " checks");
