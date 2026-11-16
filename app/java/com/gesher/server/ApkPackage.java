@@ -320,9 +320,14 @@ public final class ApkPackage {
         mDataDir = mDataStorage.credential.toString();
     }
 
-    /** The manifest's default area, which may be device-protected storage. */
+    /** AOSP ScanPackageUtils permits this manifest default only for system packages. */
+    private boolean defaultsToDeviceProtectedStorage() {
+        return mSystemAddon && parsed.isDefaultToDeviceProtectedStorage();
+    }
+
+    /** The effective installed default area after system-package policy is applied. */
     public String dataDir() {
-        return parsed.isDefaultToDeviceProtectedStorage() ? deviceProtectedDataDir() : mDataDir;
+        return defaultsToDeviceProtectedStorage() ? deviceProtectedDataDir() : mDataDir;
     }
 
     public String credentialProtectedDataDir() {
@@ -336,16 +341,16 @@ public final class ApkPackage {
 
     /** Prepare a launch/new install, without guessing which manifest created legacy data. */
     public void prepareDataDirectories() throws IOException {
-        storage().prepare(parsed.isDefaultToDeviceProtectedStorage(), false);
+        storage().prepare(defaultsToDeviceProtectedStorage(), false);
     }
 
     /** Only the already committed installed manifest may authorize legacy default-DE migration. */
     void prepareInstalledDataDirectories() throws IOException {
-        storage().prepare(parsed.isDefaultToDeviceProtectedStorage(), true);
+        storage().prepare(defaultsToDeviceProtectedStorage(), true);
     }
 
     void prepareInstallDataDirectories(boolean replacing) throws IOException {
-        if (replacing) storage().prepareUpdate(parsed.isDefaultToDeviceProtectedStorage());
+        if (replacing) storage().prepareUpdate(defaultsToDeviceProtectedStorage());
         else prepareDataDirectories();
     }
 
@@ -863,6 +868,11 @@ public final class ApkPackage {
         ai.flags = (ai.flags | AppInfoUtils.appInfoFlags(parsed))
                 & ~ApplicationInfo.FLAG_HAS_CODE;
         ai.privateFlags |= AppInfoUtils.appInfoPrivateFlags(parsed);
+        if (!defaultsToDeviceProtectedStorage()) {
+            // Parsed manifest flags have not passed AOSP's system-package scan policy.
+            // The published default flag and all directory preparation must agree.
+            ai.privateFlags &= ~ApplicationInfo.PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE;
+        }
         ai.flags |= ApplicationInfo.FLAG_INSTALLED;
         if (mSystemAddon) {
             ai.flags |= ApplicationInfo.FLAG_SYSTEM;

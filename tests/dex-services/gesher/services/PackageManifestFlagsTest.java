@@ -54,7 +54,7 @@ public final class PackageManifestFlagsTest {
         installed.setAccessible(true);
         installed.invoke(apk, info);
         require(info.uid == 12345 && "/fixture/base.apk".equals(info.sourceDir)
-                && (parsed.isDefaultToDeviceProtectedStorage() ? "/fixture/data.device-protected"
+                && (addon && parsed.isDefaultToDeviceProtectedStorage() ? "/fixture/data.device-protected"
                         : "/fixture/data").equals(info.dataDir)
                 && "/fixture/data".equals(info.credentialProtectedDataDir)
                 && "/fixture/data.device-protected".equals(info.deviceProtectedDataDir)
@@ -106,7 +106,8 @@ public final class PackageManifestFlagsTest {
         flag("embedded DEX", info.privateFlags, ApplicationInfo.PRIVATE_FLAG_USE_EMBEDDED_DEX, expected);
         flag("direct boot", info.privateFlags, ApplicationInfo.PRIVATE_FLAG_DIRECT_BOOT_AWARE, expected);
         flag("device protected default", info.privateFlags,
-                ApplicationInfo.PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE, expected);
+                ApplicationInfo.PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE,
+                expected && (info.flags & ApplicationInfo.FLAG_SYSTEM) != 0);
         flag("playback capture", info.privateFlags,
                 ApplicationInfo.PRIVATE_FLAG_ALLOW_AUDIO_PLAYBACK_CAPTURE, expected);
         flag("save-state policy", info.privateFlags, ApplicationInfo.PRIVATE_FLAG_CANT_SAVE_STATE, expected);

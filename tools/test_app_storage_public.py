@@ -29,10 +29,16 @@ def main() -> None:
                         "-I" + str(args.java_home / "include"),
                         "-I" + str(args.java_home / "include/linux"),
                         str(ROOT / "tests/package/framework_host.c"), "-o", str(library)], check=True)
+        sources = [ROOT / "tests/package/AppStoragePublicHost.java"]
+        if not args.expect_baseline_failure:
+            sources += [ROOT / "tests/package/AppStoragePolicyHost.java",
+                        ROOT / "tests/dex-services/gesher/services/PackageManifestFlagsTest.java"]
         subprocess.run([str(args.java_home / "bin/javac"), "-encoding", "UTF-8", "-cp", classpath,
-                        "-d", str(work), str(ROOT / "tests/package/AppStoragePublicHost.java")], check=True)
+                        "-d", str(work), *map(str, sources)], check=True)
         result = subprocess.run([str(args.java_home / "bin/java"), "-cp", str(work) + os.pathsep + classpath,
-                                 "AppStoragePublicHost", str(library)], text=True, capture_output=True, timeout=90)
+                                 "AppStoragePublicHost", str(library),
+                                 str(ROOT / "tests/dex-services/fixtures/v2only.apk")],
+                                text=True, capture_output=True, timeout=90)
         print(result.stdout, end="")
         print(result.stderr, end="")
         if args.expect_baseline_failure:
@@ -42,6 +48,9 @@ def main() -> None:
             print("Baseline control detected the original public CE/DE alias")
         else:
             result.check_returncode()
+            subprocess.run([str(args.java_home / "bin/java"), "-cp", str(work) + os.pathsep + classpath,
+                            "com.gesher.server.AppStoragePolicyHost", str(library),
+                            str(ROOT / "tests/dex-services/fixtures")], check=True, timeout=90)
 
 
 if __name__ == "__main__":

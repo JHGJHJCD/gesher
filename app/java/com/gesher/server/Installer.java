@@ -135,6 +135,7 @@ final class Installer {
     /**
      * The installed packages, parsed from their code paths, as PackageManagerService scans
      * them at boot. A package that does not parse any more is left out (and logged).
+     * Storage preparation follows SystemServer's verified system-package scan policy.
      */
     static List<ApkPackage> loadInstalled() throws IOException {
         List<ApkPackage> result = new ArrayList<>();
@@ -157,12 +158,10 @@ final class Installer {
         }
         for (Entry e : entries.values()) {
             try {
-                ApkPackage loaded = open(e);
-                loaded.prepareInstalledDataDirectories();
-                result.add(loaded);
+                result.add(open(e));
             } catch (Exception ex) {
                 SystemServer.log("installed package " + e.packageName + " at " + e.codePath
-                        + " could not be loaded or prepared: " + ex);
+                        + " could not be loaded: " + ex);
             }
         }
         return result;
@@ -498,6 +497,13 @@ final class Installer {
             }
             Dexopt.onInstall(pkg, old.codePath, parsed.sharedLibraries);
             ApkPackage installed = open(old);
+            ApkPackage previous = mPm.get(pkg);
+            if (previous != null && previous.isSystemAddon()) {
+                if (!GmsSignatureSpoofing.verifyAddonApk(pkg, installed.apkPath)) {
+                    throw new SecurityException("INSTALL_FAILED_UNTRUSTED_ADDON_UPDATE: " + pkg);
+                }
+                installed.setSystemAddon(true);
+            }
             installed.prepareInstalledDataDirectories();
             mPm.add(installed);
         }

@@ -15,8 +15,11 @@ pre-unlock state, or a new Windows process sandbox.
 | Private layout/recovery metadata | `$ANDROID_DATA/system/app-data-layout/<package>` |
 
 `ApplicationInfo.credentialProtectedDataDir` and `deviceProtectedDataDir` identify
-different directories. `dataDir` selects CE normally and DE when the committed
-manifest declares `android:defaultToDeviceProtectedStorage="true"`. AOSP
+different directories. `dataDir` selects CE normally. A verified system package
+can select DE by declaring `android:defaultToDeviceProtectedStorage="true"`.
+As in AOSP's package scan policy, ordinary APKs cannot enable that default:
+their manifest request is ignored and the corresponding published private flag
+is cleared. They can still explicitly create a device-protected context. AOSP
 `LoadedApk` and `ContextImpl` therefore select the right area without overriding
 the public storage APIs. Files, preferences, databases, cache and code cache
 remain separate, including identical names in the two contexts.
@@ -39,8 +42,8 @@ unrequested bulk copy to DE occurs. Apps can move selected preferences or
 databases through the existing Android `moveSharedPreferencesFrom` and
 `moveDatabaseFrom` APIs in either direction.
 
-For a **previously installed application whose committed manifest already
-declares a DE default**, startup performs a one-time rename of the old shared
+For a **previously installed system application whose committed manifest already
+declares an effective DE default**, startup performs a one-time rename of the old shared
 area into DE, preserving the data its default context used. It then creates an
 empty, separate CE area. The old runtime did not record which explicit context
 wrote a file; that lost provenance cannot be reconstructed. The migration
@@ -63,6 +66,12 @@ and leaves the original data available; directories are never silently merged
 or replaced.
 
 Only the already installed manifest may authorize that legacy migration.
+Registry parsing does not finalize storage before the system-package scan has
+established trusted status. Startup prepares the committed record after that
+classification, even when a different bundled version is selected for launch.
+Only then does it prepare the selected APK. An ordinary application's raw
+DE-default request therefore cannot move its old CE data; a fallback or incoming
+manifest cannot reclassify the old application's default either.
 Installer staging and incoming APK flags cannot move old data. If an unusual
 update path encounters an unprepared old layout, it reports the problem before
 publication; normal device startup first prepares the installed version. A bare
@@ -112,18 +121,28 @@ or changed app-classes jar. It uses actual `ApkPackage` metadata projection,
 `LoadedApk` construction and `ContextImpl` path/file methods, with controlled host
 JNI boundaries and the resource-dependent Context constructor bypassed. The
 baseline fails on the explicit public CE/DE-alias assertion; the changed jar
-preserves different contents for an identical filename in both default modes,
+preserves different contents for an identical filename with every combination
+of ordinary/system status and the requested manifest default,
 including newly constructed contexts. This is stronger than comparing path
 strings in a replacement model, but does not replace the target ART fixture.
 
 The Windows ART fixtures cover the production metadata projection, real
 `ContextImpl` file/preference/database operations and moves, actual service
-statistics, and installer/uninstall cleanup. `AppStorageContextTest` is required
+statistics, and installer/uninstall cleanup. They also run actual layout
+preparation, journal replacement, legacy migration and restart through ART's
+filesystem and locking backend. `AppStorageContextTest` is required
 by Windows track 94; the existing `SettingsIntentsTest` and
 `PackageUninstallTest` also assert DE behavior. Host filesystem tests and Java/D8
 compilation do not establish that Windows ART or physical suspend/unlock tests
 passed. Those target-platform runs and an independent Android comparison remain
 required before closing F50 in the roadmap.
+
+The same host runner also executes `AppStoragePolicyHost` against production
+`ApkPackage` and `SystemServer` preparation. It verifies signed/unsigned status
+through the real APK verifier, preserves ordinary CE data even with a manifest
+DE-default request, and covers classification before preparation, committed
+migration authority, fallback/default changes, restart, interrupted migration
+and rejection without publication when the committed layout is ambiguous.
 
 ## Contracts consulted
 
@@ -131,3 +150,4 @@ required before closing F50 in the roadmap.
 - [Android Direct Boot guidance](https://developer.android.com/privacy-and-security/direct-boot)
 - [AOSP Android 16 ContextImpl storage selection and migration](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r4/core/java/android/app/ContextImpl.java)
 - [AOSP Android 16 LoadedApk application storage paths](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r4/core/java/android/app/LoadedApk.java)
+- [AOSP Android 16 system-package scan policy](https://android.googlesource.com/platform/frameworks/base/+/android-16.0.0_r4/services/core/java/com/android/server/pm/ScanPackageUtils.java)

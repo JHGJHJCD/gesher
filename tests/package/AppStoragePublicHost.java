@@ -8,6 +8,7 @@ import com.gesher.server.ApkPackage;
 import com.gesher.server.SharedLibraryGraph;
 import java.io.File;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -43,18 +44,30 @@ public final class AppStoragePublicHost {
         singleton.setAccessible(true); Unsafe unsafe = (Unsafe) singleton.get(null);
         Path root = Files.createTempDirectory("gesher-public-storage-");
         try {
-            for (boolean deviceDefault : new boolean[] {false, true}) {
-                String name = "fixture.storage.public" + (deviceDefault ? "de" : "ce");
-                PackageImpl parsed = (PackageImpl) PackageImpl.forTesting(name, "/fixture/base.apk");
+            for (boolean[] scenario : new boolean[][] {
+                    {false, false}, {false, true}, {true, false}, {true, true}}) {
+                boolean system = scenario[0], requestedDeviceDefault = scenario[1];
+                boolean deviceDefault = system && requestedDeviceDefault;
+                String name = "fixture.storage.public" + system + requestedDeviceDefault;
+                String source = args[1];
+                PackageImpl parsed = (PackageImpl) PackageImpl.forTesting(name, source);
                 parsed.setTargetSdkVersion(36);
-                parsed.setDefaultToDeviceProtectedStorage(deviceDefault);
+                parsed.setDefaultToDeviceProtectedStorage(requestedDeviceDefault);
                 parsed.hideAsFinal();
                 ApkPackage pkg = (ApkPackage) unsafe.allocateInstance(ApkPackage.class);
                 set(pkg, "parsed", parsed); set(pkg, "packageName", name);
-                set(pkg, "apkPath", "/fixture/base.apk"); set(pkg, "mUid", 10000);
+                set(pkg, "apkPath", source); set(pkg, "mUid", 10000);
                 set(pkg, "sharedLibraries", SharedLibraryGraph.EMPTY);
+                if (system) {
+                    Method promote = ApkPackage.class.getDeclaredMethod("setSystemAddon", boolean.class);
+                    promote.setAccessible(true);
+                    promote.invoke(pkg, true); // Actual APK signature verification, no trusted-state override.
+                }
                 pkg.setDataDir(root.resolve(name).toString());
                 ApplicationInfo info = pkg.applicationInfo(0);
+                check(((info.privateFlags & ApplicationInfo.PRIVATE_FLAG_DEFAULT_TO_DEVICE_PROTECTED_STORAGE)
+                                != 0) == deviceDefault,
+                        "non-system manifest request acquired a device-protected default");
                 Files.createDirectories(Path.of(info.credentialProtectedDataDir, "files"));
                 Files.createDirectories(Path.of(info.deviceProtectedDataDir, "files"));
                 LoadedApk loaded = new LoadedApk(null, info, CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,

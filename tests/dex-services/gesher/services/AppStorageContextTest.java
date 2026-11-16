@@ -17,6 +17,7 @@ import com.gesher.server.Services;
 import com.gesher.server.SharedLibraryGraph;
 import java.io.File;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
@@ -36,28 +37,51 @@ public final class AppStorageContextTest {
         field.setAccessible(true); field.set(object, value);
     }
 
-    private static ApkPackage record(Unsafe unsafe, String name, File data, boolean deviceDefault)
+    private static ApkPackage record(Unsafe unsafe, String name, File data,
+            boolean requestedDeviceDefault, boolean system)
             throws Exception {
         // This fixture does not replace ContextImpl, LoadedApk, preferences or SQLite.
-        // The native APK parser is bypassed only to vary a manifest bit deterministically;
+        // The native APK parser and completed system scan are controlled inputs;
         // metadata comes from production ApkPackage and AOSP's PackageInfo generator.
+        // AppStoragePolicyHost separately exercises real signed-APK promotion.
         String source = System.getenv("ANDROID_ROOT") + "/framework/framework-res.apk";
         PackageImpl parsed = (PackageImpl) PackageImpl.forTesting(name, source);
         parsed.setTargetSdkVersion(36);
         parsed.setEnabled(true);
         parsed.setDirectBootAware(true);
-        parsed.setDefaultToDeviceProtectedStorage(deviceDefault);
+        parsed.setDefaultToDeviceProtectedStorage(requestedDeviceDefault);
         ApkPackage apk = (ApkPackage) unsafe.allocateInstance(ApkPackage.class);
         set(apk, "packageName", name); set(apk, "parsed", parsed);
         set(apk, "apkPath", source); set(apk, "mUid", Process.myUid());
+        set(apk, "mSystemAddon", system);
         set(apk, "sharedLibraries", SharedLibraryGraph.EMPTY);
         apk.setDataDir(new File(data, name).getPath());
-        ApplicationInfo info = apk.applicationInfo(0);
-        // Keep this fixture runnable unchanged on the old runtime as a regression
-        // control. Installer/launch preparation is exercised separately.
-        Files.createDirectories(new File(info.credentialProtectedDataDir).toPath());
-        Files.createDirectories(new File(info.deviceProtectedDataDir).toPath());
         return apk;
+    }
+
+    private static void legacyMigration(Unsafe unsafe, File data) throws Exception {
+        String name = "fixture.storage.legacy";
+        ApkPackage legacy = record(unsafe, name, data, true, true);
+        File credential = new File(legacy.credentialProtectedDataDir());
+        File device = new File(legacy.deviceProtectedDataDir());
+        Files.createDirectories(new File(credential, "files").toPath());
+        Files.writeString(new File(credential, "files/old").toPath(), "old default data");
+        Method prepare = ApkPackage.class.getDeclaredMethod("prepareInstalledDataDirectories");
+        prepare.setAccessible(true);
+        // Real ART FileChannel locks, synced atomic journal replacement and directory rename.
+        prepare.invoke(legacy);
+        check(!new File(credential, "files/old").exists()
+                        && "old default data".equals(Files.readString(new File(device, "files/old").toPath()))
+                        && credential.isDirectory(),
+                "Actual installed preparation did not preserve and separate legacy default data");
+        Files.createDirectories(new File(credential, "files").toPath());
+        Files.writeString(new File(credential, "files/new").toPath(), "new credential data");
+        ApkPackage restarted = record(unsafe, name, data, true, true);
+        prepare.invoke(restarted);
+        check("new credential data".equals(Files.readString(new File(credential, "files/new").toPath()))
+                        && !new File(device, "files/new").exists()
+                        && "old default data".equals(Files.readString(new File(device, "files/old").toPath())),
+                "Actual restart repeated legacy migration or lost an independent storage area");
     }
 
     private static void write(Context context, String name, String value) throws Exception {
@@ -160,10 +184,14 @@ public final class AppStorageContextTest {
         singleton.setAccessible(true); Unsafe unsafe = (Unsafe) singleton.get(null);
         File data = Files.createTempDirectory("gesher-context-storage-").toFile();
         android.system.Os.setenv("ANDROID_DATA", data.getPath(), true);
-        ApkPackage ordinary = record(unsafe, "fixture.storage.credential", data, false);
-        ApkPackage device = record(unsafe, "fixture.storage.device", data, true);
-        Services.installInProcess(Services.createInProcess(List.of(ordinary, device)));
+        ApkPackage ordinary = record(unsafe, "fixture.storage.credential", data, false, false);
+        ApkPackage requested = record(unsafe, "fixture.storage.requested", data, true, false);
+        ApkPackage device = record(unsafe, "fixture.storage.device", data, true, true);
+        ordinary.prepareDataDirectories(); requested.prepareDataDirectories(); device.prepareDataDirectories();
+        legacyMigration(unsafe, data);
+        Services.installInProcess(Services.createInProcess(List.of(ordinary, requested, device)));
         exercise(MediaRouterContractTest.context(ordinary.packageName), ordinary, false);
+        exercise(MediaRouterContractTest.context(requested.packageName), requested, false);
         exercise(MediaRouterContractTest.context(device.packageName), device, true);
         System.out.println("AppStorageContextTest all passed: " + checks + " checks");
         System.exit(0);
