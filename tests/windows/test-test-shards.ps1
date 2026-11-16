@@ -131,3 +131,4 @@ $testTracks = @(Get-ChildItem -LiteralPath (Split-Path $TrackFile) -Filter '*-tr
   }
   Remove-Item -LiteralPath $temp -Recurse -Force
 }
+exit 0
