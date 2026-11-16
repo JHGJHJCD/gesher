@@ -52,6 +52,8 @@ void Check(bool ok, const char* reason) {
   if (!ok) { ++failures; if (failures < 12) std::fprintf(stderr, "FAIL audio capture: %s\n", reason); }
 }
 void Write(FILE* file, const void* data, size_t size) {
+  // Empty vectors may return nullptr; a zero-length record has no bytes to write.
+  if (size == 0) return;
   if (std::fwrite(data, 1, size, file) != size) std::abort();
 }
 template<class T> void Field(FILE* file, const T& value) { Write(file, &value, sizeof(value)); }
