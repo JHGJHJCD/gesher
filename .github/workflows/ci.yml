@@ -245,6 +245,9 @@ jobs:
           python3 tools/test_audio_buffer_contracts.py
           python3 tools/test_media_callback_contracts.py --java-home "$JAVA_HOME"
 
+      - name: Android HttpEngine requests over real HTTP sockets
+        run: python3 tools/test_http_engine.py --java-home "$JAVA_HOME"
+
       - name: WebStorage origin, owned WebView responses and running-task contracts
         run: |
           python3 tools/test_webstorage_origin_contracts.py --java-home "$JAVA_HOME"

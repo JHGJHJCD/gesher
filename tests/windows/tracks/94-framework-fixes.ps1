@@ -16,6 +16,44 @@ $bcpFixes = (('core-oj', 'core-libart', 'core-icu4j', 'framework', 'gesher-app')
 $dvmFixes = @("-Xbootclasspath:$bcpFixes", "-Ximage:$(NoDrive "$root/system")/framework/boot.art", '-Xint', '-Xusejit:false',
   '-cp', (NoDrive "$Dir/services-tests.dex"))
 
+$httpEngineOut = FixesRun ($dvmFixes + 'HttpEngineDeviceSmoke') 45
+$httpEngineCode = $LASTEXITCODE
+Check 'network: Android HttpEngine requests over real ART and HTTP sockets' {
+  $global:LASTEXITCODE = $httpEngineCode
+  $httpEngineOut
+} @('HttpEngineDeviceSmoke passed:')
+
+$http2Out = FixesRun ($dvmFixes + 'Http2DeviceSmoke') 45
+$http2Code = $LASTEXITCODE
+Check 'network: HTTP/2 full duplex, direct buffers, flush and gRPC trailers' {
+  $global:LASTEXITCODE = $http2Code
+  $http2Out
+} @('Http2DeviceSmoke passed:')
+
+$http2ContractModes = @('gzip-headers', 'early-read', 'readonly-write')
+foreach ($http2ContractMode in $http2ContractModes) {
+  $http2ContractOut = FixesRun ($dvmFixes + 'Http2DeviceSmoke' + $http2ContractMode) 45
+  $http2ContractCode = $LASTEXITCODE
+  Check "network: HTTP/2 $http2ContractMode callback and buffer contract" {
+    $global:LASTEXITCODE = $http2ContractCode
+    $http2ContractOut
+  } @('Http2DeviceSmoke passed:')
+}
+
+$http2GzipOut = FixesRun ($dvmFixes + 'Http2DeviceSmoke' + 'gzip') 45
+$http2GzipCode = $LASTEXITCODE
+Check 'network: HTTP/2 content decoding before gRPC message delivery' {
+  $global:LASTEXITCODE = $http2GzipCode
+  $http2GzipOut
+} @('Http2DeviceSmoke passed:')
+
+$http2UnaryOut = FixesRun ($dvmFixes + 'Http2DeviceSmoke' + 'unary') 45
+$http2UnaryCode = $LASTEXITCODE
+Check 'network: gRPC trailers complete without an extra application read' {
+  $global:LASTEXITCODE = $http2UnaryCode
+  $http2UnaryOut
+} @('Http2DeviceSmoke passed:')
+
 $launcherLogBoundsOut = FixesRun ($dvmFixes + 'gesher.services.LauncherLogBoundsTest') 90
 $launcherLogBoundsCode = $LASTEXITCODE
 Check 'launcher: Android file channels, UTF-8 tails and bounded diagnostic lines' {
