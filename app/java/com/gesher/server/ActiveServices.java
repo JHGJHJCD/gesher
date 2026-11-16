@@ -498,7 +498,7 @@ final class ActiveServices {
 
     boolean unbindService(IServiceConnection connection) {
         List<ConnectionRecord> removed;
-        List<IntentBindRecord> unbind = new ArrayList<>();
+        List<UnbindAttempt> unbind = new ArrayList<>();
         List<ServiceRecord> services = new ArrayList<>();
         synchronized (this) {
             List<ConnectionRecord> existing = mConnections.get(connection.asBinder());
@@ -523,19 +523,21 @@ final class ActiveServices {
                     b.doRebind = false;
                     b.unbindToken = new UnbindAttempt(b);
                     b.service.pendingUnbinds.add(b.unbindToken);
-                    unbind.add(b);
+                    unbind.add(b.unbindToken);
                 }
                 if (!services.contains(b.service)) services.add(b.service);
             }
         }
         for (ServiceRecord r : services) SystemServer.log("unbindService " + r);
-        for (IntentBindRecord b : unbind) {
+        for (UnbindAttempt attempt : unbind) {
+            IntentBindRecord b = attempt.binding;
             ServiceRecord r = b.service;
             IApplicationThread thread;
             synchronized (this) {
+                if (b.unbindToken != attempt || !b.unbindPending) continue;
                 thread = r.app != null && r.created ? r.app.thread : null;
                 if (thread == null) {
-                    r.pendingUnbinds.remove(b.unbindToken);
+                    r.pendingUnbinds.remove(attempt);
                     b.unbindToken = null;
                     b.unbindPending = false;
                     b.requested = false;
@@ -546,16 +548,18 @@ final class ActiveServices {
             if (thread == null) continue;
             SystemServer.log("scheduleUnbindService " + r);
             try {
-                thread.scheduleUnbindService(r, b.unbindToken, b.intent);
+                thread.scheduleUnbindService(r, attempt, b.intent);
             } catch (RemoteException e) {
                 SystemServer.log("scheduleUnbindService " + r + ": " + e);
                 synchronized (this) {
-                    r.pendingUnbinds.remove(b.unbindToken);
-                    b.unbindToken = null;
-                    b.unbindPending = false;
-                    b.requested = false;
-                    b.received = false;
-                    b.binder = null;
+                    if (b.unbindToken == attempt) {
+                        r.pendingUnbinds.remove(attempt);
+                        b.unbindToken = null;
+                        b.unbindPending = false;
+                        b.requested = false;
+                        b.received = false;
+                        b.binder = null;
+                    }
                 }
             }
         }
