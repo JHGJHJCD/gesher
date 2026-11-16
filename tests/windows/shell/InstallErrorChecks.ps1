@@ -22,7 +22,7 @@ function Assert-Install([bool] $condition, [string] $message) {
 # The texts the launcher and gesher-launch show, in both languages.
 $catalog = Get-Content -LiteralPath $UiMessagesPath -Raw -Encoding UTF8 | ConvertFrom-Json
 foreach ($key in 'launch_failed', 'install_update_incompatible', 'install_bad_signature',
-                 'install_bad_split_signature', 'cp_install_failed') {
+                 'install_bad_split_signature', 'install_missing_split', 'cp_install_failed') {
     $entry = $catalog.messages.PSObject.Properties[$key]
     Assert-Install ($null -ne $entry) "ui-messages.json has '$key'"
     foreach ($lang in 'en', 'he') {
