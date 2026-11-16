@@ -469,6 +469,17 @@ jobs:
             --app-classes out/app/gesher-app-classes.jar \
             --apksig-jar "$RUNNER_TEMP/gesher-apksig.jar"
 
+      - name: Activity finish, null binding and public media receiver contracts
+        run: |
+          args=(--java-home "$JAVA_HOME" --framework-classes out/framework/classes \
+            --core-classes out/coremod --app-classes out/app/gesher-app-classes.jar \
+            --apksig "$RUNNER_TEMP/gesher-apksig.jar")
+          python3 tools/test_activity_finish.py "${args[@]}"
+          python3 tools/test_null_bindings.py "${args[@]}"
+          "$JAVA_HOME/bin/javac" -cp work/sdk-36/android.jar \
+            -d "$RUNNER_TEMP/media-receiver-sdk" \
+            tests/dex-services/gesher/services/MediaReceiverLifecycleTest.java
+
       - name: Cookie callback caller Looper contracts
         run: |
           python3 tools/test_cookie_callbacks.py --java-home "$JAVA_HOME" \
