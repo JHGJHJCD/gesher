@@ -50,6 +50,17 @@ public final class VirtualKeyboard {
   public static class InputManager extends IInputManager.Default {
     private InputDevice mKeyboard;
 
+    /** The device set is fixed (the virtual keyboard): no device is ever added or removed. */
+    @Override
+    public void registerInputDevicesChangedListener(
+        android.hardware.input.IInputDevicesChangedListener listener) {}
+
+    /** No configured override: VelocityTracker uses its default strategy, as on a device. */
+    @Override
+    public String getVelocityTrackerStrategy() {
+      return null;
+    }
+
     @Override
     public int[] getInputDeviceIds() {
       return new int[] {KeyCharacterMap.VIRTUAL_KEYBOARD};

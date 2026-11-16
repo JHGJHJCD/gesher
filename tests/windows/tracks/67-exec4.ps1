@@ -1,6 +1,7 @@
 # The host mutates its CRT after the NDK library has bound its environ import.
 # Guards compare the current CRT slot before any guest traversal, so the old
-# snapshot is a safe failing control. All binaries are built/executed in CI.
+# snapshot fails even when the CRT grows its array in place. All binaries are
+# built/executed in CI.
 Check 'exec4: live environ after host narrow/wide mutations, real ELF calls and posix_spawn' {
   $info = [Diagnostics.ProcessStartInfo]::new((Resolve-Path "$Dir/exec4_environment_test.exe").Path)
   $info.UseShellExecute = $false
@@ -20,6 +21,6 @@ Check 'exec4: live environ after host narrow/wide mutations, real ELF calls and 
   $global:LASTEXITCODE = $(if ($timedOut) { -1 } else { $process.ExitCode })
   $process.Dispose()
   $text
-} @('exec4: PASS stale CRT snapshot detected without dereferencing it',
+} @('exec4: PASS live CRT slot and aliases verified without dereferencing a snapshot',
     'exec4: PASS environ aliases, guest setenv/putenv/unsetenv and posix_spawn file actions',
     'exec4: PASS host narrow/wide changes reach relocated ELF imports and spawned children')

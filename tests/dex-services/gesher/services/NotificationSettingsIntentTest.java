@@ -72,7 +72,9 @@ public final class NotificationSettingsIntentTest {
                     new Intent(actions[1]).setPackage("other.application"),
                     new Intent(actions[1]).setComponent(new ComponentName("other.application", "Missing")),
                     new Intent("android.settings.NOT_A_SUPPORTED_NOTIFICATION_ACTION"),
-                    new Intent("android.settings.SYNC_SETTINGS"),
+                    // SYNC_SETTINGS now opens the Control Center (SettingsIntentsTest);
+                    // NFC has no counterpart on Windows.
+                    new Intent("android.settings.NFC_SETTINGS"),
             };
             for (Intent intent : unhandled) {
                 Object status = start.invoke(atm, null, intent, null, "gesher.services", null,

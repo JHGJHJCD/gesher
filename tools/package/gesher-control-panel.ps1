@@ -17,6 +17,24 @@ $here = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Pat
 $root = Join-Path $env:LOCALAPPDATA 'Gesher'
 $script:UpdateDirectory = Join-Path $root 'updates'
 
+# One Control Center. A second start (the Start menu again, or an app's "App info", which
+# the system server answers by writing the package here and opening the panel:
+# ControlCenter.java) signals the open panel, which comes to the front and takes the
+# request on its live-refresh timer, and exits. The mutex is only a name (never owned);
+# a panel closes its handles as its window closes, so a start right after that opens a
+# new one. "Reopen" after an update starts the new version while the old one is still
+# open: GESHER_PANEL_REOPEN lets that start through.
+$script:PanelRequestFile = Join-Path $root 'data/system/control-panel-request'
+$script:PanelReopen = ($env:GESHER_PANEL_REOPEN -eq '1')
+Remove-Item Env:GESHER_PANEL_REOPEN -ErrorAction SilentlyContinue
+$script:PanelInstanceCreated = $false
+$script:PanelInstance = [System.Threading.Mutex]::new($false, 'Local\Gesher.ControlPanel', [ref] $script:PanelInstanceCreated)
+$script:PanelShowEvent = [System.Threading.EventWaitHandle]::new($false, [System.Threading.EventResetMode]::AutoReset, 'Local\Gesher.ControlPanel.Show')
+if (-not $script:PanelInstanceCreated -and -not $script:PanelReopen) {
+    $null = $script:PanelShowEvent.Set()
+    exit 0
+}
+
 $isHe = ($script:GesherUiLanguage -eq 'he')
 $flowDirection = if ($isHe) { 'RightToLeft' } else { 'LeftToRight' }
 
@@ -621,6 +639,93 @@ function Invoke-LiveRefreshTick {
     }
 }
 
+# Takes the system server's request (one line: a package, or empty for the panel itself).
+# Moving it aside first means one panel shows it once, even with two panels open (the
+# old and new one around "Reopen").
+function Read-PanelRequest {
+    $file = $script:PanelRequestFile
+    if (-not (Test-Path -LiteralPath $file)) { return $null }
+    # Reopen can briefly leave two consumers. Each owns its taken file, so a newer
+    # request cannot overwrite one that the other panel has moved but not yet read.
+    $taken = "$file.$([guid]::NewGuid().ToString('N')).taken"
+    try { Move-Item -LiteralPath $file -Destination $taken -ErrorAction Stop } catch { return $null }
+    try { $text = [System.IO.File]::ReadAllText($taken) } catch { $text = $null }
+    Remove-Item -LiteralPath $taken -Force -ErrorAction SilentlyContinue
+    if ($null -eq $text) { return $null }
+    return $text.Trim()
+}
+
+# packages.list's install and update times (milliseconds since 1970, UTC), as local dates.
+function Get-AppInstallTimes([string] $pkg) {
+    $packagesFile = Join-Path $root 'data/system/packages.list'
+    if (-not (Test-Path -LiteralPath $packagesFile)) { return $null }
+    foreach ($line in Get-Content -LiteralPath $packagesFile) {
+        $parts = $line -split "`t"
+        if ($parts.Count -lt 4 -or $parts[0].Trim() -ne $pkg) { continue }
+        $times = @()
+        foreach ($value in $parts[2], $parts[3]) {
+            $ms = 0L
+            if ([long]::TryParse($value.Trim(), [ref] $ms) -and $ms -gt 0) {
+                $times += [DateTimeOffset]::FromUnixTimeMilliseconds($ms).LocalDateTime.ToString('g')
+            } else { $times += $null }
+        }
+        return $times
+    }
+    return $null
+}
+
+function Show-AppInfoDialog([string] $pkg) {
+    $item = $appsList.ItemsSource | Where-Object { $_.Package -eq $pkg } | Select-Object -First 1
+    if (-not $item) {
+        Refresh-Dashboard
+        $item = $appsList.ItemsSource | Where-Object { $_.Package -eq $pkg } | Select-Object -First 1
+    }
+    if (-not $item) { return }
+    $label = if ($item.Label) { [string]$item.Label } else { $pkg }
+    $lines = @()
+    $times = Get-AppInstallTimes $pkg
+    if ($times) {
+        if ($times[0]) { $lines += Get-GesherText 'cp_app_info_installed' @($times[0]) }
+        if ($times[1] -and $times[1] -ne $times[0]) { $lines += Get-GesherText 'cp_app_info_updated' @($times[1]) }
+    }
+    $message = if ($lines.Count -gt 0) { $lines -join "`n" } else { $label }
+    $uninstall = Show-ModernConfirmDialog `
+        -Title $label `
+        -SubTitle $pkg `
+        -Message $message `
+        -Detail (Get-GesherText 'cp_app_info_detail') `
+        -ConfirmText (Get-GesherText 'cp_btn_uninstall') `
+        -CancelText (Get-GesherText 'cp_app_info_close') `
+        -IconImage $item.IconImage `
+        -CancelIsDefault
+    if ($uninstall) { & $script:OnAppUninstall $pkg }
+}
+
+# Shows a pending request: brings the panel to the front and, for a package, its details.
+$script:ShowingAppInfo = $false
+function Invoke-PanelRequest {
+    # Another start signalled: come to the front even while busy or showing a dialog.
+    $raise = $false
+    if ($script:PanelShowEvent) { try { $raise = $script:PanelShowEvent.WaitOne(0) } catch { } }
+    # The dialog runs a nested message loop in which this timer keeps ticking; an action
+    # in progress keeps the request until it ends.
+    $request = $null
+    if (-not $script:IsBusy -and -not $script:ShowingAppInfo) { $request = Read-PanelRequest }
+    if ($null -ne $request) { $raise = $true }
+    if (-not $raise) { return }
+    if ($window.WindowState -eq [System.Windows.WindowState]::Minimized) {
+        $window.WindowState = [System.Windows.WindowState]::Normal
+    }
+    # Topmost on and off: Windows lets a background process raise its own window that way.
+    $window.Topmost = $true
+    $window.Topmost = $false
+    $null = $window.Activate()
+    if ($request -match '^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$') {
+        $script:ShowingAppInfo = $true
+        try { Show-AppInfoDialog $request } finally { $script:ShowingAppInfo = $false }
+    }
+}
+
 # Updates have their own state so a slow check or download does not suspend the
 # dashboard or its application controls. Only the installer takes the action guard.
 function New-PanelUpdateState($currentVersion, $preferences) {
@@ -872,7 +977,10 @@ function Show-ModernConfirmDialog {
         [switch] $IsDanger,
         [switch] $IsWarning,
         $IconImage = $null,
-        [string] $SubTitle = $null
+        [string] $SubTitle = $null,
+        # Enter closes instead of confirming: for a dialog another app raised (App info),
+        # where the user may be typing elsewhere when it takes the focus.
+        [switch] $CancelIsDefault
     )
 
     $badgeBg = if ($IsDanger) { '#FEE4E2' } elseif ($IsWarning) { '#FEF0C7' } else { '#F2F4F7' }
@@ -1022,6 +1130,12 @@ function Show-ModernConfirmDialog {
         $dialog.DialogResult = $true
         $dialog.Close()
     })
+    if ($CancelIsDefault) {
+        $btnCancel = $dialog.FindName('BtnCancel')
+        $btnConfirm.IsDefault = $false
+        $btnCancel.IsDefault = $true
+        $dialog.Add_ContentRendered({ $null = $btnCancel.Focus() })
+    }
 
     return ($dialog.ShowDialog() -eq $true)
 }
@@ -1256,12 +1370,20 @@ $btnUpdateNotes.Add_Click({
 })
 $btnReopenPanel.Add_Click({
     try {
-        Start-Process -FilePath (Join-Path $here 'gesher-launch.exe') -ArgumentList 'control-panel' -WindowStyle Hidden
+        # This panel is still open as the new one starts: let it through (one panel).
+        $env:GESHER_PANEL_REOPEN = '1'
+        try {
+            Start-Process -FilePath (Join-Path $here 'gesher-launch.exe') -ArgumentList 'control-panel' -WindowStyle Hidden
+        } finally { Remove-Item Env:GESHER_PANEL_REOPEN -ErrorAction SilentlyContinue }
         $window.Close()
     } catch { Set-PanelUpdateStatus 'cp_update_reopen_failed' @() $_.Exception.Message; Update-PanelUpdateView }
 })
 $window.Add_SizeChanged({ Update-PanelWindowLayout })
-$window.Add_ContentRendered({ Update-PanelWindowLayout; Start-PanelUpdateCheck -Automatic })
+$window.Add_ContentRendered({
+    Update-PanelWindowLayout
+    Start-PanelUpdateCheck -Automatic
+    try { Invoke-PanelRequest } catch { }
+})
 
 # Toggle device handler
 $btnToggleDevice.Add_Click({
@@ -1693,6 +1815,7 @@ $script:LiveTimer.Interval = [TimeSpan]::FromMilliseconds($script:LiveRefreshInt
 $script:LiveTimer.Add_Tick({
     try { Complete-PanelAction } catch { }
     try { Invoke-LiveRefreshTick } catch { }
+    try { Invoke-PanelRequest } catch { }
     try { Invoke-PanelUpdateTick } catch {
         Set-PanelUpdateStatus 'cp_update_check_failed' @() $_.Exception.Message
         Update-PanelUpdateView
@@ -1717,6 +1840,11 @@ $window.Add_Closed({
     $script:ActionState.Closed = $true
     Close-PanelUpdates
     $script:LiveTimer.Stop()
+    # Free the single-panel name now, not after the update worker drains: a start right
+    # after this window closed opens a new panel instead of signalling this one.
+    try { $script:PanelShowEvent.Dispose() } catch { }
+    try { $script:PanelInstance.Dispose() } catch { }
+    $script:PanelShowEvent = $null
 })
 
 # Initial load

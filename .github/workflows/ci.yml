@@ -63,6 +63,7 @@ jobs:
           tests/windows/shell/ControlPanelRefreshChecks.ps1
           tests/windows/shell/ControlPanelIconCacheChecks.ps1
           tests/windows/shell/ControlPanelActionChecks.ps1
+          tests/windows/shell/ControlPanelRequestChecks.ps1
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1
@@ -263,6 +264,9 @@ jobs:
 
       - name: Settings context bootstrap and deferred construction contracts
         run: python3 tools/test_settings_context_bootstrap.py --java-home "$JAVA_HOME"
+
+      - name: Control Center request publication and launcher cleanup
+        run: python3 tools/test_control_center_requests.py --java-home "$JAVA_HOME"
 
       - name: APK native library filename contracts
         run: python3 tools/test_native_library_paths.py --java-home "$JAVA_HOME"
@@ -744,6 +748,7 @@ jobs:
           tests/windows/shell/PreferredLanguagesChecks.ps1
           tests/windows/shell/MicrogDefaultsChecks.ps1
           tests/windows/shell/ControlPanelRefreshChecks.ps1
+          tests/windows/shell/ControlPanelRequestChecks.ps1
           tests/windows/shell/UpdateChecks.ps1
           tests/windows/shell/UpdateTransportChecks.ps1
           tests/windows/shell/ControlPanelUpdateChecks.ps1

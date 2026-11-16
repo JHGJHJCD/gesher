@@ -156,7 +156,52 @@ public final class ActivityOptionsContractTest {
         specifics();
         filtersAndSelectors();
         installedState();
+        launcherFallback();
         System.out.println("ActivityOptionsContractTest framework passed: " + checks + " checks");
+    }
+
+    private static void launcherFallback() throws Exception {
+        String name = "fixture.launcher";
+        ParsedIntentInfoImpl firstFilter = filter("first launcher", 0, false, Intent.ACTION_MAIN);
+        firstFilter.getIntentFilter().addCategory(Intent.CATEGORY_LAUNCHER);
+        ParsedIntentInfoImpl aliasFilter = filter("later alias", 0, false, Intent.ACTION_MAIN);
+        aliasFilter.getIntentFilter().addCategory(Intent.CATEGORY_LAUNCHER);
+        ParsedActivityImpl first = activity(name + ".First", firstFilter);
+        first.setEnabled(false);
+        ParsedActivityImpl alias = activity(name + ".Alias", aliasFilter);
+        alias.setTargetActivity(name + ".Content");
+        ApkPackage fixture = record(name, false, true, first, activity(name + ".Content"), alias);
+        // Exercise the production constructor's launcher inventory, not a test copy.
+        Constructor<ApkPackage> constructor = ApkPackage.class.getDeclaredConstructor(String.class,
+                com.android.internal.pm.parsing.pkg.ParsedPackage.class);
+        constructor.setAccessible(true);
+        ApkPackage installed = constructor.newInstance(fixture.apkPath, fixture.parsed);
+        check(installed.launcherActivity(null).name.equals(alias.getName()),
+                "A disabled first launcher hid an enabled later alias");
+        check(installed.launcherActivity(".Alias").name.equals(alias.getName()),
+                "Explicit enabled alias changed");
+        try {
+            installed.launcherActivity(".First");
+            throw new AssertionError("Explicit disabled launcher fell back to another component");
+        } catch (IllegalStateException expected) { checks++; }
+        java.lang.reflect.Method state = ApkPackage.class.getDeclaredMethod(
+                "setComponentEnabledState", String.class, int.class);
+        state.setAccessible(true);
+        state.invoke(installed, first.getName(), PackageManager.COMPONENT_ENABLED_STATE_ENABLED);
+        check(installed.launcherActivity(null).name.equals(first.getName()),
+                "Enabled override did not restore the first launcher's priority");
+        state.invoke(installed, first.getName(), PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
+        check(installed.launcherActivity(null).name.equals(alias.getName()),
+                "Runtime disabling did not select the later launcher");
+        state.invoke(installed, alias.getName(), PackageManager.COMPONENT_ENABLED_STATE_DISABLED);
+        try {
+            installed.launcherActivity(null);
+            throw new AssertionError("A package with no enabled launchers was launchable");
+        } catch (IllegalStateException expected) { checks++; }
+        try {
+            installed.launcherActivity(".Alias");
+            throw new AssertionError("Explicit runtime-disabled alias was launchable");
+        } catch (IllegalStateException expected) { checks++; }
     }
 
     private static void ordering() throws Exception {

@@ -4,7 +4,6 @@
 #include <gesher/bionic_shim.h>
 #include <gesher/elf_loader.h>
 
-#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
@@ -17,9 +16,6 @@ int main(int argc, char** argv) {
   auto slot = static_cast<char***>(gesher::bionic::LookupBionicSymbol("environ"));
   auto alias = static_cast<char***>(gesher::bionic::LookupBionicSymbol("__environ"));
   if (slot == nullptr) return 1;
-  // Retain only the pointer's integer value: a negative control must never
-  // traverse the former allocation after the CRT has changed its storage.
-  const uintptr_t snapshot = reinterpret_cast<uintptr_t>(_environ);
   std::string error;
   elf::Library* library = elf::Load(argv[1], &error);
   if (library == nullptr) {
@@ -40,23 +36,18 @@ int main(int argc, char** argv) {
     if (result != 0) std::fprintf(stderr, "exec4: FAIL %s guest result %d\n", stage, result);
     return result == 0;
   };
-  bool relocated = false;
   for (int i = 0; i < 64; ++i) {
     const std::string name = "GESHER_EXEC4_GROW_" + std::to_string(i);
     if (_putenv_s(name.c_str(), "host-narrow") != 0) return 1;
-    relocated |= snapshot != reinterpret_cast<uintptr_t>(_environ);
-    // Compare pointer values before allowing any guest code to dereference
-    // its imported array. The old snapshot fails safely here.
+    // A copied pointer has a different slot even when the CRT grows its array
+    // in place. Check slot identity before dereferencing it: this rejects the
+    // old snapshot export without requiring the allocator to move the array.
     if (slot != &_environ || alias != slot || *slot != _environ) {
       std::fputs("exec4: FAIL environ does not export the current CRT slot\n", stderr);
       return 1;
     }
   }
-  if (!relocated) {
-    std::fputs("exec4: FAIL captured CRT snapshot did not become stale\n", stderr);
-    return 1;
-  }
-  std::puts("exec4: PASS stale CRT snapshot detected without dereferencing it");
+  std::puts("exec4: PASS live CRT slot and aliases verified without dereferencing a snapshot");
   if (_putenv_s("GESHER_EXEC4_ENV", "host-narrow") != 0 ||
       !check_guest(run, "host-narrow", "host-narrow"))
     return 1;

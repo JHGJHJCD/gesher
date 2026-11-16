@@ -106,6 +106,7 @@ java -XX:+UnlockDiagnosticVMOptions -XX:-BytecodeVerificationRemote -cp "$gencp"
   android.accounts.IAccountManager \
   com.android.internal.os.IDropBoxManagerService \
   android.app.usage.IUsageStatsManager \
+  android.app.usage.IStorageStatsManager \
   android.app.admin.IDevicePolicyManager \
   com.android.internal.telephony.ITelephony \
   com.android.internal.telephony.IPhoneSubInfo \
