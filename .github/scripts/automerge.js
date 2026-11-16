@@ -48,10 +48,18 @@ function hasLabel(pr) {
 function appliedAfterOpening(pr, event, boundary) {
   const opened = Date.parse(pr.created_at);
   const applied = Date.parse(event.created_at);
+  const author = pr.user?.id;
+  const previous = Date.parse(event.priorActorApplicationAt);
   // GitHub timestamps have second precision. A creation-time label, including
   // an indistinguishable same-second addition, requires a fresh opt-in.
-  return Number.isFinite(opened) && Number.isFinite(applied) &&
-    Number.isFinite(boundary) && applied > Math.max(opened, boundary);
+  // gh creates a PR and then adds its labels in a separate API operation.
+  // Reject the author's first application even if opening initialization has
+  // already finished; a later deliberate reapplication remains possible.
+  return Number.isSafeInteger(author) && author > 0 &&
+    Number.isFinite(opened) && Number.isFinite(applied) &&
+    Number.isFinite(boundary) && applied > Math.max(opened, boundary) &&
+    (event.actor?.id !== author ||
+      (Number.isFinite(previous) && previous >= opened && previous < applied));
 }
 
 async function openingBoundary(github, owner, repo, pr) {
@@ -89,7 +97,8 @@ async function initializeOpening(github, owner, repo, pr, snapshot, event) {
   const value = {repository: pr.base.repo.id, number: pr.number,
     created: pr.created_at, boundary: new Date(boundary).toISOString()};
   await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
-    body: 'Automerge initialized. Approval requires a later explicit label from a collaborator with merge access.\n\n<!-- ' +
+    body: 'Automerge initialized. Approval requires a later explicit label from a collaborator with merge access. ' +
+      'The PR author must reapply their first automerge label before approval.\n\n<!-- ' +
       OPENING + ' ' + JSON.stringify(value) + ' -->'});
   return boundary;
 }
@@ -113,9 +122,13 @@ async function labelEvent(github, owner, repo, number, deliveredAt) {
   const delivered = Date.parse(deliveredAt);
   const candidates = relevant.filter((e) => e.event === 'labeled' &&
     Date.parse(e.created_at) >= delivered - 1000 && Date.parse(e.created_at) <= delivered);
+  const previous = latestBy(relevant.filter((e) => e.event === 'labeled' &&
+    e.id !== applied.id && e.actor?.id === applied.actor?.id &&
+    Date.parse(e.created_at) < Date.parse(applied.created_at)), () => LABEL)[0];
   // A delayed delivery cannot distinguish two relabels by one actor within
   // the webhook timestamp's precision. Do not infer approval in that case.
   return {...applied, invalidated: last.event !== 'labeled',
+    priorActorApplicationAt: previous?.created_at,
     deliveryMatches: Number.isFinite(delivered) && candidates.length === 1 && candidates[0].id === applied.id,
     unambiguous: relevant.filter((e) =>
       e.event === 'labeled' && e.created_at === applied.created_at).length === 1};
@@ -285,7 +298,7 @@ async function tryMerge({github, core, owner, repo, number, sha, defaultBranch})
   if (!event || !event.unambiguous || !await authorized(github, owner, repo, event)) return;
   const boundary = await initializeOpening(github, owner, repo, pr, pr, event);
   if (!appliedAfterOpening(pr, event, boundary)) return removeLabel(github, owner, repo, pr, event,
-    'apply the label explicitly after the PR has been opened', core);
+    'reapply the label after PR initialization; the author\'s first application cannot approve it', core);
   if (event.invalidated) return removeLabel(github, owner, repo, pr, event,
     'the PR changed after approval; apply the label again', core);
   const receipt = await approval(github, owner, repo, pr, event);
@@ -364,7 +377,7 @@ module.exports = async ({github, context, core}) => {
     }
     const boundary = await initializeOpening(github, owner, repo, pr, pr, event);
     if (!appliedAfterOpening(pr, event, boundary)) return removeLabel(github, owner, repo, pr, event,
-      'apply the label explicitly after the PR has been opened', core);
+      'reapply the label after PR initialization; the author\'s first application cannot approve it', core);
     if (event.invalidated) return removeLabel(github, owner, repo, pr, event,
       'the PR changed after approval; apply the label again', core);
     // Opening a PR never grants approval. A delayed opened event must not

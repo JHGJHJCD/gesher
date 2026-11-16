@@ -9,9 +9,23 @@ added in that same second must also be removed and reapplied. Opening events,
 label events, CI completion and scheduled sweeps enforce this rule. The opened
 event also removes a label already present in its opening snapshot, even when
 the snapshot's update timestamp is later than creation. A delayed opening
-event preserves a later explicit replacement label. An author with merge access
-can deliberately apply the label after opening, under the same rules as any
-other authorized collaborator.
+event preserves a later explicit replacement label.
+
+The PR author's first automerge label application also cannot approve it,
+even if the opening workflow has already finished. GitHub CLI creates the PR
+and adds requested labels in separate API operations, so a label supplied with
+`gh pr create --label automerge` can arrive after opening initialization. The
+controller removes that first author application. An author with merge access
+can deliberately reapply the label later: the complete event history must
+contain a distinct, strictly earlier automerge label application by the same
+account ID. Same-second applications, another account's labels and unrelated
+labels do not count. An authorized collaborator other than the author can
+approve with their first explicit label after initialization.
+
+The author's identity and earlier application are checked again before merge;
+an existing approval receipt cannot bypass this rule. Missing author identity
+blocks approval. This is asynchronous label removal and approval enforcement,
+not a restriction on GitHub's label-assignment UI or API.
 
 The controller first records an unedited bot opening receipt, bound to the
 repository, PR number, creation time and an approval boundary. A new unlabelled
