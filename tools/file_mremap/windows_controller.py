@@ -332,7 +332,7 @@ def main():
     try:
         if __debug__ is False:raise RuntimeError('optimized Python is not an admitted controller')
         assert os.environ.get('GITHUB_ACTIONS')=='true'and platform.system()=='Windows'
-        assert os.environ.get('GITHUB_ACTOR')==os.environ.get('GITHUB_TRIGGERING_ACTOR')=='palmoni5'
+        assert all(isinstance(os.environ.get(k), str) and os.environ[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
         assert os.environ.get('GITHUB_WORKFLOW_SHA')==os.environ['GITHUB_SHA']
         plan=json.loads(args.plan.read_bytes());assert sha(args.plan)==os.environ['GESHER_FILE_MREMAP_PLAN_SHA256']
         context=dict(source=os.environ['GITHUB_SHA'],run=os.environ['GITHUB_RUN_ID'],attempt=os.environ['GITHUB_RUN_ATTEMPT'],repository=os.environ['GITHUB_REPOSITORY'],repository_id=os.environ['GITHUB_REPOSITORY_ID'])

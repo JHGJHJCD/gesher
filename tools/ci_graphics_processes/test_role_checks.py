@@ -11,7 +11,14 @@ class RoleTests(unittest.TestCase):
         repo={'id':r.REPOSITORY_ID,'full_name':r.REPOSITORY}
         run={'id':12,'run_attempt':1,'head_sha':c['source'],'name':r.WORKFLOW,'path':r.CALLER,'head_branch':r.BRANCH,'event':'push','actor':{'login':'palmoni5'},'triggering_actor':{'login':'palmoni5'},'repository':repo,'head_repository':repo,'referenced_workflows':[{'path':r.REPOSITORY+'/'+r.GUARD+'@'+g,'sha':g}]}
         r.verify_run(run,c,g)
-        for mutate in [lambda x:x.update(run_attempt=2),lambda x:x.update(head_sha='c'*40),lambda x:x['actor'].update(login='other'),lambda x:x['referenced_workflows'][0].update(sha='d'*40)]:
+        for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+            arbitrary=dict(run,actor=dict(login=actor),triggering_actor=dict(login=trigger))
+            r.verify_run(arbitrary,c,g)
+        for field in ('actor','triggering_actor'):
+            for value in ('',None,42):
+                bad=copy.deepcopy(run);bad[field]['login']=value
+                with self.assertRaises(AssertionError):r.verify_run(bad,c,g)
+        for mutate in [lambda x:x.update(run_attempt=2),lambda x:x.update(head_sha='c'*40),lambda x:x['actor'].update(login=''),lambda x:x['referenced_workflows'][0].update(sha='d'*40)]:
             bad=copy.deepcopy(run);mutate(bad)
             with self.assertRaises(AssertionError):r.verify_run(bad,c,g)
         job={'id':42,'head_sha':c['source'],'run_id':12,'run_attempt':1,'status':'completed','conclusion':'success','name':'fixture-producer'}

@@ -21,14 +21,8 @@ def context(env,job,event=None,checkout_parents=None):
     assert env.get('GITHUB_WORKFLOW_REF') == REPOSITORY+'/'+PATH+'@'+ref
     expected={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':REPOSITORY,'GITHUB_REPOSITORY_ID':REPOSITORY_ID,
               'GITHUB_WORKFLOW':WORKFLOW}
-    if env['GITHUB_EVENT_NAME'] == 'pull_request':
-        # Normal PR CI uses read-only permissions on hosted runners. Its merge
-        # source identity is independent of the contributor or rerun actor.
-        assert all(isinstance(env.get(k), str) and env[k] for k in
-                   ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
-    else:
-        # Preserve the separate push/manual selected-supplier authority.
-        expected.update(GITHUB_ACTOR='palmoni5', GITHUB_TRIGGERING_ACTOR='palmoni5')
+    # Source authority is independent of the original contributor or rerun actor.
+    assert all(isinstance(env.get(k), str) and env[k] for k in ('GITHUB_ACTOR', 'GITHUB_TRIGGERING_ACTOR'))
     assert all(env.get(k)==v for k,v in expected.items())
     source=identity['checkout_sha']
     assert source==env.get('GITHUB_WORKFLOW_SHA')==env.get('GESHER_COHERENT_TCP_AUTHORIZED_SOURCE')

@@ -6,7 +6,7 @@ name: automerge
 
 on:
   pull_request_target:
-    types: [labeled, synchronize, reopened, ready_for_review]
+    types: [opened, labeled, synchronize, reopened, ready_for_review]
   workflow_run:
     workflows: [ci, arm64-windows]
     types: [completed]

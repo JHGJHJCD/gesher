@@ -12,7 +12,8 @@ const clone = structuredClone;
 
 function world(over = {}) {
   const w = {
-    pr: {number: 7, state: 'open', draft: false, updated_at: T(30),
+    pr: {number: 7, state: 'open', draft: false, created_at: T(0), updated_at: T(30),
+      user: {id: 99, login: 'contributor'},
       head: {sha: HEAD, ref: 'topic', repo: {id: 10}},
       base: {sha: BASE, ref: 'main', repo: {id: 10}}, labels: [{name: 'automerge'}]},
     events: [{id: 50, event: 'labeled', label: {name: 'automerge'}, created_at: T(30),
@@ -22,6 +23,7 @@ function world(over = {}) {
     statuses: [], comments: [], permission: 'write',
     mergeError: null, mergeResult: {merged: true}, calls: [], hooks: {}, warnings: [],
     mergeProof: {sha: MERGE, parents: [{sha: BASE}, {sha: HEAD}]},
+    targetHead: BASE,
     ...over,
   };
   if (!over.runs) w.runs = ['ci', 'arm64-windows'].map((name, i) => ({
@@ -41,6 +43,14 @@ function world(over = {}) {
       body: '<!-- gesher-automerge-v1 ' + JSON.stringify(value) + ' -->'});
   };
   if (over.approved !== false) w.seedApproval();
+  w.seedOpening = (boundary = T(0), patch = {}) => {
+    const value = {repository: w.pr.base.repo.id, number: w.pr.number,
+      created: w.pr.created_at, boundary, ...patch};
+    w.comments.push({id: 200 + w.comments.length, user: {login: 'github-actions[bot]', type: 'Bot'},
+      created_at: T(1), updated_at: T(1),
+      body: '<!-- gesher-automerge-opening-v1 ' + JSON.stringify(value) + ' -->'});
+  };
+  if (over.initialized !== false) w.seedOpening();
   const rec = (name, fn) => async (args) => {
     w.calls.push([name, clone(args)]);
     if (w.hooks[name]) await w.hooks[name](args);
@@ -89,7 +99,11 @@ function world(over = {}) {
       }),
       listCommitStatusesForRef: page('statuses', () => w.statuses),
     },
-    git: {getCommit: rec('gitCommit', () => w.mergeProof)},
+    git: {
+      getCommit: rec('gitCommit', () => w.mergeProof),
+      getRef: rec('gitRef', (args) => ({ref: 'refs/' + args.ref,
+        object: {type: 'commit', sha: w.targetHead}, ...w.targetRefOverride})),
+    },
   }};
   const core = {info: () => {}, warning: (s) => w.warnings.push(s)};
   const fire = (eventName, payload) => run({github, core,
@@ -143,6 +157,342 @@ test('an admin may opt in', async () => {
   const w = world({permission: 'admin', approved: false});
   await w.labeled();
   assert.equal(w.did('merge').length, 1);
+});
+
+test('a unique label delivery tolerates only zero or one second of forward update skew', async () => {
+  for (const second of [29, 30, 31, 32]) {
+    const w = world({approved: false}); w.pr.updated_at = T(second);
+    await w.labeled();
+    assert.equal(w.did('merge').length, second === 30 || second === 31 ? 1 : 0);
+  }
+});
+
+test('same or adjacent-second label events cannot borrow a delivery timestamp', async () => {
+  for (const second of [30, 31]) {
+    const w = world({approved: false}); const old = clone(w.pr); old.updated_at = T(31);
+    w.events.push({...clone(w.events[0]), id: 60, created_at: T(second)});
+    w.pr.updated_at = T(31);
+    await w.labeled(old);
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1 ')), false);
+  }
+});
+
+test('opening with an automerge label cannot approve a PR, even with merge access', async () => {
+  for (const action of ['opened', 'labeled']) {
+    for (const permission of ['read', 'write', 'admin']) {
+      const w = world({permission, approved: false, initialized: false});
+      w.pr.created_at = T(30);
+      w.pr.user = {id: 42, login: 'maintainer'};
+      await w.fire('pull_request_target', {action, label: {name: 'automerge'},
+        sender: {id: 42}, pull_request: w.pr});
+      assert.equal(w.did('removeLabel').length, 1);
+      assert.equal(w.did('merge').length, 0);
+      assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1')), false);
+    }
+  }
+});
+
+test('CI and scheduled sweeps reject creation-time labels even with a receipt', async () => {
+  for (const trigger of ['ciDone', 'sweep']) {
+    const w = world({initialized: false}); w.pr.created_at = T(30);
+    await w[trigger]();
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('missing or malformed opening metadata cannot authorize a label', async () => {
+  for (const created of [undefined, null, '', 'not-a-date', T(40)]) {
+    const w = world({approved: false, initialized: false}); w.pr.created_at = created;
+    await w.labeled();
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('an opened delivery cannot capture approval or remove a later explicit label', async () => {
+  const w = world({approved: false});
+  const opened = {...clone(w.pr), updated_at: T(0), labels: []};
+  await w.fire('pull_request_target', {action: 'opened', pull_request: opened});
+  assert.equal(w.did('comment').length, 0);
+  assert.equal(w.did('removeLabel').length, 0);
+  assert.equal(w.did('merge').length, 0);
+  await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+});
+
+test('a label observed in the opening snapshot is removed even after the creation second', async () => {
+  for (const approved of [false, true]) {
+    const w = world({approved});
+    await w.fire('pull_request_target', {action: 'opened', pull_request: w.pr});
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.did('merge').length, 0);
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('comment').some((c) => c[1].body.includes('<!-- gesher-automerge-v1')), false);
+  }
+});
+
+test('a delayed opening snapshot does not remove a replacement approval label', async () => {
+  const w = world({approved: false}); const opened = clone(w.pr);
+  w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});
+  w.pr.updated_at = T(40);
+  await w.fire('pull_request_target', {action: 'opened', pull_request: opened});
+  assert.equal(w.did('removeLabel').length, 0);
+  assert.equal(w.did('comment').length, 0);
+  await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+});
+
+test('an author must reapply after their first label, even with merge access', async () => {
+  for (const permission of ['write', 'admin']) {
+    const w = world({permission, approved: false});
+    w.pr.user = {id: 42, login: 'maintainer'};
+    await w.labeled();
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1 ')), false);
+
+    w.events.push({id: 55, event: 'unlabeled', label: {name: 'automerge'},
+      created_at: T(31), actor: {id: 123, login: 'github-actions[bot]'}});
+    w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});
+    w.pr.labels = [{name: 'automerge'}]; w.pr.updated_at = T(40);
+    await w.labeled();
+    assert.equal(w.did('merge').length, 1);
+    assert.equal(w.comments.filter((c) => c.body.includes('<!-- gesher-automerge-v1 ')).length, 1);
+  }
+});
+
+test('a delayed creation label cannot self-approve after unlabelled opening initialization', async () => {
+  const w = world({approved: false, initialized: false, events: []});
+  w.pr.user = {id: 42, login: 'maintainer'};
+  w.pr.labels = []; w.pr.updated_at = T(0);
+  await w.fire('pull_request_target', {action: 'opened', pull_request: w.pr});
+  assert.equal(w.did('comment').length, 1);
+  assert.match(w.did('comment')[0][1].body, /gesher-automerge-opening-v1/);
+  w.comments[0].created_at = T(1); w.comments[0].updated_at = T(1);
+
+  // gh's separate metadata mutation can finish after the opened workflow.
+  w.pr.labels = [{name: 'automerge'}]; w.pr.updated_at = T(30);
+  w.events.push({id: 50, event: 'labeled', label: {name: 'automerge'},
+    created_at: T(30), actor: clone(w.pr.user)});
+  await w.labeled();
+  assert.equal(w.did('removeLabel').length, 1);
+  assert.equal(w.did('merge').length, 0);
+  assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1 ')), false);
+});
+
+test('a legacy receipt cannot approve an author first application on any trigger', async () => {
+  for (const trigger of ['labeled', 'ciDone', 'sweep']) {
+    const w = world(); w.pr.user = {id: 42, login: 'maintainer'};
+    await w[trigger]();
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('author reapplication requires a distinct earlier automerge event by that account', async () => {
+  for (const patch of [
+    {id: 50}, {created_at: T(30)}, {created_at: '2026-11-16T09:59:59Z'},
+    {actor: {id: 99, login: 'maintainer'}}, {actor: null},
+    {label: {name: 'bug'}}, {event: 'unlabeled'}, {event: 'assigned'},
+  ]) {
+    const w = world({approved: false}); w.pr.user = {id: 42, login: 'maintainer'};
+    w.events.unshift({...clone(w.events[0]), id: 40, created_at: T(10), ...patch});
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1 ')), false);
+  }
+});
+
+test('author reapplication uses stable account IDs and the complete paginated event history', async () => {
+  const w = world({approved: false}); w.pr.user = {id: 42, login: 'maintainer'};
+  const current = clone(w.events[0]);
+  w.events = [{...clone(current), id: 1, created_at: T(5),
+    actor: {id: 42, login: 'previous-login'}},
+  ...Array.from({length: 100}, (_, i) => ({id: 2 + i, event: 'assigned', created_at: T(10)})),
+  {...current, id: 150}];
+  await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+  assert.ok(w.did('events').some((call) => call[1].page === 2));
+});
+
+test('missing or malformed author identity cannot authorize any label', async () => {
+  for (const user of [undefined, null, {}, {id: '99'}, {id: 0}, {id: -1},
+    {id: Number.MAX_SAFE_INTEGER + 1}]) {
+    for (const trigger of ['labeled', 'ciDone', 'sweep']) {
+      const w = world(); w.pr.user = user;
+      await w[trigger]();
+      assert.equal(w.did('removeLabel').length, 1);
+      assert.equal(w.did('merge').length, 0);
+    }
+  }
+});
+
+test('author identity and reapplication history remain required at the final merge read', async () => {
+  for (const mutate of [
+    (w) => {delete w.pr.user;},
+    (w) => {w.events = w.events.filter((e) => e.id !== 40);},
+    (w) => {w.events.find((e) => e.id === 40).actor.id = 99;},
+  ]) {
+    const w = world(); w.pr.user = {id: 42, login: 'maintainer'};
+    w.events.unshift({...clone(w.events[0]), id: 40, created_at: T(10)});
+    let reads = 0;
+    w.hooks.getPR = () => {if (++reads === 2) mutate(w);};
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+
+  const w = world(); let reads = 0;
+  w.hooks.getPR = () => {if (++reads === 2) w.pr.user = {id: 42, login: 'maintainer'};};
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+});
+
+test('an unlabelled opening records a boundary before a later explicit approval', async () => {
+  const w = world({approved: false, initialized: false});
+  w.pr.labels = []; w.pr.updated_at = T(0);
+  await w.fire('pull_request_target', {action: 'opened', pull_request: w.pr});
+  assert.equal(w.did('comment').length, 1);
+  assert.match(w.did('comment')[0][1].body, /gesher-automerge-opening-v1/);
+  assert.equal(w.did('merge').length, 0);
+  w.pr.labels = [{name: 'automerge'}]; w.pr.updated_at = T(30);
+  await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+});
+
+test('initial labels are rejected in both opened/labeled delivery orders', async () => {
+  for (const order of [['opened', 'labeled'], ['labeled', 'opened']]) {
+    const w = world({approved: false, initialized: false}); const opening = clone(w.pr);
+    for (const action of order) {
+      await w.fire('pull_request_target', {action, label: {name: 'automerge'},
+        sender: {id: 42}, pull_request: opening});
+    }
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1 ')), false);
+    const recorded = w.comments.find((c) => c.body.includes('gesher-automerge-opening-v1'));
+    assert.match(recorded.body, /"boundary":"2026-11-16T10:00:30.000Z"/);
+  }
+});
+
+test('pre-policy PRs need one fresh label after conservative initialization', async () => {
+  for (const trigger of ['labeled', 'ciDone', 'sweep']) {
+    const w = world({initialized: false});
+    await w[trigger]();
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.did('merge').length, 0);
+    w.pr.labels = [{name: 'automerge'}]; w.pr.updated_at = T(40);
+    w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});
+    await w.labeled();
+    assert.equal(w.did('merge').length, 1);
+  }
+});
+
+test('late opening initialization cannot lower a fallback boundary', async () => {
+  const w = world({approved: false, initialized: false});
+  const opening = {...clone(w.pr), updated_at: T(0), labels: []};
+  await w.labeled();
+  await w.fire('pull_request_target', {action: 'opened', pull_request: opening});
+  assert.equal(w.comments.filter((c) => c.body.includes('gesher-automerge-opening-v1')).length, 1);
+  assert.equal(w.did('merge').length, 0);
+});
+
+test('the maximum of concurrent opening receipts governs regardless of list order', async () => {
+  for (const reverse of [false, true]) {
+    const w = world(); w.seedOpening(T(35));
+    if (reverse) w.comments.reverse();
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('removeLabel').length, 1);
+  }
+});
+
+test('a stricter opening receipt recorded during CI checks blocks the final merge', async () => {
+  const w = world(); w.hooks.runs = () => w.seedOpening(T(40));
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+});
+
+test('human, other-bot and edited opening comments cannot initialize approval', async () => {
+  for (const edit of [
+    (c) => {c.user = {login: 'maintainer', type: 'User'};},
+    (c) => {c.user.login = 'other[bot]';},
+    (c) => {c.updated_at = T(2);},
+  ]) {
+    const w = world(); edit(w.comments[1]);
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('editing a stricter opening receipt cannot lower the effective boundary', async () => {
+  const w = world(); w.seedOpening(T(40)); w.comments.at(-1).updated_at = T(50);
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+  assert.equal(w.warnings.length, 1);
+});
+
+test('stale PR base metadata does not replace the current Git target reference', async () => {
+  const w = world(); w.pr.base.sha = OTHER;
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 1);
+  assert.deepEqual(w.did('gitRef')[0][1], {owner: 'o', repo: 'r', ref: 'heads/main'});
+});
+
+test('CI against an old target tip cannot pass through stale PR base metadata', async () => {
+  const w = world(); w.targetHead = OTHER;
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+});
+
+test('the target Git reference is reread after CI checks', async () => {
+  const w = world(); w.hooks.runs = () => {w.targetHead = OTHER;};
+  await w.ciDone();
+  assert.equal(w.did('merge').length, 0);
+});
+
+test('missing or misidentified target Git references fail closed', async () => {
+  for (const targetRefOverride of [{ref: 'refs/heads/other'}, {object: {type: 'tag', sha: BASE}},
+    {object: {type: 'commit', sha: 'invalid'}}]) {
+    const w = world({targetRefOverride}); await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.warnings.length, 1);
+  }
+});
+
+test('mutations during the final opening receipt read remain visible to final state checks', async () => {
+  for (const mutate of [
+    (w) => {w.pr.base.ref = 'other';},
+    (w) => {w.pr.labels = [];},
+    (w) => {w.pr.head.sha = OTHER;},
+  ]) {
+    const w = world(); let reads = 0;
+    w.hooks.comments = () => {if (++reads === 5) mutate(w);};
+    await w.ciDone();
+    assert.equal(reads, 5);
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('malformed or conflicting opening identities block approval', async () => {
+  for (const patch of [{repository: 99}, {number: 8}, {created: T(1)},
+    {boundary: 'invalid'}, {extra: true}]) {
+    const w = world(); w.seedOpening(T(0), patch);
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.warnings.length, 1);
+  }
+});
+
+test('a delayed opening event preserves a later label when the PR changed since opening', async () => {
+  const w = world({approved: false}); const opened = clone(w.pr);
+  opened.updated_at = T(0); opened.head.sha = OTHER;
+  await w.fire('pull_request_target', {action: 'opened', pull_request: opened});
+  assert.equal(w.did('removeLabel').length, 0);
+  assert.equal(w.did('comment').length, 0);
+  assert.equal(w.did('merge').length, 0);
 });
 
 test('a label with no recorded head cannot be inferred by a sweep or CI completion', async () => {
@@ -220,7 +570,7 @@ test('ambiguous same-second relabels and mismatched senders cannot record approv
   await w.labeled();
   assert.equal(w.did('comment').length, 0);
   const sender = world({approved: false});
-  sender.events[0].actor.id = 99;
+  sender.events[0].actor.id = 77; // Neither the delivered sender nor the author.
   await sender.labeled();
   assert.equal(sender.did('comment').length, 0);
 });

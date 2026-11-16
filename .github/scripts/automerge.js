@@ -6,6 +6,7 @@
 // head, and the merge API pins it again.
 const LABEL = 'automerge';
 const RECEIPT = 'gesher-automerge-v1';
+const OPENING = 'gesher-automerge-opening-v1';
 const PASSING = new Set(['success', 'neutral', 'skipped']);
 const BOT = 'github-actions[bot]';
 const SHA = /^[a-f0-9]{40}$/i;
@@ -44,13 +45,71 @@ function hasLabel(pr) {
   return (pr.labels || []).some((l) => l.name === LABEL);
 }
 
+function appliedAfterOpening(pr, event, boundary) {
+  const opened = Date.parse(pr.created_at);
+  const applied = Date.parse(event.created_at);
+  const author = pr.user?.id;
+  const previous = Date.parse(event.priorActorApplicationAt);
+  // GitHub timestamps have second precision. A creation-time label, including
+  // an indistinguishable same-second addition, requires a fresh opt-in.
+  // gh creates a PR and then adds its labels in a separate API operation.
+  // Reject the author's first application even if opening initialization has
+  // already finished; a later deliberate reapplication remains possible.
+  return Number.isSafeInteger(author) && author > 0 &&
+    Number.isFinite(opened) && Number.isFinite(applied) &&
+    Number.isFinite(boundary) && applied > Math.max(opened, boundary) &&
+    (event.actor?.id !== author ||
+      (Number.isFinite(previous) && previous >= opened && previous < applied));
+}
+
+async function openingBoundary(github, owner, repo, pr) {
+  const comments = await list(github.rest.issues.listComments,
+    {owner, repo, issue_number: pr.number});
+  let boundary = null;
+  for (const c of comments) {
+    if (c.user?.login !== BOT || c.user.type !== 'Bot') continue;
+    const markers = (c.body || '').split('\n').filter((s) => s.startsWith('<!-- ' + OPENING + ' '));
+    if (markers.length > 1) throw new Error('ambiguous opening receipt');
+    if (!markers.length) continue;
+    if (!c.created_at || c.created_at !== c.updated_at) throw new Error('edited opening receipt');
+    if (!markers[0].endsWith(' -->')) throw new Error('malformed opening receipt');
+    const value = JSON.parse(markers[0].slice(OPENING.length + 6, -4));
+    if (value.repository !== pr.base.repo.id || value.number !== pr.number ||
+        value.created !== pr.created_at) throw new Error('opening receipt identity mismatch');
+    const at = Date.parse(value.boundary);
+    if (Object.keys(value).length !== 4 || !Number.isFinite(at) ||
+        at < Date.parse(pr.created_at)) throw new Error('invalid opening boundary');
+    // Concurrent initializers may leave multiple receipts. Never relax the
+    // most conservative recorded boundary, regardless of delivery order.
+    boundary = boundary === null ? at : Math.max(boundary, at);
+  }
+  return boundary;
+}
+
+async function initializeOpening(github, owner, repo, pr, snapshot, event) {
+  const existing = await openingBoundary(github, owner, repo, pr);
+  if (existing !== null) return existing;
+  const times = [pr.created_at, snapshot.updated_at];
+  if (event) times.push(event.created_at);
+  const parsed = times.map(Date.parse);
+  if (!parsed.every(Number.isFinite)) return null;
+  const boundary = Math.max(...parsed);
+  const value = {repository: pr.base.repo.id, number: pr.number,
+    created: pr.created_at, boundary: new Date(boundary).toISOString()};
+  await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
+    body: 'Automerge initialized. Approval requires a later explicit label from a collaborator with merge access. ' +
+      'The PR author must reapply their first automerge label before approval.\n\n<!-- ' +
+      OPENING + ' ' + JSON.stringify(value) + ' -->'});
+  return boundary;
+}
+
 function sameTarget(a, b) {
   return a.number === b.number && a.head.sha === b.head.sha &&
     a.head.repo?.id === b.head.repo?.id && a.head.ref === b.head.ref &&
     a.base.repo?.id === b.base.repo?.id && a.base.ref === b.base.ref;
 }
 
-async function labelEvent(github, owner, repo, number) {
+async function labelEvent(github, owner, repo, number, deliveredAt) {
   const events = await list(github.rest.issues.listEvents, {owner, repo, issue_number: number});
   const relevant = events.filter((e) => INVALIDATES.has(e.event) ||
     (['labeled', 'unlabeled'].includes(e.event) && e.label?.name === LABEL));
@@ -58,9 +117,19 @@ async function labelEvent(github, owner, repo, number) {
   if (!last || last.event === 'unlabeled') return null;
   const applied = latestBy(relevant.filter((e) => e.event === 'labeled'), () => LABEL)[0];
   if (!applied) return null;
+  // GitHub can stamp the PR update one second after the label event. Bind a
+  // delivery only when exactly one label fits that bounded timestamp window.
+  const delivered = Date.parse(deliveredAt);
+  const candidates = relevant.filter((e) => e.event === 'labeled' &&
+    Date.parse(e.created_at) >= delivered - 1000 && Date.parse(e.created_at) <= delivered);
+  const previous = latestBy(relevant.filter((e) => e.event === 'labeled' &&
+    e.id !== applied.id && e.actor?.id === applied.actor?.id &&
+    Date.parse(e.created_at) < Date.parse(applied.created_at)), () => LABEL)[0];
   // A delayed delivery cannot distinguish two relabels by one actor within
   // the webhook timestamp's precision. Do not infer approval in that case.
   return {...applied, invalidated: last.event !== 'labeled',
+    priorActorApplicationAt: previous?.created_at,
+    deliveryMatches: Number.isFinite(delivered) && candidates.length === 1 && candidates[0].id === applied.id,
     unambiguous: relevant.filter((e) =>
       e.event === 'labeled' && e.created_at === applied.created_at).length === 1};
 }
@@ -124,7 +193,14 @@ async function removeLabel(github, owner, repo, pr, event, why, core) {
   core.info('#' + pr.number + ': label removed (' + why + ')');
 }
 
-async function ciVerdict(github, owner, repo, pr, defaultBranch) {
+async function targetHead(github, owner, repo, branch) {
+  const {data} = await github.rest.git.getRef({owner, repo, ref: 'heads/' + branch});
+  if (data.ref !== 'refs/heads/' + branch || data.object?.type !== 'commit' ||
+      !SHA.test(data.object.sha || '')) throw new Error('invalid target branch reference');
+  return data.object.sha;
+}
+
+async function ciVerdict(github, owner, repo, pr, defaultBranch, baseSha) {
   const head = pr.head.sha;
   const runs = await list(github.rest.actions.listWorkflowRunsForRepo,
     {owner, repo, head_sha: head}, 'workflow_runs');
@@ -170,7 +246,7 @@ async function ciVerdict(github, owner, repo, pr, defaultBranch) {
       const mergeSha = refs[0].sha;
       const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: mergeSha});
       if (commit.sha !== mergeSha || commit.parents?.length !== 2 ||
-          commit.parents[0].sha !== pr.base.sha || commit.parents[1].sha !== head) {
+          commit.parents[0].sha !== baseSha || commit.parents[1].sha !== head) {
         return 'CI tested a different head or base';
       }
     }
@@ -220,27 +296,38 @@ async function tryMerge({github, core, owner, repo, number, sha, defaultBranch})
       !pr.head.repo?.id || !pr.base.repo?.id || (sha && pr.head.sha !== sha)) return;
   const event = await labelEvent(github, owner, repo, number);
   if (!event || !event.unambiguous || !await authorized(github, owner, repo, event)) return;
+  const boundary = await initializeOpening(github, owner, repo, pr, pr, event);
+  if (!appliedAfterOpening(pr, event, boundary)) return removeLabel(github, owner, repo, pr, event,
+    'reapply the label after PR initialization; the author\'s first application cannot approve it', core);
   if (event.invalidated) return removeLabel(github, owner, repo, pr, event,
     'the PR changed after approval; apply the label again', core);
   const receipt = await approval(github, owner, repo, pr, event);
   if (receipt === false) return removeLabel(github, owner, repo, pr, event,
     'the approved head or target changed; apply the label again', core);
   if (!receipt) return core.info('#' + number + ': no approval for this head; reapply the label');
-  const reason = await ciVerdict(github, owner, repo, pr, defaultBranch);
+  // PR base.sha can retain an older snapshot. Resolve the actual target tip.
+  const baseSha = await targetHead(github, owner, repo, pr.base.ref);
+  const reason = await ciVerdict(github, owner, repo, pr, defaultBranch, baseSha);
   if (reason) return core.info('#' + number + ': not merging (' + reason + ')');
 
   // Re-read mutable PR state and the opt-in after all asynchronous CI queries.
   const latest = await labelEvent(github, owner, repo, number);
   if (latest?.id !== event.id || latest.invalidated || !latest.unambiguous ||
+      !appliedAfterOpening(pr, latest, await openingBoundary(github, owner, repo, pr)) ||
       !await approval(github, owner, repo, pr, latest) ||
       !await authorized(github, owner, repo, latest)) return;
+  const [finalBoundary, finalBase] = await Promise.all([
+    openingBoundary(github, owner, repo, pr),
+    targetHead(github, owner, repo, pr.base.ref),
+  ]);
   const [{data: current}, finalEvent] = await Promise.all([
     github.rest.pulls.get({owner, repo, pull_number: number}),
     labelEvent(github, owner, repo, number),
   ]);
   if (current.state !== 'open' || current.draft || !hasLabel(current) ||
-      !sameTarget(pr, current) || current.base.sha !== pr.base.sha ||
-      finalEvent?.id !== event.id || finalEvent.invalidated || !finalEvent.unambiguous) return;
+      !sameTarget(pr, current) || current.base.sha !== pr.base.sha || finalBase !== baseSha ||
+      finalEvent?.id !== event.id || finalEvent.invalidated || !finalEvent.unambiguous ||
+      !appliedAfterOpening(current, finalEvent, finalBoundary)) return;
   try {
     const {data: result} = await github.rest.pulls.merge({
       owner, repo, pull_number: number, sha: pr.head.sha, merge_method: 'merge',
@@ -267,16 +354,40 @@ module.exports = async ({github, context, core}) => {
   if (context.eventName === 'pull_request_target') {
     if (p.action === 'labeled' && p.label?.name !== LABEL) return;
     const {data: pr} = await github.rest.pulls.get({owner, repo, pull_number: p.pull_request.number});
-    if (pr.state !== 'open' || !hasLabel(pr)) return;
+    if (pr.state !== 'open') return;
     if (!SHA.test(pr.head?.sha || '') || !SHA.test(pr.base?.sha || '') ||
         !pr.head.repo?.id || !pr.base.repo?.id) return;
-    const event = await labelEvent(github, owner, repo, pr.number);
+    // Establish the boundary even for an unlabelled opening. If labeled is
+    // delivered first, its fallback initialization invalidates that label,
+    // so webhook ordering cannot turn an initial label into approval.
+    if (p.action === 'opened') {
+      await initializeOpening(github, owner, repo, pr, p.pull_request, null);
+    }
+    if (!hasLabel(pr)) return;
+    const event = await labelEvent(github, owner, repo, pr.number,
+      p.action === 'labeled' ? p.pull_request.updated_at : undefined);
     if (!event) return;
+    // Some opening payloads already include labels with a later updated_at
+    // than created_at. Reject that observed initial opt-in, but leave a label
+    // applied after the opening snapshot to its own explicit delivery.
+    if (p.action === 'opened' && hasLabel(p.pull_request) &&
+        Date.parse(event.created_at) <= Date.parse(p.pull_request.updated_at)) {
+      return removeLabel(github, owner, repo, pr, event,
+        'labels included when opening a PR cannot approve it; apply the label again', core);
+    }
+    const boundary = await initializeOpening(github, owner, repo, pr, pr, event);
+    if (!appliedAfterOpening(pr, event, boundary)) return removeLabel(github, owner, repo, pr, event,
+      'reapply the label after PR initialization; the author\'s first application cannot approve it', core);
     if (event.invalidated) return removeLabel(github, owner, repo, pr, event,
       'the PR changed after approval; apply the label again', core);
+    // Opening a PR never grants approval. A delayed opened event must not
+    // interfere with an explicit, later label event awaiting its own delivery.
+    if (p.action === 'opened') return;
     if (p.action === 'labeled') {
       if (!sameTarget(pr, p.pull_request) || !event.unambiguous ||
-          event.created_at !== p.pull_request.updated_at || event.actor?.id !== p.sender?.id) return;
+          !event.deliveryMatches || event.actor?.id !== p.sender?.id) {
+        return core.info('#' + pr.number + ': label delivery is not uniquely bound to this head/event; reapply the label');
+      }
       if (!await authorized(github, owner, repo, event)) return removeLabel(
         github, owner, repo, pr, event, 'the label must be applied by a user with write or admin access', core);
       const receipt = await approval(github, owner, repo, pr, event);

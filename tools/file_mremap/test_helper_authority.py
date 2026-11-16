@@ -139,15 +139,21 @@ class Helper(unittest.TestCase):
         self.assertTrue(any(isinstance(x,ast.FunctionDef)and x.name=='guard_main'for x in tree.body))
         env={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':A.REPOSITORY,'GITHUB_REPOSITORY_ID':str(A.REPOSITORY_ID),'GITHUB_REF':'refs/heads/'+A.BRANCH,'GITHUB_WORKFLOW':A.WORKFLOW,'GITHUB_WORKFLOW_REF':A.REPOSITORY+'/'+A.CALLER+'@refs/heads/'+A.BRANCH,'GITHUB_JOB':'helper-producer','GITHUB_ACTOR':'palmoni5','GITHUB_TRIGGERING_ACTOR':'palmoni5','GITHUB_EVENT_NAME':'push','GITHUB_SHA':'a'*40,'GITHUB_WORKFLOW_SHA':'a'*40,'GITHUB_RUN_ID':'123','GITHUB_RUN_ATTEMPT':'2'}
         self.assertEqual(A.context(env,'helper-producer'),synthetic_context())
+        for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+            arbitrary=dict(env,GITHUB_ACTOR=actor,GITHUB_TRIGGERING_ACTOR=trigger)
+            self.assertEqual(A.context(arbitrary,'helper-producer'),synthetic_context())
         for key in env:
-            bad=dict(env);bad[key]='wrong';self.reject(lambda:A.context(bad,'helper-producer'))
+            bad=dict(env);bad[key]='' if key in ('GITHUB_ACTOR','GITHUB_TRIGGERING_ACTOR') else 'wrong';self.reject(lambda:A.context(bad,'helper-producer'))
 
     def test_authenticated_roles_and_reference_not_producer_json(self):
         run=synthetic_run();A.verify_run(run,synthetic_context(),'b'*40)
+        for actor,trigger in (('contributor', 'rerun-maintainer'), ('github-actions[bot]', 'release-maintainer')):
+            arbitrary=dict(run,actor=dict(login=actor),triggering_actor=dict(login=trigger))
+            A.verify_run(arbitrary,synthetic_context(),'b'*40)
         for key in ('id','run_attempt','head_sha','name','path','head_branch','event','referenced_workflows'):
             bad=copy.deepcopy(run);bad[key]=[]if key=='referenced_workflows'else'wrong';self.reject(lambda:A.verify_run(bad,synthetic_context(),'b'*40))
         for key in ('repository','head_repository','actor','triggering_actor'):
-            bad=copy.deepcopy(run);bad[key]['login'if 'actor'in key else'id']='wrong';self.reject(lambda:A.verify_run(bad,synthetic_context(),'b'*40))
+            bad=copy.deepcopy(run);bad[key]['login'if 'actor'in key else'id']='' if 'actor'in key else 'wrong';self.reject(lambda:A.verify_run(bad,synthetic_context(),'b'*40))
         row=synthetic_job();data={'total_count':1,'jobs':[row]};A.verify_jobs(data,synthetic_context(),['helper-producer'])
         for key,value in [('id',0),('name','old'),('head_sha','b'*40),('run_id',1),('run_attempt',1),('status','in_progress'),('conclusion','failure')]:
             bad=copy.deepcopy(data);bad['jobs'][0][key]=value;self.reject(lambda:A.verify_jobs(bad,synthetic_context(),['helper-producer']))
