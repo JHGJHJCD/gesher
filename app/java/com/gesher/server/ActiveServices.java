@@ -952,7 +952,8 @@ final class ActiveServices {
                 // Superseding a running PID also blocks new work without turning its
                 // eventual death into an intentional stop of its existing services.
                 boolean recover = (!app.exiting || app.reaped || app.recoverAfterPidSupersession)
-                        && (started || r.hasAutoCreateConnections());
+                        && (started || r.hasAutoCreateConnections())
+                        && r.owner != null && r.owner.serviceInfo(r.info.name, 0) != null;
                 if (serviceCurrent(r) && recover) {
                     if (r.startRequested && r.pendingStarts.isEmpty() && started) {
                         Intent redelivery = r.startResult == Service.START_REDELIVER_INTENT
@@ -993,7 +994,8 @@ final class ActiveServices {
                     r.restart = null;
                     pruneRetired(r);
                     if (mServices.get(r.name) != r
-                            || !serviceCurrent(r) || (!r.startRequested && !r.hasAutoCreateConnections())) return;
+                            || !serviceCurrent(r) || r.owner.serviceInfo(r.info.name, 0) == null
+                            || (!r.startRequested && !r.hasAutoCreateConnections())) return;
                 }
                 try { bringUp(r); }
                 catch (RuntimeException e) {

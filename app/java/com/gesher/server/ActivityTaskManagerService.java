@@ -153,6 +153,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         /** Ended by the idle reaper: its services bound by others start again (ActiveServices). */
         volatile boolean reaped;
         boolean spawned;     // started by this server (startProcess), not by itself
+        /** Original retained native child identity, copied from its PendingProcess. */
+        long nativeStartTime;
         long startSeq;       // distinguishes a late exit from a newer process of this package
         /** When something last used it (uptime): the idle reaper's clock. */
         volatile long lastActive = SystemClock.uptimeMillis();
@@ -364,6 +366,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         final String windowMode;
         final boolean windowModeExplicit;
         int pid;
+        long nativeStartTime;
         ProcessExitStatus.Generation exitGeneration;
         boolean cancelled;
 
@@ -1586,6 +1589,11 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             startFailed(seq, pending); return;
         }
         synchronized (this) {
+            // Spawn retains its original process handle. Capture that handle's identity
+            // before publishing pid (attach waits for it) or creating the only exit
+            // watcher that can consume the handle. An attach-time PID lookup is too
+            // late: an exited child might have been consumed/replaced by then.
+            pending.nativeStartTime = Zygote.childStartTime(pid);
             pending.pid = pid;
             mExitStatus.bind(pending.exitGeneration, pid);
             if (pending.cancelled) Zygote.kill(pid);
@@ -1862,6 +1870,42 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         endProcesses(stop, 5000);
     }
 
+    /** Restart existing processes after an enabled-state change, without force-stop state. */
+    void restartForEnabledState(ApkPackage expected) {
+        List<ProcessRecord> processes = new ArrayList<>();
+        synchronized (this) {
+            // An event queued before update/uninstall cannot stop its replacement.
+            if (mPm.get(expected.packageName) != expected || mPm.isRemovalPending(expected.packageName)) return;
+            for (ProcessRecord app : mProcesses) {
+                if (expected.packageName.equals(app.packageName) && !app.exiting
+                        && !app.dead && !app.pidSuperseded) {
+                    processes.add(app);
+                }
+            }
+        }
+        for (ProcessRecord app : processes) {
+            synchronized (this) {
+                // A preceding Binder callback can synchronously retire a later record,
+                // replace its PID, or update its package. Recheck at each dispatch.
+                if (mPm.get(expected.packageName) != expected || mPm.isRemovalPending(expected.packageName)) return;
+                if (!mProcesses.contains(app) || app.exiting || app.dead || app.pidSuperseded
+                        || attachedProcessByPid(app.pid) != app) continue;
+                // As cached retirement, keep recovery for still-enabled services.
+                app.reaped = true;
+                app.recoverAfterPidSupersession = false;
+                app.exiting = true;
+                // Native code checks and terminates the same retained child handle
+                // under its registry lock. No PID reopen can hit a new OS process;
+                // holding ATM here also excludes logical attachment supersession.
+                if (app.spawned && Zygote.killChild(app.pid, app.nativeStartTime)) continue;
+            }
+            // A missing/retired native handle can still have a live application-thread
+            // capability (custom starters). Use that exact Binder, never a PID fallback.
+            try { app.thread.scheduleExit(); }
+            catch (RemoteException ignored) { }
+        }
+    }
+
     /** Ends every app process (the device shuts down), waiting up to {@code waitMs}. */
     void endAllProcesses(long waitMs) {
         List<ProcessRecord> all;
@@ -1991,6 +2035,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             String waitingProcess = null;
             if (started != null) {
                 app.spawned = true;
+                app.nativeStartTime = started.nativeStartTime;
                 app.startSeq = startSeq;
                 app.exitGeneration = started.exitGeneration;
                 app.windowMode = started.windowMode;

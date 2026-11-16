@@ -48,10 +48,14 @@ final class PackageRemovalStorage {
                 journal.store(out, "Gesher package removal transaction"); out.getFD().sync();
             }
         }
+        add(root.resolve("system/package-enabled-owners").resolve(name), "package-enabled-owner");
     }
     private void add(Path original) throws IOException {
+        add(original, "item-" + paths.size());
+    }
+    private void add(Path original, String slot) throws IOException {
         checkParents(original);
-        paths.put(original, directory.resolve("item-" + paths.size()));
+        paths.put(original, directory.resolve(slot));
     }
     private void checkParents(Path original) throws IOException {
         Path parent = original.getParent();

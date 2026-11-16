@@ -42,6 +42,8 @@ import java.util.function.Consumer;
  */
 public final class PackageManagerService extends IPackageManager.Default {
     private volatile Map<String, ApkPackage> mPackages = new LinkedHashMap<>();
+    private PackageEnabledStore mEnabledStore; // guarded by this; snapshot reads are immutable
+    private final boolean mTransientEnabled;
     private final PermissionPolicy mPermissions = new PermissionPolicy(this);
     private final Executor mPackageEventExecutor = Executors.newSingleThreadExecutor(task -> {
         Thread thread = new Thread(task, "gesher-package-events");
@@ -49,6 +51,7 @@ public final class PackageManagerService extends IPackageManager.Default {
         return thread;
     });
     private Consumer<Intent> mPackageEventSender = PackageManagerService::broadcastPackageEvent;
+    private Consumer<ApkPackage> mEnabledStateKiller = this::restartEnabledPackage;
     private final List<Consumer<String>> mPackageRemoval = new ArrayList<>();
     private final List<Consumer<String>> mPackageRemovalChecks = new ArrayList<>();
     private volatile Map<String, ApkPackage> mRemoving = new LinkedHashMap<>();
@@ -120,17 +123,36 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     public PackageManagerService(Collection<ApkPackage> packages) {
+        this(packages, true);
+    }
+
+    PackageManagerService(Collection<ApkPackage> packages, boolean persistentEnabled) {
+        mTransientEnabled = !persistentEnabled;
         Map<String, ApkPackage> map = new LinkedHashMap<>();
         for (ApkPackage p : packages) {
             map.put(p.packageName, p);
         }
         mPackages = map;
+        enabledStore();
+    }
+
+    private synchronized PackageEnabledStore enabledStore() {
+        if (mEnabledStore == null) {
+            java.nio.file.Path system = new java.io.File(Device.dataDir(), "system").toPath();
+            PackageEnabledStore store = mTransientEnabled ? new PackageEnabledStore()
+                    : new PackageEnabledStore(system.resolve("package-enabled-state").toFile(),
+                            system.resolve("package-enabled-owners"));
+            for (ApkPackage pkg : mPackages.values()) pkg.attachEnabledState(store, store.owner(pkg.packageName));
+            mEnabledStore = store;
+        }
+        return mEnabledStore;
     }
 
     /** Adds or replaces a package (an install or an update). */
     synchronized void add(ApkPackage p) {
         Map<String, ApkPackage> map = new LinkedHashMap<>(mPackages);
-        p.inheritComponentStates(map.get(p.packageName));
+        PackageEnabledStore store = enabledStore();
+        p.attachEnabledState(store, store.owner(p.packageName));
         map.put(p.packageName, p);
         mPackages = map;
         PackageManager.invalidatePackageInfoCache();
@@ -139,7 +161,9 @@ public final class PackageManagerService extends IPackageManager.Default {
     /** Removes a package (an uninstall); returns it, or null. */
     synchronized ApkPackage remove(String packageName) {
         Map<String, ApkPackage> map = new LinkedHashMap<>(mPackages);
-        ApkPackage p = map.remove(packageName);
+        ApkPackage p = map.get(packageName);
+        if (p != null) enabledStore().retire(packageName, p.enabledStateOwner());
+        map.remove(packageName);
         mPackages = map;
         if (p != null) {
             p.clearComponentStates();
@@ -323,7 +347,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     @Override
-    public ParceledListSlice queryIntentActivityOptions(ComponentName caller, Intent[] specifics,
+    public synchronized ParceledListSlice queryIntentActivityOptions(ComponentName caller, Intent[] specifics,
             String[] specificTypes, Intent intent, String resolvedType, long flags, int userId) {
         if (userId != 0) return new ParceledListSlice<>(new ArrayList<ResolveInfo>());
         Map<String, ApkPackage> packages;
@@ -337,7 +361,9 @@ public final class PackageManagerService extends IPackageManager.Default {
                 caller, specifics, specificTypes, intent, resolvedType, flags));
     }
 
-    private List<ResolveInfo> query(Intent intent, String resolvedType, long flags) {
+    // A query spanning multiple records must not straddle an atomic enabled-state
+    // batch. These readers do metadata/filter work only, never application callbacks.
+    private synchronized List<ResolveInfo> query(Intent intent, String resolvedType, long flags) {
         List<ResolveInfo> result = new ArrayList<>();
         for (ApkPackage p : mPackages.values()) {
             if (isRemovalPending(p.packageName)) continue;
@@ -353,7 +379,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     /** The services {@code intent} resolves to, in every package. */
-    List<ResolveInfo> services(Intent intent, String resolvedType, long flags) {
+    synchronized List<ResolveInfo> services(Intent intent, String resolvedType, long flags) {
         List<ResolveInfo> result = new ArrayList<>();
         for (ApkPackage p : mPackages.values()) {
             if (isRemovalPending(p.packageName)) continue;
@@ -366,7 +392,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     /** The manifest receivers {@code intent} reaches, in every package. */
-    List<ResolveInfo> receivers(Intent intent, String resolvedType, long flags) {
+    synchronized List<ResolveInfo> receivers(Intent intent, String resolvedType, long flags) {
         List<ResolveInfo> result = new ArrayList<>();
         for (ApkPackage p : mPackages.values()) {
             if (isRemovalPending(p.packageName)) continue;
@@ -376,7 +402,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     /** The provider with authority {@code authority} (one of its authorities), or null. */
-    ProviderInfo provider(String authority, long flags) {
+    synchronized ProviderInfo provider(String authority, long flags) {
         for (ApkPackage p : mPackages.values()) {
             if (isRemovalPending(p.packageName)) continue;
             for (ProviderInfo info : p.providers(flags)) {
@@ -420,7 +446,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     @Override
-    public ParceledListSlice queryIntentContentProviders(Intent intent, String resolvedType,
+    public synchronized ParceledListSlice queryIntentContentProviders(Intent intent, String resolvedType,
             long flags, int userId) {
         List<ResolveInfo> result = new ArrayList<>();
         if (intent == null || userId != 0) return new ParceledListSlice<>(result);
@@ -462,7 +488,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     @Override
-    public ParceledListSlice getInstalledPackages(long flags, int userId) {
+    public synchronized ParceledListSlice getInstalledPackages(long flags, int userId) {
         List<PackageInfo> result = new ArrayList<>();
         for (ApkPackage p : mPackages.values()) {
             result.add(installedInfo(p, flags));
@@ -478,7 +504,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     @Override
-    public ParceledListSlice<PackageInfo> getPackagesHoldingPermissions(String[] permissions,
+    public synchronized ParceledListSlice<PackageInfo> getPackagesHoldingPermissions(String[] permissions,
             long flags, int userId) {
         Objects.requireNonNull(permissions);
         List<PackageInfo> result = new ArrayList<>();
@@ -504,7 +530,7 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     @Override
-    public ParceledListSlice getInstalledApplications(long flags, int userId) {
+    public synchronized ParceledListSlice getInstalledApplications(long flags, int userId) {
         List<ApplicationInfo> result = new ArrayList<>();
         for (ApkPackage p : mPackages.values()) {
             result.add(p.applicationInfo(flags));
@@ -519,15 +545,10 @@ public final class PackageManagerService extends IPackageManager.Default {
         return new ParceledListSlice<>(result);
     }
 
-    /**
-     * Components an app enabled or disabled at run time (setComponentEnabledSetting): a
-     * launcher alias it hides, a boot receiver it turns on once set up. Kept for the
-     * device's lifetime and dropped with the package; a disabled component no longer
-     * resolves (unless MATCH_DISABLED_COMPONENTS), as on Android. Not persisted across
-     * device restarts: apps that toggle components set them again as they start.
-     */
+    /** Installed overrides survive restart/update and retire with the installation. */
     @Override
     public int getComponentEnabledSetting(ComponentName componentName, int userId) {
+        enabledUser(userId);
         if (componentName == null) throw new IllegalArgumentException("componentName is null");
         String pkg = componentName.getPackageName();
         ApkPackage installed = get(pkg);
@@ -542,9 +563,17 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
 
     @Override
-    public synchronized void setComponentEnabledSetting(ComponentName componentName, int newState, int flags,
+    public void setComponentEnabledSetting(ComponentName componentName, int newState, int flags,
             int userId, String callingPackage) {
-        setComponentState(componentName, newState);
+        setComponentEnabledSettings(List.of(new PackageManager.ComponentEnabledSetting(
+                componentName, newState, flags)), userId, callingPackage);
+    }
+
+    @Override
+    public void setApplicationEnabledSetting(String packageName, int newState, int flags,
+            int userId, String callingPackage) {
+        setComponentEnabledSettings(List.of(new PackageManager.ComponentEnabledSetting(
+                packageName, newState, flags)), userId, callingPackage);
     }
 
     @Override
@@ -552,35 +581,97 @@ public final class PackageManagerService extends IPackageManager.Default {
             List<PackageManager.ComponentEnabledSetting> settings, int userId,
             String callingPackage) {
         if (settings == null) throw new IllegalArgumentException("settings is null");
-        // Android checks every entry before changing any of them.
-        for (PackageManager.ComponentEnabledSetting setting : settings) {
-            if (setting.isComponent()) checkComponentState(setting.getComponentName(),
-                    setting.getEnabledState());
-        }
-        for (PackageManager.ComponentEnabledSetting setting : settings) {
+        enabledUser(userId);
+        if (settings.isEmpty()) throw new IllegalArgumentException("settings is empty");
+        // Capture caller-owned input, then validate the entire batch before any state,
+        // persistence, cache, process or broadcast change.
+        List<PackageManager.ComponentEnabledSetting> captured = new ArrayList<>(settings);
+        java.util.Set<ComponentName> components = new java.util.HashSet<>();
+        java.util.Set<String> applications = new java.util.HashSet<>();
+        Map<String, Integer> componentFlags = new LinkedHashMap<>();
+        for (PackageManager.ComponentEnabledSetting setting : captured) {
+            if (setting == null) throw new IllegalArgumentException("null enabled setting");
+            checkEnabledState(setting.getEnabledState());
+            String name = setting.getPackageName();
+            checkEnabledPackage(name);
             if (setting.isComponent()) {
-                setComponentState(setting.getComponentName(), setting.getEnabledState());
+                ComponentName component = setting.getComponentName();
+                if (!components.add(component)) throw new IllegalArgumentException("Duplicate component: " + component);
+                Integer previous = componentFlags.putIfAbsent(name, setting.getEnabledFlags());
+                if (previous != null && ((previous ^ setting.getEnabledFlags()) & PackageManager.DONT_KILL_APP) != 0) {
+                    throw new IllegalArgumentException("Conflicting DONT_KILL_APP flags for " + name);
+                }
+                if (!hasComponent(component)) throw new IllegalArgumentException("Component class "
+                        + component.getClassName() + " does not exist in " + name);
+            } else if (!applications.add(name)) {
+                throw new IllegalArgumentException("Duplicate package: " + name);
             }
         }
-    }
-
-    private void setComponentState(ComponentName component, int state) {
-        checkComponentState(component, state);
-        if (state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_USER
-                || state == PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
-            // As PackageManagerService: these are application states; for a component
-            // the request is logged and ignored.
-            SystemServer.log("setComponentEnabledSetting: state " + state
-                    + " is not valid for component " + component.flattenToShortString());
-            return;
+        PackageEnabledStore store = enabledStore();
+        Map<String, PackageEnabledStore.Entry> changed = new LinkedHashMap<>();
+        Map<String, EnabledChange> events = new LinkedHashMap<>();
+        for (PackageManager.ComponentEnabledSetting setting : captured) {
+            ApkPackage pkg = get(setting.getPackageName());
+            int state = setting.getEnabledState();
+            if (setting.isComponent() && state > PackageManager.COMPONENT_ENABLED_STATE_DISABLED) {
+                // Android accepts the enum but ignores application-only states for components.
+                continue;
+            }
+            PackageEnabledStore.Entry accumulated = changed.get(pkg.packageName);
+            PackageEnabledStore.State before = accumulated == null ? pkg.enabledState() : accumulated.state();
+            PackageEnabledStore.State after = setting.isComponent()
+                    ? before.component(setting.getClassName(), state) : before.application(state);
+            if (before.equals(after)) continue;
+            changed.put(pkg.packageName, new PackageEnabledStore.Entry(pkg.enabledStateOwner(), after));
+            EnabledChange event = events.computeIfAbsent(pkg.packageName, ignored -> new EnabledChange(pkg));
+            event.components.add(setting.isComponent() ? setting.getClassName() : pkg.packageName);
+            event.dontKill &= (setting.getEnabledFlags() & PackageManager.DONT_KILL_APP) != 0;
         }
-        get(component.getPackageName()).setComponentEnabledState(component.getClassName(), state);
+        if (changed.isEmpty()) return;
+        // Synchronous durability is also used for flags=0. SYNCHRONOUS therefore never
+        // returns early, and a failed write publishes neither state nor side effects.
+        store.commit(changed);
         PackageManager.invalidatePackageInfoCache();
+        mPackageEventExecutor.execute(() -> {
+            synchronized (PackageManagerService.this) { } // never call app code under PM's monitor
+            for (EnabledChange event : events.values()) {
+                if (!event.dontKill) {
+                    try { mEnabledStateKiller.accept(event.pkg); }
+                    catch (RuntimeException failure) {
+                        SystemServer.log("enabled-state process restart unavailable: " + failure.getClass().getSimpleName());
+                    }
+                }
+                Intent intent = new Intent(Intent.ACTION_PACKAGE_CHANGED,
+                        Uri.fromParts("package", event.pkg.packageName, null))
+                        .putExtra(Intent.EXTRA_UID, event.pkg.uid())
+                        .putExtra(Intent.EXTRA_CHANGED_COMPONENT_NAME, event.components.get(0))
+                        .putExtra(Intent.EXTRA_CHANGED_COMPONENT_NAME_LIST, event.components.toArray(new String[0]))
+                        .putExtra(Intent.EXTRA_DONT_KILL_APP, event.dontKill);
+                if (!event.components.contains(event.pkg.packageName)) {
+                    intent.addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY);
+                }
+                sendPackageEvent(intent);
+            }
+        });
     }
 
-    /** Android's checks: a known state, a component of the package, its own app or the system. */
-    private void checkComponentState(ComponentName component, int state) {
-        if (component == null) throw new IllegalArgumentException("componentName is null");
+    private static final class EnabledChange {
+        final ApkPackage pkg;
+        final List<String> components = new ArrayList<>();
+        boolean dontKill = true;
+        EnabledChange(ApkPackage pkg) { this.pkg = pkg; }
+    }
+
+    private void restartEnabledPackage(ApkPackage pkg) {
+        Services.Created services = Services.sLast;
+        if (services != null && services.pm == this) services.atm.restartForEnabledState(pkg);
+    }
+
+    private static void enabledUser(int userId) {
+        if (userId != 0) throw new SecurityException("Only enabled-state user 0 is available");
+    }
+
+    private static void checkEnabledState(int state) {
         if (state != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT
                 && state != PackageManager.COMPONENT_ENABLED_STATE_ENABLED
                 && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED
@@ -588,24 +679,24 @@ public final class PackageManagerService extends IPackageManager.Default {
                 && state != PackageManager.COMPONENT_ENABLED_STATE_DISABLED_UNTIL_USED) {
             throw new IllegalArgumentException("Invalid new component state: " + state);
         }
-        ApkPackage p = get(component.getPackageName());
+    }
+
+    /** Keep the existing identity boundary; changing an app never trusts callingPackage. */
+    private void checkEnabledPackage(String packageName) {
+        ApkPackage p = get(packageName);
         if (p == null || isRemovalPending(p.packageName)) {
-            throw new IllegalArgumentException("Unknown package: " + component.getPackageName());
+            throw new IllegalArgumentException("Unknown package: " + packageName);
         }
         int callingUid = Binder.getCallingUid();
         if (callingUid != p.uid() && callingUid != android.os.Process.SYSTEM_UID
                 && callingUid != android.os.Process.ROOT_UID
-                && callingUid != android.os.Process.myUid()
+                && Binder.getCallingPid() != android.os.Process.myPid()
                 && mPermissions.checkProcessPermission(
                         "android.permission.CHANGE_COMPONENT_ENABLED_STATE",
                         Binder.getCallingPid(), callingUid) != PackageManager.PERMISSION_GRANTED) {
             throw new SecurityException("Attempt to change component state; pid="
                     + Binder.getCallingPid() + ", uid=" + callingUid
-                    + ", package=" + component.getPackageName());
-        }
-        if (!hasComponent(component)) {
-            throw new IllegalArgumentException("Component class " + component.getClassName()
-                    + " does not exist in " + component.getPackageName());
+                    + ", package=" + packageName);
         }
     }
 
@@ -627,11 +718,14 @@ public final class PackageManagerService extends IPackageManager.Default {
 
     @Override
     public int getApplicationEnabledSetting(String packageName, int userId) {
+        enabledUser(userId);
+        ApkPackage installed = get(packageName);
+        if (installed != null) return installed.applicationEnabledState();
         if (synthetic(packageName)
                 || BrowserPackageSupport.isBrowserPackage(packageName)) {
             return PackageManager.COMPONENT_ENABLED_STATE_ENABLED;
         }
-        return PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
+        throw new IllegalArgumentException("Unknown package: " + packageName);
     }
 
     /**
