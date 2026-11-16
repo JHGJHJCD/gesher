@@ -232,8 +232,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         boolean translucent;
         /** Resumed once the activity in front ({@link #waitingFor}) is paused. */
         boolean resumeAfterPause;
-        /** The caller's multi-activity batch created this record (rollback ownership). */
-        boolean batchCreated;
+        /** Identity of the launch batch that created this record; never reused for another batch. */
+        Object batchOwner;
         /**
          * The configuration it was launched or relaunched with, or told of last: its
          * package's (locale track: LocaleManagerService.configurationFor) with its task's size
@@ -612,6 +612,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (intent == null) return ActivityManager.START_INTENT_NOT_RESOLVED;
         }
         List<ActivityRecord> started = new ArrayList<>(intents.length);
+        Object batchOwner = new Object(); // unique identity, never shared with a prior stack
         ActivityRecord parent = null;
         int taskId = launchTaskId(options);
         final boolean sharedIdentity = shareIdentity(options);
@@ -621,7 +622,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             Intent member = new Intent(intents[i]);
             created[0] = null;
             StackLaunch previous = mStackLaunch.get();
-            mStackLaunch.set(new StackLaunch(member, parent));
+            mStackLaunch.set(new StackLaunch(member, parent, batchOwner));
             try {
                 result = start(caller, member, resolvedTypes == null ? null : resolvedTypes[i],
                         callingPackage, i == 0 ? resultTo : null, null, -1, taskId,
@@ -635,7 +636,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 if (created[0] != null && !started.contains(created[0])) {
                     started.add(created[0]);
                 }
-                rollbackBatch(started, failure);
+                rollbackBatch(started, batchOwner, failure);
                 throw failure;
             } finally {
                 if (previous == null) mStackLaunch.remove();
@@ -647,7 +648,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 if (created[0] != null && !started.contains(created[0])) {
                     started.add(created[0]);
                 }
-                rollbackBatch(started, null);
+                rollbackBatch(started, batchOwner, null);
                 return result == ActivityManager.START_SUCCESS
                         ? ActivityManager.START_CANCELED : result;
             }
@@ -685,10 +686,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     /** Cleanup is limited to this invocation's newly allocated records. */
-    private void rollbackBatch(List<ActivityRecord> started, Throwable cause) {
+    private void rollbackBatch(List<ActivityRecord> started, Object batchOwner, Throwable cause) {
         for (int i = started.size() - 1; i >= 0; i--) {
             ActivityRecord record = started.get(i);
-            if (!record.batchCreated) continue; // singleTop: borrowed prior task record
+            if (record.batchOwner != batchOwner) continue; // never finish borrowed task records
             try {
                 finish(record, "batch-start-failed", android.app.Activity.RESULT_CANCELED, null);
             } catch (RuntimeException | Error cleanup) {
@@ -703,9 +704,11 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     private static final class StackLaunch {
         final Intent intent;
         final ActivityRecord parent;
-        StackLaunch(Intent intent, ActivityRecord parent) {
+        final Object owner;
+        StackLaunch(Intent intent, ActivityRecord parent, Object owner) {
             this.intent = intent;
             this.parent = parent;
+            this.owner = owner;
         }
     }
     private final ThreadLocal<StackLaunch> mStackLaunch = new ThreadLocal<>();
@@ -1311,7 +1314,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 r.accountCompletion = mAccountCompletion.get();
                 r.inheritedWindowMode = sourceWindowMode;
                 r.translucent = translucent;
-                r.batchCreated = stack != null && stack.intent == intent;
+                r.batchOwner = stack != null && stack.intent == intent ? stack.owner : null;
                 // A start in a task moved to the back brings it to the front.
                 mHiddenTasks.remove(taskId);
                 // The activity in front in its task is paused first; other tasks' stay
@@ -3237,7 +3240,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (r.state == State.LAUNCHING || r.state == State.RESUMING) r.state = State.RESUMED;
             if (r.state == State.RESUMED && !r.finishing) {
                 for (ActivityRecord child : mActivities) {
-                    if (child.batchCreated && child.waitingFor == r
+                    if (child.batchOwner != null && child.waitingFor == r
                             && child.state == State.INITIALIZING
                             && !child.finishing) {
                         pauseForStack = true;
