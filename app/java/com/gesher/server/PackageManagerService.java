@@ -508,9 +508,10 @@ public final class PackageManagerService extends IPackageManager.Default {
 
     /**
      * The device's system features (docs/e2e.md): a phone-sized window with a mouse
-     * (faketouch, both orientations) whose launcher could host app widgets (apps reach
+     * (touchscreen and faketouch, matching {@link com.gesher.app.DeviceProfile#configuration()},
+     * both orientations) whose launcher could host app widgets (apps reach
      * AppWidgetManager only on devices with app_widgets, and phone apps assume it).
-     * Telephony, Wi-Fi, camera, sensors, touchscreen and the rest are absent. Bluetooth
+     * Telephony, Wi-Fi, camera, sensors and the rest are absent. Bluetooth
      * (docs/bluetooth.md) is there when the host has a radio: FEATURE_BLUETOOTH with an
      * adapter, FEATURE_BLUETOOTH_LE when Windows reports LE support (apps such as
      * companion apps check it before anything else).
@@ -520,6 +521,7 @@ public final class PackageManagerService extends IPackageManager.Default {
 
     static {
         for (String name : new String[] {PackageManager.FEATURE_APP_WIDGETS,
+                PackageManager.FEATURE_TOUCHSCREEN,
                 PackageManager.FEATURE_FAKETOUCH, PackageManager.FEATURE_SCREEN_PORTRAIT,
                 PackageManager.FEATURE_SCREEN_LANDSCAPE}) {
             android.content.pm.FeatureInfo f = new android.content.pm.FeatureInfo();
@@ -714,6 +716,19 @@ public final class PackageManagerService extends IPackageManager.Default {
     }
     @Override public PermissionGroupInfo getPermissionGroupInfo(String name, int flags) {
         return mPermissions.getPermissionGroupInfo(name, flags);
+    }
+
+    @Override
+    public boolean canRequestPackageInstalls(String packageName, int userId) {
+        if (userId != 0 || packageName == null || isRemovalPending(packageName)) {
+            return false;
+        }
+        if ("android".equals(packageName)) {
+            return true;
+        }
+        ApkPackage pkg = get(packageName);
+        return pkg != null && pkg.parsed.getRequestedPermissions()
+                .contains(android.Manifest.permission.REQUEST_INSTALL_PACKAGES);
     }
 
     @Override

@@ -1,14 +1,20 @@
 /* Copyright (C) 2026 The Gesher Authors; SPDX-License-Identifier: Apache-2.0 */
 package gesher.services;
 
+import android.Manifest;
+import android.content.pm.FeatureInfo;
 import android.content.pm.IDexModuleRegisterCallback;
+import android.content.pm.PackageManager;
 import android.os.RemoteException;
+import com.android.internal.pm.parsing.pkg.PackageImpl;
+import com.android.internal.pm.pkg.component.ParsedUsesPermissionImpl;
 import com.gesher.server.ApkPackage;
 import com.gesher.server.PackageManagerService;
 import java.lang.reflect.Field;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -36,10 +42,17 @@ public final class PackageServiceQueriesTest {
         void runOne() { work.removeFirst().run(); }
     }
 
-    private static ApkPackage record(Unsafe unsafe, String name, int uid) throws Exception {
+    private static ApkPackage record(Unsafe unsafe, String name, int uid,
+            String... permissions) throws Exception {
         ApkPackage pkg = (ApkPackage) unsafe.allocateInstance(ApkPackage.class);
         field(pkg, "packageName", name);
         field(pkg, "mUid", uid);
+        PackageImpl parsed = (PackageImpl) PackageImpl.forTesting(name, "/fixture/" + name + ".apk");
+        for (String permission : permissions) {
+            parsed.addUsesPermission(
+                    new ParsedUsesPermissionImpl(permission, 0, Collections.emptySet()));
+        }
+        field(pkg, "parsed", parsed);
         return pkg;
     }
 
@@ -52,15 +65,39 @@ public final class PackageServiceQueriesTest {
         PackageManagerService service = (PackageManagerService) unsafe.allocateInstance(
                 PackageManagerService.class);
         Map<String, ApkPackage> packages = new LinkedHashMap<>();
-        packages.put("fixture.one", record(unsafe, "fixture.one", 12001));
+        packages.put("fixture.one", record(unsafe, "fixture.one", 12001,
+                Manifest.permission.REQUEST_INSTALL_PACKAGES));
         packages.put("fixture.two", record(unsafe, "fixture.two", 12002));
         ApkPackage addon = record(unsafe, "fixture.system", 12003);
         field(addon, "mSystemAddon", true);
         packages.put("fixture.system", addon);
         field(service, "mPackages", packages);
-        field(service, "mRemoving", new LinkedHashMap<String, ApkPackage>());
+        Map<String, ApkPackage> removing = new LinkedHashMap<>();
+        field(service, "mRemoving", removing);
         QueueExecutor executor = new QueueExecutor();
         field(service, "mPackageEventExecutor", executor);
+
+        require(service.hasSystemFeature(PackageManager.FEATURE_TOUCHSCREEN, 0),
+                "Device did not advertise touchscreen feature");
+        boolean listedTouchscreen = false;
+        for (FeatureInfo feature : service.getSystemAvailableFeatures().getList()) {
+            if (PackageManager.FEATURE_TOUCHSCREEN.equals(feature.name)) listedTouchscreen = true;
+        }
+        require(listedTouchscreen, "Available features list omitted touchscreen");
+        require(service.canRequestPackageInstalls("fixture.one", 0),
+                "Package declaring REQUEST_INSTALL_PACKAGES could not request installs");
+        require(!service.canRequestPackageInstalls("fixture.two", 0)
+                        && !service.canRequestPackageInstalls("fixture.absent", 0)
+                        && !service.canRequestPackageInstalls(null, 0)
+                        && !service.canRequestPackageInstalls("fixture.one", 10),
+                "Package without permission, unknown package, null or secondary user could request installs");
+        require(service.canRequestPackageInstalls("android", 0)
+                        && !service.canRequestPackageInstalls("android", 10),
+                "Platform package install-request status broke");
+        removing.put("fixture.one", packages.get("fixture.one"));
+        require(!service.canRequestPackageInstalls("fixture.one", 0),
+                "Package pending removal could still request installs");
+        removing.clear();
 
         require(service.getPackageGids("fixture.one", 0, 0).length == 0
                 && service.getPackageGids("fixture.two", 0, 0).length == 0,
