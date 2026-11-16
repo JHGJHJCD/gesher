@@ -7,6 +7,7 @@
 const LABEL = 'automerge';
 const RECEIPT = 'gesher-automerge-v1';
 const OPENING = 'gesher-automerge-opening-v1';
+const QA = 'gesher-automerge-qa-v1';
 const PASSING = new Set(['success', 'neutral', 'skipped']);
 const BOT = 'github-actions[bot]';
 const SHA = /^[a-f0-9]{40}$/i;
@@ -49,17 +50,66 @@ function appliedAfterOpening(pr, event, boundary) {
   const opened = Date.parse(pr.created_at);
   const applied = Date.parse(event.created_at);
   const author = pr.user?.id;
-  const previous = Date.parse(event.priorActorApplicationAt);
   // GitHub timestamps have second precision. A creation-time label, including
-  // an indistinguishable same-second addition, requires a fresh opt-in.
-  // gh creates a PR and then adds its labels in a separate API operation.
-  // Reject the author's first application even if opening initialization has
-  // already finished; a later deliberate reapplication remains possible.
+  // an indistinguishable same-second addition, requires a fresh opt-in after
+  // initialization. Author opt-in also needs a prior application or QA proof.
   return Number.isSafeInteger(author) && author > 0 &&
     Number.isFinite(opened) && Number.isFinite(applied) &&
-    Number.isFinite(boundary) && applied > Math.max(opened, boundary) &&
-    (event.actor?.id !== author ||
-      (Number.isFinite(previous) && previous >= opened && previous < applied));
+    Number.isFinite(boundary) && applied > Math.max(opened, boundary);
+}
+
+function needsAuthorQa(pr, event) {
+  const previous = Date.parse(event.priorActorApplicationAt);
+  return event.actor?.id === pr.user?.id &&
+    !(Number.isFinite(previous) && previous >= Date.parse(pr.created_at) &&
+      previous < Date.parse(event.created_at));
+}
+
+function explicitApplication(pr, event, boundary, qa) {
+  return appliedAfterOpening(pr, event, boundary) && (!needsAuthorQa(pr, event) ||
+    (qa && qa.actor === event.actor?.id && qa.repository === pr.base.repo.id &&
+      qa.number === pr.number && qa.head === pr.head.sha && qa.base === pr.base.ref &&
+      Date.parse(qa.submitted) > Math.max(Date.parse(pr.created_at), boundary) &&
+      Date.parse(qa.submitted) < Date.parse(event.created_at)));
+}
+
+async function authorQa(github, owner, repo, pr, event, boundary) {
+  if (!appliedAfterOpening(pr, event, boundary) || !needsAuthorQa(pr, event)) return null;
+  const reviews = await list(github.rest.pulls.listReviews, {owner, repo, pull_number: pr.number});
+  const candidates = [];
+  for (const r of reviews) {
+    if (r.state !== 'COMMENTED' || r.user?.id !== event.actor?.id || r.commit_id !== pr.head.sha ||
+        !Number.isSafeInteger(r.id) || r.id <= 0 || !Number.isSafeInteger(r.user?.id) || r.user.id <= 0 ||
+        typeof r.node_id !== 'string' || !r.node_id || typeof r.submitted_at !== 'string' ||
+        !(Date.parse(r.submitted_at) > Math.max(Date.parse(pr.created_at), boundary)) ||
+        !(Date.parse(r.submitted_at) < Date.parse(event.created_at)) || typeof r.body !== 'string') continue;
+    const markers = r.body.split(/\r?\n/).filter((line) => line.includes(QA));
+    if (!markers.length) continue;
+    if (markers.length !== 1 || r.body.split(QA).length !== 2 ||
+        !markers[0].startsWith('<!-- ' + QA + ' ') || !markers[0].endsWith(' -->')) return null;
+    const raw = markers[0].slice(QA.length + 6, -4);
+    let value;
+    try { value = JSON.parse(raw); } catch { return null; }
+    // Compact JSON round-tripping also rejects duplicate keys and ambiguous spellings.
+    if (!value || Array.isArray(value) || Object.keys(value).length !== 4 ||
+        JSON.stringify(value) !== raw || value.repository !== pr.base.repo.id ||
+        value.number !== pr.number || value.head !== pr.head.sha || value.base !== pr.base.ref) return null;
+    candidates.push({review: r, proof: {...value, id: r.id, node: r.node_id,
+      actor: r.user.id, submitted: r.submitted_at, body: r.body}});
+  }
+  if (candidates.length !== 1) return null;
+  const {review, proof} = candidates[0];
+  // REST submitted_at does not change when a review body is edited. Require
+  // GitHub's edit metadata so an old comment cannot acquire proof after labeling.
+  const {node} = await github.graphql(`query($id: ID!) {
+    node(id: $id) { ... on PullRequestReview {
+      id body state submittedAt lastEditedAt commit { oid }
+    } }
+  }`, {id: review.node_id});
+  if (node?.id !== review.node_id || node.body !== review.body || node.state !== 'COMMENTED' ||
+      node.commit?.oid !== review.commit_id || node.lastEditedAt !== null ||
+      Date.parse(node.submittedAt) !== Date.parse(review.submitted_at)) return null;
+  return proof;
 }
 
 async function openingBoundary(github, owner, repo, pr) {
@@ -77,11 +127,13 @@ async function openingBoundary(github, owner, repo, pr) {
     if (value.repository !== pr.base.repo.id || value.number !== pr.number ||
         value.created !== pr.created_at) throw new Error('opening receipt identity mismatch');
     const at = Date.parse(value.boundary);
+    const recordedAt = Date.parse(c.created_at);
     if (Object.keys(value).length !== 4 || !Number.isFinite(at) ||
-        at < Date.parse(pr.created_at)) throw new Error('invalid opening boundary');
+        at < Date.parse(pr.created_at) || !Number.isFinite(recordedAt) ||
+        recordedAt < Date.parse(pr.created_at)) throw new Error('invalid opening boundary');
     // Concurrent initializers may leave multiple receipts. Never relax the
     // most conservative recorded boundary, regardless of delivery order.
-    boundary = boundary === null ? at : Math.max(boundary, at);
+    boundary = Math.max(boundary ?? at, at, recordedAt);
   }
   return boundary;
 }
@@ -89,7 +141,7 @@ async function openingBoundary(github, owner, repo, pr) {
 async function initializeOpening(github, owner, repo, pr, snapshot, event) {
   const existing = await openingBoundary(github, owner, repo, pr);
   if (existing !== null) return existing;
-  const times = [pr.created_at, snapshot.updated_at];
+  const times = [pr.created_at, pr.updated_at, snapshot.updated_at];
   if (event) times.push(event.created_at);
   const parsed = times.map(Date.parse);
   if (!parsed.every(Number.isFinite)) return null;
@@ -98,7 +150,7 @@ async function initializeOpening(github, owner, repo, pr, snapshot, event) {
     created: pr.created_at, boundary: new Date(boundary).toISOString()};
   await github.rest.issues.createComment({owner, repo, issue_number: pr.number,
     body: 'Automerge initialized. Approval requires a later explicit label from a collaborator with merge access. ' +
-      'The PR author must reapply their first automerge label before approval.\n\n<!-- ' +
+      'The PR author must reapply their first label or first submit the exact-head QA review described in .github/scripts/automerge.md.\n\n<!-- ' +
       OPENING + ' ' + JSON.stringify(value) + ' -->'});
   return boundary;
 }
@@ -246,8 +298,22 @@ async function ciVerdict(github, owner, repo, pr, defaultBranch, baseSha) {
       const mergeSha = refs[0].sha;
       const {data: commit} = await github.rest.git.getCommit({owner, repo, commit_sha: mergeSha});
       if (commit.sha !== mergeSha || commit.parents?.length !== 2 ||
-          commit.parents[0].sha !== baseSha || commit.parents[1].sha !== head) {
-        return 'CI tested a different head or base';
+          !SHA.test(commit.parents[0].sha || '') || commit.parents[1].sha !== head) {
+        return 'CI has no valid tested base and approved head';
+      }
+      const testedBase = commit.parents[0].sha;
+      if (testedBase !== baseSha) {
+        // A reviewed head does not lose its passing CI merely because another
+        // PR advanced the target. Prove that the tested base is still in the
+        // actual target's history; live PR association data cannot prove this.
+        const {data: comparison} = await github.rest.repos.compareCommits({
+          owner, repo, base: testedBase, head: baseSha, per_page: 1,
+        });
+        if (comparison?.status !== 'ahead' ||
+            comparison.base_commit?.sha !== testedBase ||
+            comparison.merge_base_commit?.sha !== testedBase) {
+          return 'CI tested a base outside the current target history';
+        }
       }
     }
   }
@@ -297,8 +363,9 @@ async function tryMerge({github, core, owner, repo, number, sha, defaultBranch})
   const event = await labelEvent(github, owner, repo, number);
   if (!event || !event.unambiguous || !await authorized(github, owner, repo, event)) return;
   const boundary = await initializeOpening(github, owner, repo, pr, pr, event);
-  if (!appliedAfterOpening(pr, event, boundary)) return removeLabel(github, owner, repo, pr, event,
-    'reapply the label after PR initialization; the author\'s first application cannot approve it', core);
+  const qa = await authorQa(github, owner, repo, pr, event, boundary);
+  if (!explicitApplication(pr, event, boundary, qa)) return removeLabel(github, owner, repo, pr, event,
+    'reapply the label after initialization; an author first label also requires an earlier exact-head QA review', core);
   if (event.invalidated) return removeLabel(github, owner, repo, pr, event,
     'the PR changed after approval; apply the label again', core);
   const receipt = await approval(github, owner, repo, pr, event);
@@ -312,8 +379,11 @@ async function tryMerge({github, core, owner, repo, number, sha, defaultBranch})
 
   // Re-read mutable PR state and the opt-in after all asynchronous CI queries.
   const latest = await labelEvent(github, owner, repo, number);
+  const latestBoundary = await openingBoundary(github, owner, repo, pr);
   if (latest?.id !== event.id || latest.invalidated || !latest.unambiguous ||
-      !appliedAfterOpening(pr, latest, await openingBoundary(github, owner, repo, pr)) ||
+      !explicitApplication(pr, latest, latestBoundary, qa)) return;
+  const finalQa = await authorQa(github, owner, repo, pr, latest, latestBoundary);
+  if (JSON.stringify(finalQa) !== JSON.stringify(qa) ||
       !await approval(github, owner, repo, pr, latest) ||
       !await authorized(github, owner, repo, latest)) return;
   const [finalBoundary, finalBase] = await Promise.all([
@@ -327,7 +397,7 @@ async function tryMerge({github, core, owner, repo, number, sha, defaultBranch})
   if (current.state !== 'open' || current.draft || !hasLabel(current) ||
       !sameTarget(pr, current) || current.base.sha !== pr.base.sha || finalBase !== baseSha ||
       finalEvent?.id !== event.id || finalEvent.invalidated || !finalEvent.unambiguous ||
-      !appliedAfterOpening(current, finalEvent, finalBoundary)) return;
+      !explicitApplication(current, finalEvent, finalBoundary, finalQa)) return;
   try {
     const {data: result} = await github.rest.pulls.merge({
       owner, repo, pull_number: number, sha: pr.head.sha, merge_method: 'merge',
@@ -376,8 +446,9 @@ module.exports = async ({github, context, core}) => {
         'labels included when opening a PR cannot approve it; apply the label again', core);
     }
     const boundary = await initializeOpening(github, owner, repo, pr, pr, event);
-    if (!appliedAfterOpening(pr, event, boundary)) return removeLabel(github, owner, repo, pr, event,
-      'reapply the label after PR initialization; the author\'s first application cannot approve it', core);
+    const qa = await authorQa(github, owner, repo, pr, event, boundary);
+    if (!explicitApplication(pr, event, boundary, qa)) return removeLabel(github, owner, repo, pr, event,
+      'reapply the label after initialization; an author first label also requires an earlier exact-head QA review', core);
     if (event.invalidated) return removeLabel(github, owner, repo, pr, event,
       'the PR changed after approval; apply the label again', core);
     // Opening a PR never grants approval. A delayed opened event must not
@@ -408,6 +479,17 @@ module.exports = async ({github, context, core}) => {
   if (context.eventName === 'workflow_run' || context.eventName === 'schedule') {
     const sha = context.eventName === 'workflow_run' ? p.workflow_run.head_sha : null;
     const prs = await list(github.rest.pulls.list, {owner, repo, state: 'open'});
+    if (context.eventName === 'schedule') {
+      // Initialize existing PRs before a reviewer opts in, including PRs whose
+      // opening event predated this controller or was not delivered.
+      for (const pr of prs.filter((candidate) => !hasLabel(candidate))) {
+        try {
+          await initializeOpening(github, owner, repo, pr, pr, null);
+        } catch (err) {
+          core.warning('#' + pr.number + ': initialization blocked: ' + err.message);
+        }
+      }
+    }
     for (const pr of prs.filter((x) => hasLabel(x) && (!sha || x.head.sha === sha))) {
       try {
         await tryMerge({...args, number: pr.number, sha});
