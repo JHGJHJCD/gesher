@@ -298,7 +298,8 @@ public final class TaskStackContractTest {
         final int[] result = {ActivityManager.START_SUCCESS};
         Intent reused = launch("Root").addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-        ActivityOptions options = ActivityOptions.makeBasic().setLaunchTaskId(taskId);
+        ActivityOptions options = ActivityOptions.makeBasic();
+        options.setLaunchTaskId(taskId);
         h.asApp(() -> result[0] = h.api.startActivities(h.thread, PKG, null,
                 new Intent[]{reused, launch("DoesNotExist")}, null, null,
                 options.toBundle(), 0));
