@@ -4,8 +4,9 @@
 #include "Properties.h"
 
 // The pipeline for this process, chosen once (register_gesher_graphics):
-// SkiaCpu unless GESHER_HWUI_RENDERER or the system property
-// debug.hwui.renderer is "skiagl" and OpenGL ES over ANGLE works.
+// Windowed apps prefer SkiaGL on verified ANGLE D3D11 hardware (Intel iGPUs
+// included); headless processes and software/failed probes keep SkiaCpu.
+// GESHER_HWUI_RENDERER or debug.hwui.renderer: auto, skiacpu, skiagl.
 android::uirenderer::RenderPipelineType gesher_hwui_choose_pipeline();
 
 // "skiagl" or "skiacpu", after gesher_hwui_choose_pipeline.

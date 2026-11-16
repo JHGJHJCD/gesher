@@ -83,15 +83,14 @@ The decision record is [0030](decisions/0030-angle-hwui-skiagl.md).
   Android's EGL native types (`EGLNativeWindowType` is `ANativeWindow*`).
   `eglBeginFrame` does nothing; `EGL_KHR_swap_buffers_with_damage` (which
   EglManager requires) falls back to `eglSwapBuffers` when ANGLE lacks it.
-- **Choosing it**: the CPU pipeline stays the default.
-  `GESHER_HWUI_RENDERER=skiagl`, or the system property
-  `debug.hwui.renderer=skiagl` (e.g. in `$ANDROID_ROOT/build.prop`), asks for
-  SkiaGL; it is used if ANGLE's display initializes, an RGBA8 ES context on a
-  pbuffer becomes current and Skia gets a GrGLInterface. Otherwise stderr
-  says `gesher hwui: ... OpenGL ES over ANGLE is not usable (...); using the
-  CPU pipeline (SkiaCpu)` and the CPU pipeline renders
-  (`compat/hwui/gl/pipeline_select.cc`, called from `register_gesher_graphics`).
-  With SkiaGL stderr says `gesher hwui: SkiaGL pipeline (...): ANGLE <GL_RENDERER>, ...`.
+- **Choosing it**: windowed app processes automatically try SkiaGL on
+  verified D3D11 hardware (including Intel integrated graphics). Services and
+  headless processes keep SkiaCpu without a GPU probe. WARP, Microsoft Basic
+  Render Driver, missing ANGLE or other software/unknown devices fall back to
+  SkiaCpu. `GESHER_HWUI_RENDERER=skiacpu|skiagl|auto` and
+  `debug.hwui.renderer` (unless overridden by the environment)
+  retain explicit choices; `skiagl` can use WARP for diagnosis.
+  See [automatic GPU selection](hwui-auto-gpu.md) for details and limitations.
 - **Reading it back**: `com.gesher.app.graphics.GraphicsDebug` (gesher-app):
   `renderer()`, `rendererDetail()`, `captureComposed(hwnd)` (PrintWindow
   with `PW_RENDERFULLCONTENT`: what DWM composed, the swap chain included),
