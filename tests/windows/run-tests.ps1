@@ -235,14 +235,14 @@ if ($FrameworkContractsOnly) {
   $testTracks += Get-Item -LiteralPath $systemContractTrack -ErrorAction Stop
   $testTracks += Get-Item -LiteralPath (Join-Path $PSScriptRoot 'tracks/99-android-windows-contracts.ps1') -ErrorAction Stop
 }
-foreach ($t in $testTracks) {
+foreach ($shardTrack in $testTracks) {
   try {
     $trackClock = [Diagnostics.Stopwatch]::StartNew()
-    Write-Host "TRACK_START shard=$Shard track=$($t.Name)"
-    . $t.FullName
-    Write-Host "TRACK_END shard=$Shard track=$($t.Name) elapsedMs=$($trackClock.ElapsedMilliseconds)"
+    Write-Host "TRACK_START shard=$Shard track=$($shardTrack.Name)"
+    . $shardTrack.FullName
+    Write-Host "TRACK_END shard=$Shard track=$($shardTrack.Name) elapsedMs=$($trackClock.ElapsedMilliseconds)"
   } catch {
-    Write-Host "FAIL  test script $($t.Name): $_"
+    Write-Host "FAIL  test script $($shardTrack.Name): $_"
     Write-Host $_.InvocationInfo.PositionMessage
     Write-Host $_.ScriptStackTrace
     throw

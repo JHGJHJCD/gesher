@@ -119,10 +119,22 @@ $testTracks = @(Get-ChildItem -LiteralPath (Split-Path $TrackFile) -Filter '*-tr
       @{ Name = 'exception'; Body = 'throw "fixture error"'; Exit = 1 })) {
     $firstTrack = Join-Path $temp '01-track.ps1'
     $secondTrack = Join-Path $temp '02-track.ps1'
-    Set-Content $firstTrack ('function SharedFixture { "original helper" }; $fixtureState = 42' + "`n" + $case.Body)
+    # Existing tracks use $t for their own measurements/fixtures. Dot-sourcing
+    # them must not erase the runner's timing or failure-report track identity.
+    Set-Content $firstTrack ('function SharedFixture { "original helper" }; $fixtureState = 42; $t = @{}' + "`n" + $case.Body)
     Set-Content $secondTrack 'if ((SharedFixture) -ne "original helper" -or $fixtureState -ne 42) { throw "Lost track scope" }'
     $output = & (Join-Path $PSHOME 'pwsh') -NoProfile -File $harness $trackFile 2>&1
     if ($LASTEXITCODE -ne $case.Exit) { throw "Wrong verdict for $($case.Name): $LASTEXITCODE $output" }
+    $text = $output -join "`n"
+    if ($case.Name -eq 'exception') {
+      if ($text -notmatch 'FAIL  test script 01-track\.ps1:') { throw "Lost failure track identity: $text" }
+    } else {
+      foreach ($name in '01-track.ps1', '02-track.ps1') {
+        if ($text -notmatch ('TRACK_END shard=fixture track=' + [regex]::Escape($name) + ' elapsedMs=\d+')) {
+          throw "Lost completed track identity: $text"
+        }
+      }
+    }
     Write-Host "PASS  production loop propagates $($case.Name)"
   }
 } finally {
