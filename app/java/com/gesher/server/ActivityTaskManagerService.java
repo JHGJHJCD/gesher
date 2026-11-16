@@ -232,6 +232,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         boolean translucent;
         /** Resumed once the activity in front ({@link #waitingFor}) is paused. */
         boolean resumeAfterPause;
+        /** The caller's multi-activity batch created this record (rollback ownership). */
+        boolean batchCreated;
         /**
          * The configuration it was launched or relaunched with, or told of last: its
          * package's (locale track: LocaleManagerService.configurationFor) with its task's size
@@ -589,29 +591,87 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     /**
-     * A stack of activities (TaskStackBuilder, PendingIntent.getActivities), lite: the
-     * last one, the one in front, is started, in a task of its own when the first intent
-     * asks for a new task. ActivityStarter records the ones below it and creates them when
-     * the user goes back; here they are left out, so going back leaves the app
-     * (docs/e2e.md).
+     * One authenticated TaskStackBuilder/PendingIntent stack. Every member is resolved
+     * through the ordinary start path, not invented from a package name or intent.
+     * Subsequent members use the first task's actual ID, and wait for the preceding
+     * Activity's pause before their own Launch/Resume transaction. This also works
+     * when the process of a member has not attached yet.
+     *
+     * A failed intermediate start tears down records created by this batch; it never
+     * removes an older task merely because the caller requested a stack.
      */
     @Override
     public int startActivities(IApplicationThread caller, String callingPackage,
             String callingFeatureId, Intent[] intents, String[] resolvedTypes, IBinder resultTo,
             Bundle options, int userId) {
         if (intents == null || intents.length == 0) return ActivityManager.START_SUCCESS;
-        int last = intents.length - 1;
-        Intent intent = new Intent(intents[last]);
-        intent.addFlags(intents[0].getFlags() & Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (last > 0) {
-            SystemServer.log("startActivities: " + intents.length + " activities; starting the"
-                    + " last, " + intent.toShortString(false, true, true, false)
-                    + " (the ones below are not recorded)");
+        if (resolvedTypes != null && resolvedTypes.length != intents.length) {
+            return ActivityManager.START_INTENT_NOT_RESOLVED;
         }
-        ActivityRecord[] started = new ActivityRecord[1];
-        return start(caller, intent, resolvedTypes != null ? resolvedTypes[last] : null,
-                callingPackage, resultTo, null, -1, launchTaskId(options), shareIdentity(options), started);
+        for (Intent intent : intents) {
+            if (intent == null) return ActivityManager.START_INTENT_NOT_RESOLVED;
+        }
+        List<ActivityRecord> started = new ArrayList<>(intents.length);
+        ActivityRecord parent = null;
+        int taskId = launchTaskId(options);
+        int result = ActivityManager.START_SUCCESS;
+        for (int i = 0; i < intents.length; i++) {
+            Intent member = new Intent(intents[i]);
+            ActivityRecord[] created = new ActivityRecord[1];
+            StackLaunch previous = mStackLaunch.get();
+            if (parent != null) mStackLaunch.set(new StackLaunch(member, parent));
+            else mStackLaunch.remove();
+            try {
+                result = start(caller, member, resolvedTypes == null ? null : resolvedTypes[i],
+                        callingPackage, i == 0 ? resultTo : null, null, -1, taskId,
+                        shareIdentity(options), created);
+            } finally {
+                if (previous == null) mStackLaunch.remove();
+                else mStackLaunch.set(previous);
+            }
+            if (result != ActivityManager.START_SUCCESS
+                    && result != ActivityManager.START_DELIVERED_TO_TOP
+                    || created[0] == null) {
+                // Do not tear down pre-existing activities delivered to by singleTop.
+                for (int j = started.size() - 1; j >= 0; j--) {
+                    ActivityRecord record = started.get(j);
+                    if (record.batchCreated) finish(record, "batch-start-failed",
+                            android.app.Activity.RESULT_CANCELED, null);
+                }
+                return result == ActivityManager.START_SUCCESS
+                        ? ActivityManager.START_CANCELED : result;
+            }
+            parent = created[0];
+            taskId = parent.taskId;
+            started.add(parent);
+        }
+        // A synchronous local ActivityThread may have reported onResume before
+        // the next member was published. Asynchronous clients are handled by
+        // activityResumed below. The same parent is never paused twice.
+        for (int i = 0; i + 1 < started.size(); i++) {
+            ActivityRecord before = started.get(i), after = started.get(i + 1);
+            boolean pauseNow;
+            synchronized (this) {
+                pauseNow = after.waitingFor == before && before.state == State.RESUMED
+                        && before.app != null && before.app.ready && !before.finishing;
+            }
+            if (pauseNow) pause(before, false);
+        }
+        SystemServer.log("startActivities: published " + started.size()
+                + " activities in task " + taskId);
+        return ActivityManager.START_SUCCESS;
     }
+
+    /** Scoped only to this exact member Intent: reentrant starts cannot inherit the batch. */
+    private static final class StackLaunch {
+        final Intent intent;
+        final ActivityRecord parent;
+        StackLaunch(Intent intent, ActivityRecord parent) {
+            this.intent = intent;
+            this.parent = parent;
+        }
+    }
+    private final ThreadLocal<StackLaunch> mStackLaunch = new ThreadLocal<>();
 
     @Override
     public WaitResult startActivityAndWait(IApplicationThread caller, String callingPackage,
@@ -1137,6 +1197,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         int callingPid = Binder.getCallingPid();
         int launchFlags = intent.getFlags();
         ActivityRecord source = resultToToken != null ? forToken(resultToToken) : null;
+        StackLaunch stack = mStackLaunch.get();
+        ActivityRecord stackParent = stack != null && stack.intent == intent ? stack.parent : null;
         // Whether it leaves the activity below it visible (its theme), read before the lock.
         boolean translucent = ActivityTheme.isTranslucentOrFloating(info);
         ActivityRecord r = null;
@@ -1178,6 +1240,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     : source != null && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0
                     ? source.taskId : mNextTaskId++;
             ActivityRecord top = topOf(taskId);
+            if (stackParent != null && (stackParent.taskId != taskId
+                    || !mActivities.contains(stackParent) || stackParent.finishing
+                    || stackParent.state == State.DESTROYED)) return ActivityManager.START_CANCELED;
             boolean singleTop = mAccountCompletion.get() == null
                     && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TOP
                     || (launchFlags & Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0);
@@ -1209,11 +1274,13 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 r.accountCompletion = mAccountCompletion.get();
                 r.inheritedWindowMode = sourceWindowMode;
                 r.translucent = translucent;
+                r.batchCreated = stackParent != null;
                 // A start in a task moved to the back brings it to the front.
                 mHiddenTasks.remove(taskId);
                 // The activity in front in its task is paused first; other tasks' stay
                 // resumed (multi-resume: each visible task's top activity is resumed).
-                ActivityRecord front = front(r);
+                ActivityRecord front = stackParent != null ? null : front(r);
+                if (stackParent != null) r.waitingFor = stackParent;
                 mActivities.add(r);
                 updateIdle();
                 focusTaskLocked(taskId);
@@ -2990,12 +3057,17 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
     private void remove(ActivityRecord r) {
         ProcessRecord check = null;
+        List<ActivityRecord> released = new ArrayList<>();
         synchronized (this) {
             r.state = State.DESTROYED;
             accountActivityFinished(r);
             mActivities.remove(r);
             for (ActivityRecord a : mActivities) {
-                if (a.waitingFor == r) a.waitingFor = null;
+                if (a.waitingFor == r) {
+                    a.waitingFor = null;
+                    if (a.state == State.INITIALIZING && !a.finishing
+                            && a.app != null && a.app.ready) released.add(a);
+                }
             }
             if (r.app != null) {
                 r.app.activities.remove(r);
@@ -3012,6 +3084,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             notifyAll();
         }
         updateTopResumed();
+        for (ActivityRecord child : released) realStartActivity(child);
         maybeExit(check);
     }
 
@@ -3120,10 +3193,20 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     void activityResumed(ActivityRecord r) {
         List<ActivityRecord> toStop;
         List<ActivityRecord> toStart;
+        boolean pauseForStack = false;
         synchronized (this) {
             // A pause or a finish may already be on its way (startActivity or finish() in
             // onResume).
             if (r.state == State.LAUNCHING || r.state == State.RESUMING) r.state = State.RESUMED;
+            if (r.state == State.RESUMED && !r.finishing) {
+                for (ActivityRecord child : mActivities) {
+                    if (child.waitingFor == r && child.state == State.INITIALIZING
+                            && !child.finishing) {
+                        pauseForStack = true;
+                        break;
+                    }
+                }
+            }
             toStop = stopping(r);
             toStart = starting();
             notifyAll();
@@ -3131,6 +3214,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         SystemServer.log("activityResumed: " + r.name());
         for (ActivityRecord a : toStop) stop(a);
         for (ActivityRecord a : toStart) makeVisible(a);
+        if (pauseForStack) pause(r, false);
         boolean pending;
         synchronized (this) {
             // The configuration changed (a locale change, its task resized) while it was on
