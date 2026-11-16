@@ -2,6 +2,7 @@
 package gesher.services;
 
 import android.app.ActivityManager;
+import android.app.ActivityOptions;
 import android.app.IActivityTaskManager;
 import android.app.IApplicationThread;
 import android.app.servertransaction.ClientTransaction;
@@ -282,16 +283,39 @@ public final class TaskStackContractTest {
         throwing.asApp(() -> code[0] = throwing.api.startActivity(throwing.thread, PKG,
                 null, launch("Other"), null, null, null, -1, 0, null, null));
         check(code[0] == ActivityManager.START_SUCCESS
-                        && !(Boolean)get(throwing.record("Other"), "batchCreated"),
-                "Failed batch leaked ThreadLocal state to an ordinary new Activity");
+                        && get(throwing.record("Other"), "batchOwner") == null,
+                "Failed batch leaked ThreadLocal ownership to an ordinary Activity");
+    }
+
+    /** A later batch must never roll back an earlier root borrowed via SINGLE_TOP. */
+    private static void reusedRootRollback() throws Exception {
+        Harness h = new Harness();
+        check(h.start(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        == ActivityManager.START_SUCCESS, "First batch failed to publish Root");
+        Object preexisting = h.record("Root");
+        int taskId = (Integer)get(preexisting, "taskId");
+        h.acknowledge("activityResumed", preexisting);
+        final int[] result = {ActivityManager.START_SUCCESS};
+        Intent reused = launch("Root").addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
+        ActivityOptions options = ActivityOptions.makeBasic().setLaunchTaskId(taskId);
+        h.asApp(() -> result[0] = h.api.startActivities(h.thread, PKG, null,
+                new Intent[]{reused, launch("DoesNotExist")}, null, null,
+                options.toBundle(), 0));
+        check(result[0] == ActivityManager.START_INTENT_NOT_RESOLVED,
+                "Failed second batch did not report the missing member");
+        check(h.records().size() == 1 && h.record("Root") == preexisting
+                        && !(Boolean)get(preexisting, "finishing"),
+                "Failed later batch finished a previously created SINGLE_TOP Root");
     }
 
     public static void main(String[] args) throws Exception {
         fullStack();
         invalidBatch();
         reentrantAndFailure();
+        reusedRootRollback();
         System.out.println("TaskStackContractTest all passed: " + checks
-                + " checks; ordered task history, asynchronous/synchronous pause handoffs, "
-                + "identity, malformed inputs and exception rollback");
+                + " checks; ordered task history, synchronous/asynchronous pause handoffs, "
+                + "reused singleTop ownership, malformed inputs and exception rollback");
     }
 }
