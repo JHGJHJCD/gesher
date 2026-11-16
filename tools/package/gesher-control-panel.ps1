@@ -201,7 +201,8 @@ function Get-InstalledApps {
         </Style>
     </Window.Resources>
     <ScrollViewer Name="PanelScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-    <Grid Name="PanelLayout" Margin="24" MinHeight="640">
+    <!-- Bound the first measure too, before SizeChanged adjusts the viewport. -->
+    <Grid Name="PanelLayout" Margin="24" MinHeight="640" Height="640">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -329,8 +330,22 @@ function Get-InstalledApps {
                     </StackPanel>
                 </Grid>
 
-                <ScrollViewer Name="AppsViewport" Grid.Row="1" VerticalScrollBarVisibility="Auto">
-                    <ItemsControl Name="AppsList">
+                    <ItemsControl Name="AppsList" Grid.Row="1"
+                                  ScrollViewer.CanContentScroll="True"
+                                  VirtualizingPanel.IsVirtualizing="True"
+                                  VirtualizingPanel.VirtualizationMode="Recycling"
+                                  VirtualizingPanel.ScrollUnit="Pixel">
+                        <ItemsControl.Template>
+                            <ControlTemplate TargetType="ItemsControl">
+                                <ScrollViewer Name="AppsViewport" CanContentScroll="True"
+                                              VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                                    <ItemsPresenter Name="ItemsPresenter"/>
+                                </ScrollViewer>
+                            </ControlTemplate>
+                        </ItemsControl.Template>
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <Border BorderBrush="#F2F4F7" BorderThickness="0,0,0,1" Padding="12,10" Background="Transparent">
@@ -354,7 +369,6 @@ function Get-InstalledApps {
                             </DataTemplate>
                         </ItemsControl.ItemTemplate>
                     </ItemsControl>
-                </ScrollViewer>
             </Grid>
         </Border>
 

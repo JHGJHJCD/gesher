@@ -2677,6 +2677,150 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         return finish(r, "app-request", resultCode, resultData, true);
     }
 
+    boolean finishFromApp(ActivityRecord r, int resultCode, Intent resultData, int finishTask) {
+        List<ActivityRecord> task = new ArrayList<>();
+        synchronized (this) {
+            if (isActivityRetired(r)) return false;
+            // Public Activity.finishAndRemoveTask uses WITH_ROOT_ACTIVITY (1).
+            // WITH_ACTIVITY (2) removes the task even from a non-root activity.
+            boolean wholeTask = finishTask == android.app.Activity.FINISH_TASK_WITH_ACTIVITY
+                    || finishTask == android.app.Activity.FINISH_TASK_WITH_ROOT_ACTIVITY
+                            && isTaskRoot(r);
+            if (wholeTask) {
+                for (int i = mActivities.size() - 1; i >= 0; i--) {
+                    ActivityRecord candidate = mActivities.get(i);
+                    if (candidate.taskId == r.taskId) task.add(candidate);
+                }
+            }
+        }
+        return task.isEmpty() ? finishFromApp(r, resultCode, resultData)
+                // AOSP task removal ignores the caller's success result/data and
+                // cancels outstanding results while removing its activities.
+                : finishTogether(r, task, "finish-task", android.app.Activity.RESULT_CANCELED, null);
+    }
+
+    boolean finishAffinity(ActivityRecord r) {
+        List<ActivityRecord> matching = new ArrayList<>();
+        synchronized (this) {
+            if (isActivityRetired(r)) return false;
+            for (int i = mActivities.indexOf(r); i >= 0; i--) {
+                ActivityRecord candidate = mActivities.get(i);
+                if (candidate.taskId != r.taskId || candidate.state == State.DESTROYED) continue;
+                if (!java.util.Objects.equals(candidate.info.taskAffinity, r.info.taskAffinity)) break;
+                matching.add(candidate);
+            }
+        }
+        return finishTogether(r, matching, "request-affinity", android.app.Activity.RESULT_CANCELED, null);
+    }
+
+    void finishSubActivities(ActivityRecord parent, String resultWho, int requestCode) {
+        List<ActivityRecord> matching = new ArrayList<>();
+        synchronized (this) {
+            if (isActivityRetired(parent)) return;
+            for (int i = mActivities.size() - 1; i >= 0; i--) {
+                ActivityRecord candidate = mActivities.get(i);
+                if (candidate.resultTo == parent && candidate.requestCode == requestCode
+                        && java.util.Objects.equals(candidate.resultWho, resultWho)) matching.add(candidate);
+            }
+        }
+        finishTogether(parent, matching, "request-sub", android.app.Activity.RESULT_CANCELED, null);
+    }
+
+    /** State captured before any lifecycle transaction can reenter the service. */
+    private static final class PendingFinish {
+        final ActivityRecord activity;
+        final int resultCode;
+        final Intent resultData;
+        final ActivityCallerState.Snapshot resultCaller;
+        Runnable accountCompletion;
+
+        PendingFinish(ActivityRecord activity, int resultCode, Intent resultData,
+                ActivityCallerState.Snapshot resultCaller) {
+            this.activity = activity;
+            this.resultCode = resultCode;
+            this.resultData = resultData;
+            this.resultCaller = resultCaller;
+        }
+    }
+
+    /**
+     * Close a selected group as one lifecycle decision. Mark every member before sending
+     * transactions: a local or fast remote pause acknowledgement must not resume another
+     * member of the group. Result capture still happens outside the lifecycle monitor.
+     */
+    private boolean finishTogether(ActivityRecord source, List<ActivityRecord> selected,
+            String reason, int resultCode, Intent resultData) {
+        List<PendingFinish> prepared = new ArrayList<>();
+        synchronized (mPm) {
+            for (ActivityRecord r : selected) {
+                int code = r == source ? resultCode : android.app.Activity.RESULT_CANCELED;
+                Intent data = r == source ? resultData : null;
+                if (r.resultTo != null) data = normalizeMicrogCredentialResult(r.info.packageName,
+                        r.info.name, r.resultTo.info.name, code, data);
+                ActivityCallerState.Snapshot caller = r.resultTo == null || !activityCodeCurrent(r)
+                        ? null : ActivityCallerState.capture(new ActivityCallerState.Origin(r.targetCode,
+                                r.info.applicationInfo.uid, r.info.packageName, false, false),
+                                data, mAm.uriGrants());
+                prepared.add(new PendingFinish(r, code, data, caller));
+            }
+        }
+        List<PendingFinish> accepted = new ArrayList<>();
+        Map<ActivityRecord, List<ResultInfo>> immediateResults = new java.util.LinkedHashMap<>();
+        synchronized (this) {
+            if (isActivityRetired(source)) return false;
+            for (PendingFinish pending : prepared) {
+                ActivityRecord r = pending.activity;
+                if (isActivityRetired(r) || r.finishing) continue;
+                r.finishing = true;
+                pending.accountCompletion = r.accountCompletion;
+                r.accountCompletion = null;
+                accepted.add(pending);
+            }
+            for (PendingFinish pending : accepted) {
+                ActivityRecord r = pending.activity;
+                updateRotationLocked(r.taskId);
+                ActivityRecord recipient = r.resultTo;
+                if (pending.resultCaller != null && !isActivityRetired(recipient) && !recipient.finishing) {
+                    IBinder callerToken = new Binder("Activity result caller");
+                    recipient.callerState.add(callerToken, pending.resultCaller);
+                    recipient.pendingResults.add(new ResultInfo(r.resultWho, r.requestCode,
+                            pending.resultCode, pending.resultData, callerToken));
+                    if (recipient.state == State.RESUMED && recipient.app != null) {
+                        immediateResults.computeIfAbsent(recipient, ignored -> new ArrayList<>())
+                                .addAll(takeResults(recipient));
+                    }
+                }
+            }
+        }
+        for (PendingFinish pending : accepted) {
+            if (pending.accountCompletion != null) {
+                try { pending.accountCompletion.run(); }
+                catch (RuntimeException failure) {
+                    SystemServer.log("Activity finish completion failed: " + failure);
+                }
+            }
+        }
+        updateTopResumed();
+        for (Map.Entry<ActivityRecord, List<ResultInfo>> entry : immediateResults.entrySet()) {
+            ActivityRecord recipient = entry.getKey();
+            synchronized (this) {
+                if (isActivityRetired(recipient) || recipient.finishing) continue;
+                if (recipient.state != State.RESUMED || recipient.app == null) {
+                    recipient.pendingResults.addAll(0, entry.getValue());
+                    continue;
+                }
+            }
+            ClientTransaction transaction = new ClientTransaction(recipient.app.thread);
+            transaction.addTransactionItem(new ActivityResultItem(recipient.token, entry.getValue()));
+            schedule(recipient, transaction, "ActivityResultItem");
+        }
+        for (PendingFinish pending : accepted) {
+            SystemServer.log("finishing " + pending.activity.name() + " (" + reason + ")");
+            completeFinish(pending.activity);
+        }
+        return true;
+    }
+
     private boolean finish(ActivityRecord r, String reason, int resultCode, Intent resultData,
             boolean requireCurrentCode) {
         if (r.resultTo != null) resultData = normalizeMicrogCredentialResult(r.info.packageName,
@@ -2690,14 +2834,12 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                             r.info.applicationInfo.uid, r.info.packageName, false, false),
                             resultData, mAm.uriGrants());
         }
-        State state;
         synchronized (this) {
             if (!mActivities.contains(r) || r.state == State.DESTROYED
                     || requireCurrentCode && !activityCodeCurrent(r)) return false;
             if (r.finishing) return true;
             r.finishing = true;
             accountActivityFinished(r);
-            state = r.state;
             // The activity below may ask for another orientation (it gets the configuration
             // as it resumes).
             updateRotationLocked(r.taskId);
@@ -2714,24 +2856,37 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 + (r.resultTo != null ? ", result " + resultCode + " to " + r.resultTo.name()
                         : ""));
         updateTopResumed();
+        completeFinish(r);
+        return true;
+    }
+
+    private void completeFinish(ActivityRecord r) {
+        State state;
+        synchronized (this) {
+            // An earlier transaction's local callback may have already advanced
+            // this record, or a dead process may have removed it entirely. Continue
+            // from its current state (e.g. a pending resume may just have completed).
+            if (!mActivities.contains(r) || r.state == State.DESTROYED) return;
+            state = r.state;
+        }
         switch (state) {
             case INITIALIZING:
                 remove(r);
-                return true;
+                return;
             case LAUNCHING:
             case RESUMING:
             case RESUMED:
                 pause(r, true);
-                return true;
+                return;
             case PAUSED:
             case STARTED:
                 stop(r);
-                return true;
+                return;
             case STOPPED:
                 destroy(r);
-                return true;
+                return;
             default:
-                return true;  // on its way
+                return;  // on its way
         }
     }
 
@@ -3208,7 +3363,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             for (ActivityRecord a : mActivities) {
                 if (a.waitingFor == r) {
                     a.waitingFor = null;
-                    if (a.state == State.INITIALIZING && a.app != null && a.app.ready) {
+                    if (a.state == State.INITIALIZING && !a.finishing && a.app != null && a.app.ready) {
                         launch.add(a);
                     } else if (a.resumeAfterPause) {
                         a.resumeAfterPause = false;

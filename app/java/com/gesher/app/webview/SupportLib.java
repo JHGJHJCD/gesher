@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
 
 /**
@@ -75,6 +76,11 @@ public final class SupportLib {
     /** An InvocationHandler over a Gesher delegate (BoundaryInterfaceReflectionUtil's). */
     static final class Boundary implements InvocationHandler {
         final Object delegate;
+        // A boundary handler has one fixed delegate. Retain successful resolution
+        // only for its lifetime; arbitrary app-supplied Method identities cannot
+        // grow the cache without bound. Calls beyond the cap still resolve normally.
+        private static final int MAX_METHODS = 64;
+        private final ConcurrentHashMap<Method, Method> mMethods = new ConcurrentHashMap<>();
 
         private Boundary(Object delegate) {
             this.delegate = delegate;
@@ -84,11 +90,24 @@ public final class SupportLib {
             return delegate != null ? new Boundary(delegate) : null;
         }
 
+        private Method target(Method method) throws NoSuchMethodException {
+            Method resolved = mMethods.get(method);
+            if (resolved != null) return resolved;
+            synchronized (mMethods) {
+                resolved = mMethods.get(method);
+                if (resolved == null) {
+                    resolved = delegate.getClass().getMethod(method.getName(), method.getParameterTypes());
+                    if (mMethods.size() < MAX_METHODS) mMethods.put(method, resolved);
+                }
+            }
+            return resolved;
+        }
+
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
             Method target;
             try {
-                target = delegate.getClass().getMethod(method.getName(), method.getParameterTypes());
+                target = target(method);
             } catch (NoSuchMethodException e) {
                 if ("getSupportedFeatures".equals(method.getName())) return new String[0];
                 throw new UnsupportedOperationException("Gesher's WebView does not implement "

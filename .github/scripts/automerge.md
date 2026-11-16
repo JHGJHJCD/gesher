@@ -11,11 +11,14 @@ event also removes a label already present in its opening snapshot, even when
 the snapshot's update timestamp is later than creation. A delayed opening
 event preserves a later explicit replacement label.
 
-The author's first explicit label after initialization can approve the PR,
-provided that account has merge access. No earlier author label is required.
-The same timing, permission and approval checks apply to all collaborators.
-Missing author identity blocks approval. This is asynchronous label removal
-and approval enforcement, not a restriction on GitHub's label-assignment UI.
+The PR author can opt in by removing and reapplying an earlier label, with a
+strictly older application by the same stable account ID in the event history.
+An author's first application instead requires the separate exact-head QA
+review described below. Other collaborators can approve with their first
+application. Every route requires write or admin access, initialization and a
+recorded label approval. Missing author identity blocks approval. This is
+asynchronous label removal and approval enforcement, not a restriction on
+GitHub's label-assignment UI.
 
 The controller first records an unedited bot opening receipt, bound to the
 repository, PR number, creation time and an approval boundary. A new unlabelled
@@ -32,15 +35,54 @@ use their latest boundary; a late opening event cannot relax it. The boundary
 is checked again before merge.
 
 GitHub CLI may add labels through a separate request after creating a PR.
-Those labels are rejected if observed during initialization or timestamped no
-later than its receipt. An application strictly after completed initialization
-is an explicit opt-in observable to the controller; GitHub does not expose
-whether that later API request came from the original CLI command or a new
-manual action. The controller does not infer intent from the author's identity.
+GitHub does not expose whether that later request came from the creation
+command or a new manual action, even when initialization has finished. An
+author's first label without the separate QA review is therefore rejected.
+Removing and reapplying it remains a valid opt-in after initialization.
 
 The label workflow records a small, unedited github-actions bot comment containing the repository, PR, head SHA, target branch, label event ID and actor ID. A later workflow completion or scheduled sweep can use only that recorded approval. It cannot infer approval from a label that predates installation, a missed label delivery, an edited comment or ambiguous history. Remove and reapply the label if no approval was recorded. The delivered update timestamp must be zero or one second after the label timestamp, with exactly one label event in that interval and the same sender. Ambiguous same- or adjacent-second relabels require a fresh application.
 
 Pushing a different head, force-pushing, reopening or retargeting requires a new approval. Delayed synchronize jobs re-read the current label event so they do not remove a newer approval.
+
+## Author's first-label QA review
+
+After the opening receipt is recorded, the author may submit a pull-request
+review with the `COMMENT` event and then apply the label. GitHub does not allow
+authors to approve their own PR; an `APPROVE` review is not this proof. The
+submitted review must have REST state `COMMENTED`, a positive review ID, the
+same stable account ID as the label actor, and the exact current head SHA in
+`commit_id`. Its submission must be strictly after the effective opening
+boundary and strictly before the label. Same-second timestamps fail either
+comparison. A review cannot initialize a legacy PR or replace a missing bot
+label-approval receipt.
+
+Include the concrete QA findings and exactly one standalone marker line. This
+example uses placeholder identities; replace all four values with the actual
+repository ID, PR number, full head SHA and target branch:
+
+```text
+<!-- gesher-automerge-qa-v1 {"repository":10,"number":7,"head":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","base":"main"} -->
+```
+
+The marker must contain exactly those four fields as compact JSON, with no
+duplicate keys, extra fields, indentation or text on its line. Field order
+does not matter. Prose alone never establishes approval. Missing, malformed,
+mismatched or multiple qualifying markers or reviews block the first-label
+route. Review history uses the same bounded pagination as the other listings.
+
+The review must be unedited. The controller reads its GraphQL node and checks
+the node ID, body, state, commit and submission time against the REST review,
+requiring `lastEditedAt` to be explicitly null. REST `submitted_at` alone
+cannot establish that the marker existed before labeling because editing a
+review does not change that submission timestamp. Any edit, missing metadata
+or failed API request blocks this proof; removing and reapplying the label
+remains available without a review query.
+
+The proof is checked when recording approval and again during merge
+evaluation, including after asynchronous CI checks. That final proof read
+precedes the final approval-receipt and permission checks and the last PR and
+label reads, so changes during review queries remain visible to those checks.
+The controller uses its existing permissions and never executes review text.
 
 ## CI evidence
 
@@ -70,7 +112,7 @@ so a child cannot cancel its parent. ARM64 already cancels its superseded
 runs independently. The approval controller keeps cancel-in-progress disabled:
 new CI must not interrupt a pending approval capture or a merge operation.
 
-Run the deterministic REST-fixture regression suite with:
+Run the deterministic REST and GraphQL fixture regression suite with:
 
     node --test .github/scripts/automerge.test.js
 

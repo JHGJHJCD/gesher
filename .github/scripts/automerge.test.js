@@ -20,7 +20,7 @@ function world(over = {}) {
       actor: {id: 42, login: 'maintainer'}}],
     runs: [], checks: [{name: 'build', status: 'completed', conclusion: 'success'},
       {name: 'optional', status: 'completed', conclusion: 'skipped'}],
-    statuses: [], comments: [], permission: 'write',
+    statuses: [], comments: [], reviews: [], permission: 'write',
     mergeError: null, mergeResult: {merged: true}, calls: [], hooks: {}, warnings: [],
     mergeProof: {sha: MERGE, parents: [{sha: BASE}, {sha: HEAD}]},
     targetHead: BASE,
@@ -52,6 +52,17 @@ function world(over = {}) {
       body: '<!-- gesher-automerge-opening-v1 ' + JSON.stringify(value) + ' -->'});
   };
   if (over.initialized !== false) w.seedOpening();
+  w.seedQa = (patch = {}, marker = {}) => {
+    const value = {repository: w.pr.base.repo.id, number: w.pr.number,
+      head: w.pr.head.sha, base: w.pr.base.ref, ...marker};
+    const review = {id: 900 + w.reviews.length, node_id: 'PRR_' + (900 + w.reviews.length),
+      user: {id: 42, login: 'maintainer'}, state: 'COMMENTED',
+      commit_id: w.pr.head.sha, submitted_at: T(20),
+      body: 'QA completed for this exact head.\n\n<!-- gesher-automerge-qa-v1 ' +
+        JSON.stringify(value) + ' -->', ...patch};
+    w.reviews.push(review);
+    return review;
+  };
   const rec = (name, fn) => async (args) => {
     w.calls.push([name, clone(args)]);
     if (w.hooks[name]) await w.hooks[name](args);
@@ -66,6 +77,10 @@ function world(over = {}) {
     pulls: {
       get: rec('getPR', () => w.pr),
       list: page('listPRs', () => [w.pr]),
+      listReviews: page('reviews', () => {
+        if (w.reviewError) throw w.reviewError;
+        return w.reviews;
+      }),
       merge: rec('merge', (args) => {
         if (w.mergeError) throw w.mergeError;
         if (args.sha !== w.pr.head.sha) throw Object.assign(new Error('head changed'), {status: 409});
@@ -110,6 +125,17 @@ function world(over = {}) {
         object: {type: 'commit', sha: w.targetHead}, ...w.targetRefOverride})),
     },
   }};
+  github.graphql = async (query, args) => {
+    w.calls.push(['reviewNode', clone(args)]);
+    assert.match(query, /on PullRequestReview/);
+    assert.match(query, /lastEditedAt/);
+    if (w.hooks.reviewNode) await w.hooks.reviewNode(args);
+    if (w.reviewNodeError) throw w.reviewNodeError;
+    const r = w.reviews.find((review) => review.node_id === args.id);
+    return clone({node: r && !w.reviewNodeNull ? {id: r.node_id, body: r.body,
+      state: r.state, submittedAt: r.submitted_at, lastEditedAt: null,
+      commit: {oid: r.commit_id}, ...w.reviewNodeOverride} : null});
+  };
   const core = {info: () => {}, warning: (s) => w.warnings.push(s)};
   const fire = (eventName, payload) => run({github, core,
     context: {eventName, repo: {owner: 'o', repo: 'r'},
@@ -121,6 +147,12 @@ function world(over = {}) {
   w.sweep = () => fire('schedule', {});
   w.fire = fire;
   w.did = (name) => w.calls.filter((c) => c[0] === name);
+  return w;
+}
+
+function authorWorld(over = {}) {
+  const w = world(over);
+  w.pr.user = {id: 42, login: 'maintainer'};
   return w;
 }
 
@@ -250,14 +282,225 @@ test('a delayed opening snapshot does not remove a replacement approval label', 
   assert.equal(w.did('merge').length, 1);
 });
 
-test('an author with merge access can approve with their first label after initialization', async () => {
+test('an author can apply their first label after an explicit exact-head QA review', async () => {
   for (const permission of ['write', 'admin']) {
     const w = world({permission, approved: false});
     w.pr.user = {id: 42, login: 'maintainer'};
+    w.seedQa();
     await w.labeled();
     assert.equal(w.did('removeLabel').length, 0);
     assert.equal(w.did('merge').length, 1);
     assert.equal(w.comments.filter((c) => c.body.includes('<!-- gesher-automerge-v1 ')).length, 1);
+  }
+});
+
+test('an author first post-initialization label without QA cannot approve on any trigger', async () => {
+  for (const trigger of ['labeled', 'ciDone', 'sweep']) {
+    const w = authorWorld({approved: trigger !== 'labeled'});
+    await w[trigger]();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('removeLabel').length, 1);
+    assert.equal(w.did('comment').some((c) => c[1].body.includes('<!-- gesher-automerge-v1 ')), false);
+  }
+});
+
+test('a deliberate author reapplication needs no QA query and uses stable actor identity', async () => {
+  const w = authorWorld({approved: false, reviewError: new Error('must not query reviews')});
+  w.events.unshift({...clone(w.events[0]), id: 40, created_at: T(10),
+    actor: {id: 42, login: 'previous-account-name'}});
+  await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+  assert.equal(w.did('reviews').length, 0);
+  assert.equal(w.did('reviewNode').length, 0);
+});
+
+test('another account or an indistinguishable prior label cannot supply author reapplication', async () => {
+  for (const patch of [
+    {actor: {id: 99, login: 'maintainer'}}, {actor: {id: '42', login: 'maintainer'}},
+    {created_at: T(30)}, {created_at: '2026-11-16T09:59:59Z'},
+  ]) {
+    const w = authorWorld({approved: false});
+    w.events.unshift({...clone(w.events[0]), id: 40, created_at: T(10), ...patch});
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('ordinary collaborator first labels do not require or query author QA', async () => {
+  const w = world({approved: false, reviewError: new Error('must not query reviews')});
+  await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+  assert.equal(w.did('reviews').length, 0);
+});
+
+test('QA proof requires submitted COMMENTED review identity and strict ordering', async () => {
+  for (const patch of [
+    {id: undefined}, {id: 0}, {id: -1}, {id: '900'}, {id: Number.MAX_SAFE_INTEGER + 1},
+    {node_id: undefined}, {node_id: ''}, {node_id: 900},
+    {user: {id: 99, login: 'maintainer'}}, {user: {id: '42'}}, {user: {id: 0}},
+    {commit_id: OTHER}, {state: 'APPROVED'}, {state: 'CHANGES_REQUESTED'},
+    {state: 'PENDING'}, {state: 'DISMISSED'}, {state: undefined},
+    {submitted_at: T(0)}, {submitted_at: T(1)}, {submitted_at: T(30)}, {submitted_at: T(31)},
+    {submitted_at: 'invalid'}, {submitted_at: undefined}, {submitted_at: null},
+    {body: undefined}, {body: null}, {body: 42}, {body: 'QA passed; please merge this head'},
+  ]) {
+    const w = authorWorld({approved: false}); w.seedQa(patch);
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0, JSON.stringify(patch));
+    assert.equal(w.did('comment').some((c) => c[1].body.includes('<!-- gesher-automerge-v1 ')), false);
+  }
+});
+
+test('QA marker binds exactly the repository, PR, head and target with no extra fields', async () => {
+  for (const marker of [
+    {repository: 11}, {repository: '10'}, {number: 8}, {number: '7'},
+    {head: OTHER}, {base: 'release'}, {extra: true},
+    {repository: undefined}, {number: undefined}, {head: undefined}, {base: undefined},
+  ]) {
+    const w = authorWorld({approved: false}); w.seedQa({}, marker);
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0, JSON.stringify(marker));
+  }
+});
+
+test('missing, malformed, duplicate or non-standalone QA markers cannot authorize', async () => {
+  const marker = '<!-- gesher-automerge-qa-v1 ' +
+    JSON.stringify({repository: 10, number: 7, head: HEAD, base: 'main'}) + ' -->';
+  for (const body of [
+    '', 'QA passed', '<!-- gesher-automerge-qa-v1 broken -->',
+    '<!-- gesher-automerge-qa-v1 null -->', '<!-- gesher-automerge-qa-v1 [] -->',
+    marker + '\n' + marker, marker + ' ' + marker, 'prefix ' + marker, marker + ' suffix',
+    ' ' + marker, marker.replace('"repository":10', '"repository":11,"repository":10'),
+    marker.replace('"repository":10', '"repository": 10'), marker.slice(0, -4),
+  ]) {
+    const w = authorWorld({approved: false}); w.seedQa({body});
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0, body);
+  }
+});
+
+test('QA allows a standalone CRLF marker, compact reordered fields and renamed account login', async () => {
+  const w = authorWorld({approved: false});
+  w.seedQa({user: {id: 42, login: 'old-login'},
+    body: 'Concrete QA result.\r\n\r\n<!-- gesher-automerge-qa-v1 ' +
+      JSON.stringify({base: 'main', head: HEAD, number: 7, repository: 10}) + ' -->\r\n'});
+  await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+});
+
+test('multiple or conflicting qualifying QA reviews are ambiguous', async () => {
+  for (const marker of [{}, {base: 'release'}]) {
+    const w = authorWorld({approved: false}); w.seedQa(); w.seedQa({}, marker);
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('QA review pagination includes later proof but never silently truncates excessive history', async () => {
+  const w = authorWorld({approved: false});
+  w.reviews = Array.from({length: 100}, (_, i) => ({id: i + 1, body: 'Discussion only'}));
+  w.seedQa(); await w.labeled();
+  assert.equal(w.did('merge').length, 1);
+  assert.ok(w.did('reviews').some(([, args]) => args.page === 2));
+  const huge = authorWorld();
+  huge.reviews = Array.from({length: 1001}, (_, i) => ({id: i + 1}));
+  await huge.ciDone();
+  assert.equal(huge.did('merge').length, 0);
+  assert.equal(huge.did('reviews').length, 10);
+  assert.equal(huge.warnings.length, 1);
+});
+
+test('edited, absent or inconsistent GraphQL review metadata blocks REST proof', async () => {
+  for (const reviewNodeOverride of [
+    {id: 'another-node'}, {body: 'changed body'}, {state: 'DISMISSED'},
+    {commit: {oid: OTHER}}, {commit: null}, {submittedAt: T(19)}, {submittedAt: undefined},
+    {lastEditedAt: T(21)}, {lastEditedAt: T(35)}, {lastEditedAt: undefined},
+  ]) {
+    const w = authorWorld({approved: false, reviewNodeOverride}); w.seedQa();
+    await w.labeled();
+    assert.equal(w.did('merge').length, 0, JSON.stringify(reviewNodeOverride));
+    assert.equal(w.did('comment').some((c) => c[1].body.includes('<!-- gesher-automerge-v1 ')), false);
+  }
+  const missing = authorWorld({approved: false, reviewNodeNull: true}); missing.seedQa();
+  await missing.labeled(); assert.equal(missing.did('merge').length, 0);
+});
+
+test('REST or GraphQL review errors cannot fall back to first-author approval', async () => {
+  for (const field of ['reviewError', 'reviewNodeError']) {
+    for (const status of [403, 404, 422, 503]) {
+      for (const trigger of ['labeled', 'ciDone']) {
+        const w = authorWorld({approved: trigger !== 'labeled',
+          [field]: Object.assign(new Error('review unavailable'), {status})});
+        w.seedQa();
+        if (trigger === 'labeled') await assert.rejects(w.labeled(), /review unavailable/);
+        else await w.ciDone();
+        assert.equal(w.did('merge').length, 0);
+        assert.equal(w.did('comment').some((c) => c[1].body.includes('<!-- gesher-automerge-v1 ')), false);
+      }
+    }
+  }
+});
+
+test('a QA marker cannot initialize an old PR or replace its recorded label approval', async () => {
+  for (const patch of [{initialized: false}, {approved: false}]) {
+    const w = authorWorld(patch); w.seedQa();
+    await w.ciDone();
+    assert.equal(w.did('merge').length, 0);
+    assert.equal(w.did('comment').some((c) => c[1].body.includes('<!-- gesher-automerge-v1 ')), false);
+  }
+});
+
+test('author QA does not weaken permission, draft or unsuccessful CI gates', async () => {
+  for (const mutate of [(w) => {w.permission = 'read';},
+    (w) => {w.pr.draft = true;}, (w) => {w.runs[0].conclusion = 'failure';},
+    (w) => {w.runs[0].status = 'in_progress';}]) {
+    const w = authorWorld(); w.seedQa(); mutate(w);
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('removed, replaced, edited or revoked QA proof during CI queries blocks merging', async () => {
+  for (const mutate of [
+    (w) => {w.reviews = [];}, (w) => {w.reviews[0].state = 'DISMISSED';},
+    (w) => {w.reviews[0].body = 'Proof withdrawn';},
+    (w) => {w.reviews[0].body += '\nA later edit';},
+    (w) => {w.reviews[0].id++; w.reviews[0].node_id = 'replacement';},
+    (w) => {w.reviews[0].commit_id = OTHER;}, (w) => {w.reviews[0].user.id = 99;},
+    (w) => {w.reviews[0].submitted_at = T(30);},
+    (w) => {w.reviewNodeOverride = {lastEditedAt: T(35)};},
+  ]) {
+    const w = authorWorld(); w.seedQa(); w.hooks.statuses = () => mutate(w);
+    await w.ciDone(); assert.equal(w.did('merge').length, 0);
+  }
+});
+
+test('proof is revalidated after label capture and before final authorization and mutable state', async () => {
+  const edited = authorWorld({approved: false}); edited.seedQa();
+  edited.hooks.comment = (args) => {
+    if (args.body.includes('<!-- gesher-automerge-v1 ')) edited.reviewNodeOverride = {lastEditedAt: T(31)};
+  };
+  await edited.labeled(); assert.equal(edited.did('merge').length, 0);
+  for (const mutate of [
+    (w) => {w.pr.head.sha = OTHER;}, (w) => {w.pr.base.ref = 'release';},
+    (w) => {w.pr.base.sha = OTHER;}, (w) => {w.targetHead = OTHER;},
+    (w) => {w.pr.draft = true;}, (w) => {w.pr.state = 'closed';},
+    (w) => {w.pr.labels = [];}, (w) => {w.permission = 'read';},
+    (w) => {w.comments = w.comments.filter((c) => !c.body.includes('<!-- gesher-automerge-v1 '));},
+    (w) => {w.seedOpening(T(40));},
+    (w) => {w.events.push({...clone(w.events[0]), id: 60, created_at: T(40)});},
+  ]) {
+    const w = authorWorld(); w.seedQa(); let queries = 0;
+    w.hooks.reviewNode = () => {if (++queries === 2) mutate(w);};
+    await w.ciDone();
+    assert.equal(queries, 2);
+    assert.equal(w.did('merge').length, 0);
+  }
+  const valid = authorWorld(); valid.seedQa(); await valid.ciDone();
+  assert.equal(valid.did('merge').length, 1);
+  assert.equal(valid.did('reviewNode').length, 2);
+  const lastProof = valid.calls.findLastIndex(([name]) => name === 'reviewNode');
+  for (const name of ['permission', 'comments', 'gitRef', 'getPR', 'events']) {
+    assert.ok(lastProof < valid.calls.findLastIndex(([call]) => call === name), name);
   }
 });
 
@@ -278,9 +521,10 @@ test('a separately added label before initialization completes cannot approve th
   assert.equal(w.comments.some((c) => c.body.includes('<!-- gesher-automerge-v1 ')), false);
 });
 
-test('a valid receipt for an author first post-initialization label works on every trigger', async () => {
+test('a valid QA proof and author first-label receipt work on every trigger', async () => {
   for (const trigger of ['labeled', 'ciDone', 'sweep']) {
     const w = world(); w.pr.user = {id: 42, login: 'maintainer'};
+    w.seedQa();
     await w[trigger]();
     assert.equal(w.did('removeLabel').length, 0);
     assert.equal(w.did('merge').length, 1);
@@ -298,6 +542,7 @@ test('an earlier author label cannot authorize an application before initializat
 
 test('a first author label is found through complete paginated history without a prior label', async () => {
   const w = world({approved: false}); w.pr.user = {id: 42, login: 'maintainer'};
+  w.seedQa();
   const current = clone(w.events[0]);
   w.events = [...Array.from({length: 100}, (_, i) => ({id: 2 + i, event: 'assigned', created_at: T(10)})),
   {...current, id: 150}];
@@ -325,10 +570,12 @@ test('valid author identity remains required at the final merge read', async () 
     (w) => {w.pr.user.id = '42';},
   ]) {
     const w = world(); w.pr.user = {id: 42, login: 'maintainer'};
+    w.seedQa();
     let reads = 0;
     w.hooks.getPR = () => {if (++reads === 2) mutate(w);};
     await w.ciDone();
     assert.equal(w.did('merge').length, 0);
+    assert.equal(reads, 2);
   }
 });
 
@@ -356,6 +603,7 @@ test('scheduled sweeps initialize unlabelled older PRs before their first author
   w.pr.labels = [{name: 'automerge'}]; w.pr.updated_at = T(30);
   w.events = [{id: 50, event: 'labeled', label: {name: 'automerge'}, created_at: T(30),
     actor: clone(w.pr.user)}];
+  w.seedQa();
   w.commentAt = T(31);
   await w.labeled();
   assert.equal(w.did('merge').length, 1);
@@ -372,12 +620,14 @@ test('opening initialization includes a separate label already visible in curren
 });
 
 test('a first author label must be strictly later than the immutable receipt creation time', async () => {
-  for (const recordedSecond of [29, 30, 31]) {
+  for (const recordedSecond of [29, 40, 41]) {
     const w = world({approved: false}); w.pr.user = {id: 42, login: 'maintainer'};
+    w.pr.updated_at = T(40); w.events[0].created_at = T(40);
+    w.seedQa({submitted_at: T(35)});
     w.comments[0].created_at = T(recordedSecond); w.comments[0].updated_at = T(recordedSecond);
     await w.labeled();
-    assert.equal(w.did('merge').length, recordedSecond < 30 ? 1 : 0);
-    assert.equal(w.did('removeLabel').length, recordedSecond < 30 ? 0 : 1);
+    assert.equal(w.did('merge').length, recordedSecond < 40 ? 1 : 0);
+    assert.equal(w.did('removeLabel').length, recordedSecond < 40 ? 0 : 1);
   }
 });
 

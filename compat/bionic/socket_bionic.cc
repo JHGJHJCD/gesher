@@ -92,8 +92,14 @@ int BIONIC_SYSV Setsockopt(int fd, int level, int name, const void* value, uint3
     BionicTimeval in;
     std::memcpy(&in, value, sizeof(in));
     timeval tv;
-    tv.tv_sec = static_cast<long>(in.tv_sec > 0x7fffffff ? 0x7fffffff : in.tv_sec);
-    tv.tv_usec = static_cast<long>(in.tv_usec);
+    // Preserve invalid LP64 values as invalid before narrowing to Windows'
+    // 32-bit long. Otherwise (for example) 2^32 microseconds becomes zero
+    // and silently disables the timeout. Let the host validate the socket
+    // first, preserving EBADF/ENOTSOCK ahead of its timeout-domain error.
+    tv.tv_sec = in.tv_sec < 0 ? -1
+                            : static_cast<long>(in.tv_sec > 0x7fffffff ? 0x7fffffff : in.tv_sec);
+    tv.tv_usec = in.tv_usec >= 0 && in.tv_usec < 1000000
+                     ? static_cast<long>(in.tv_usec) : -1;
     return setsockopt(fd, level, name, &tv, sizeof(tv));
   }
   return setsockopt(fd, level, name, value, len);
@@ -222,6 +228,9 @@ struct BionicAddrinfo {
 };
 
 // bionic (BSD) AI_* values -> gesher-base's (glibc's).
+// android-16.0.0_r4 netdb.h AI_MASK, enforced by DnsResolver validateHints.
+// AI_ALL and both V4MAPPED constants exist in the header but are not admitted.
+constexpr int kBionicAiFlags = 0x1 | 0x2 | 0x4 | 0x8 | 0x400;
 int AiFlagsIn(int f) {
   int out = 0;
   if (f & 0x1) out |= AI_PASSIVE;
@@ -280,8 +289,17 @@ int GetaddrinfoOnInterface(const char* node, const char* service, const BionicAd
                           BionicAddrinfo** res, uint32_t index) {
   if (res == nullptr) return EaiOut(EAI_FAIL);
   *res = nullptr;
+  // Android checks the missing query before validating the optional hints.
+  if (node == nullptr && service == nullptr) return 8; // EAI_NONAME
   addrinfo h{};
   if (hints != nullptr) {
+    // Android rejects output-only metadata in a hints record before flags.
+    if (hints->ai_addrlen != 0 || hints->ai_canonname != nullptr ||
+        hints->ai_addr != nullptr || hints->ai_next != nullptr) return 12; // EAI_BADHINTS
+    // Translating only known bits would silently discard invalid guest flags
+    // before the host resolver can report EAI_BADFLAGS. Use Android's accepted
+    // input mask even where the host resolver supports additional flags.
+    if ((hints->ai_flags & ~kBionicAiFlags) != 0) return EaiOut(EAI_BADFLAGS);
     h.ai_flags = AiFlagsIn(hints->ai_flags);
     h.ai_family = hints->ai_family;
     h.ai_socktype = hints->ai_socktype;

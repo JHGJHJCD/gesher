@@ -273,11 +273,15 @@ public final class BluetoothGatt implements BluetoothProfile {
                         return;
                     }
                     break;
-                case WindowsBluetooth.EVENT_MTU:
+                case WindowsBluetooth.EVENT_MTU: {
+                    final int mtu = meta[2];
                     synchronized (mLock) {
-                        if (generation == mGeneration && !mClosed) mMtu = meta[2];
+                        if (generation != mGeneration || mClosed) return;
+                        mMtu = mtu;
                     }
+                    post(generation, () -> mCallback.onMtuChanged(this, mtu, GATT_SUCCESS));
                     break;
+                }
                 case WindowsBluetooth.EVENT_SERVICES_CHANGED:
                     post(generation, () -> mCallback.onServiceChanged(this));
                     break;
@@ -754,7 +758,7 @@ public final class BluetoothGatt implements BluetoothProfile {
         return true;
     }
 
-    /** Windows negotiates the MTU itself: this reports it (at most what was asked for). */
+    /** Windows negotiates the MTU itself: report the link's actual negotiated value. */
     public boolean requestMtu(int mtu) {
         BluetoothHost.enforceConnect(mContext);
         int[] generation = new int[1];
@@ -767,8 +771,7 @@ public final class BluetoothGatt implements BluetoothProfile {
                 if (generation[0] != mGeneration || mClosed) return;
                 mMtu = now;
             }
-            final int reported = Math.max(23, Math.min(mtu, now));
-            post(generation[0], () -> mCallback.onMtuChanged(this, reported, GATT_SUCCESS));
+            post(generation[0], () -> mCallback.onMtuChanged(this, now, GATT_SUCCESS));
         });
     }
 
