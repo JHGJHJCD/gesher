@@ -257,6 +257,57 @@ public final class ConnectivityCallbackContractTest {
             check(callback.available == 1 && h.count() == 1 && h.service.count() == 1,
                     "a failed attachment does not poison retry");
         }
+        try (Harness h = new Harness(parcel)) {
+            h.service.snapshot = ONLINE;
+            h.service.duringSnapshot = () -> {
+                h.service.duringSnapshot = null;
+                try { h.service.emit(EMPTY); }
+                catch (RemoteException failure) { throw new AssertionError(failure); }
+            };
+            Callback callback = new Callback(); h.register(callback); h.handler.immediate();
+            check(callback.available == 0 && h.manager.getActiveNetwork() == null,
+                    "reentrant disconnect cannot be overwritten by an older online answer");
+        }
+        try (Harness h = new Harness(parcel)) {
+            Callback callback = new Callback(); h.service.failAfterAdd = true;
+            CountDownLatch removing = new CountDownLatch(1), permitRemoval = new CountDownLatch(1);
+            CountDownLatch registered = new CountDownLatch(1);
+            AtomicReference<IConnectivity.IListener> retired = new AtomicReference<>();
+            AtomicReference<Throwable> firstFailure = new AtomicReference<>(), retryFailure = new AtomicReference<>();
+            h.service.beforeRemoval = listener -> {
+                if (!retired.compareAndSet(null, listener)) return;
+                removing.countDown(); await(permitRemoval, "failed listener cleanup unblocked");
+            };
+            Thread first = new Thread(() -> {
+                try { h.register(callback); }
+                catch (Throwable failure) { firstFailure.set(failure); }
+            }, "connectivity-failed-attach");
+            Thread retry = new Thread(() -> {
+                try { h.register(callback); registered.countDown(); }
+                catch (Throwable failure) { retryFailure.set(failure); }
+            }, "connectivity-attach-retry");
+            boolean concurrent;
+            first.start();
+            try {
+                await(removing, "failed attachment reaches listener cleanup");
+                h.service.failAfterAdd = false;
+                retry.start(); concurrent = registered.await(2, TimeUnit.SECONDS);
+            } finally {
+                permitRemoval.countDown(); first.join(5000); retry.join(5000);
+                h.service.beforeRemoval = null;
+            }
+            check(!first.isAlive() && !retry.isAlive() && firstFailure.get() instanceof RuntimeException
+                            && retryFailure.get() == null,
+                    "failed attachment and retry finish independently");
+            check(concurrent && h.count() == 1 && h.service.count() == 1
+                            && h.service.first().asBinder() != retired.get().asBinder(),
+                    "failed attachment cleanup neither blocks nor detaches its replacement");
+            retired.get().onSnapshot(ONLINE); h.handler.immediate();
+            check(callback.available == 0 && h.manager.getActiveNetwork() == null,
+                    "failed old listener cannot publish into a successful retry");
+            h.service.emit(ONLINE); h.handler.immediate();
+            check(callback.available == 1, "retry listener receives subsequent network changes");
+        }
     }
 
     /** Actual PendingIntent.send with its declared ActivityManager IPC boundary controlled. */
@@ -369,6 +420,27 @@ public final class ConnectivityCallbackContractTest {
                     "concurrent same-token registration has one owner");
             h.service.emit(ONLINE); h.handler.immediate();
             check(runtime.sends == 1, "concurrent replacement has one delivery");
+        }
+        if (!cancellationOnly) try (Harness h = new Harness(parcel); PendingRuntime runtime = new PendingRuntime(h)) {
+            PendingIntent original = runtime.token();
+            PendingIntent alias = new PendingIntent(original.getTarget());
+            PendingIntent peer = runtime.token();
+            check(original != alias && original.equals(alias),
+                    "distinct PendingIntent wrappers refer to the same binder token");
+            h.manager.requestNetwork(request(), original);
+            h.manager.registerNetworkCallback(request(), alias);
+            h.manager.requestNetwork(request(), peer);
+            check(h.count() == 2 && h.pending.size() == 2 && h.service.adds == 1,
+                    "equal-token replacement keeps a separate token and the shared listener");
+            h.manager.releaseNetworkRequest(original);
+            check(h.count() == 1 && h.pending.size() == 1 && h.pending.containsKey(peer)
+                            && h.service.count() == 1,
+                    "release through an equivalent wrapper preserves a distinct token");
+            h.service.emit(ONLINE); h.handler.immediate();
+            check(runtime.sends == 1, "only the independent token delivers after alias release");
+            h.manager.unregisterNetworkCallback(new PendingIntent(peer.getTarget()));
+            check(h.count() == 0 && h.pending.isEmpty() && h.service.count() == 0,
+                    "equivalent wrapper releases the last token and listener");
         }
     }
 

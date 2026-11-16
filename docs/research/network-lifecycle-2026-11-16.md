@@ -41,7 +41,7 @@ Windows-snapshot transport remains its own implementation.
 
 `tools/test_connectivity_callback_contracts.py` compiles the actual changed
 manager and service against the pinned platform classes and freshly built main
-app classes. Its default run passes **57 callback/registration assertions** and
+app classes. Its default run passes **73 callback/registration assertions** and
 **nine service-query assertions**. Existing identity, timeout, callback reuse
 and unlocked teardown checks remain in the same suite.
 
@@ -71,14 +71,39 @@ for the real service. It does not claim Windows network discovery, physical
 adapter changes, process-lifetime persistence or live Binder transport. Those
 remain separate hosted/platform execution evidence.
 
+## Independent QA
+
+An independent reviewer checked production commit
+`fa8f256cf0dee654d7316a941455ddc36a8a1a66` in an isolated worktree, confirmed the
+upstream commit and both Git blob hashes above, and reran the original **57 + 9**
+assertions and all four old-source controls. Each control failed at the expected
+behavioral assertion, rather than compilation or native initialization.
+
+Additional production-code regressions bring the current result to **73 + 9**:
+
+- A disconnect published reentrantly during initialization wins over a captured
+  online answer, preventing false availability.
+- A clean retry completes while the failed attachment's remote removal is
+  blocked. Removing or publishing through the old listener cannot detach or
+  update the replacement, which receives subsequent network changes.
+- Distinct `PendingIntent` objects wrapping the same binder token replace and
+  release the same request; a separate token remains registered and delivers.
+
+No production correction was required by this independent review. The actual
+service releases its monitor before listener delivery, and remote listener
+callbacks use one-way Binder transactions; review found no new lock cycle in
+the changed initialization path. The test runner still does not measure Windows
+adapter enumeration latency or prove live cross-process Binder behavior.
+
 ## Explicit remaining gaps
 
 - `addDefaultNetworkActiveListener` and its removal method remain empty. Network
   availability is not traffic activity; a Windows activity source and accurate
   cancellation/executor behavior are required.
 - PendingIntent registrations are still process-local. Android's comparison of
-  underlying intents across distinct tokens, post-delivery delayed release and
-  persistence after client process exit need a server-owned request design.
+  underlying intents across distinct tokens, one-shot delivery, post-delivery
+  delayed release and persistence after client process exit need a server-owned
+  request design.
   This change fixes ownership of the same token and does not claim those wider
   semantics.
 - Full mDNS discovery and Wi-Fi radio management are not supplied by these
