@@ -33,6 +33,7 @@ import com.android.internal.pm.parsing.pkg.ParsedPackage;
 import com.android.internal.pm.pkg.component.ParsedActivity;
 import com.android.internal.pm.pkg.component.ParsedComponent;
 import com.android.internal.pm.pkg.component.ParsedIntentInfo;
+import com.android.internal.pm.pkg.component.ParsedMainComponent;
 
 import java.io.File;
 import java.io.IOException;
@@ -128,6 +129,29 @@ public final class ApkPackage {
 
     boolean matchesEnabledApplication(long flags) {
         return matchesEnabledApplication(enabledState(), flags);
+    }
+
+    enum ComponentKind { ACTIVITY, SERVICE, RECEIVER, PROVIDER }
+
+    /** Admission after an asynchronous wait must use today's installed state and family. */
+    boolean componentEnabled(String name, ComponentKind kind) {
+        PackageEnabledStore.State state = enabledState();
+        if (!matchesEnabledApplication(state, 0)) return false;
+        List<? extends ParsedMainComponent> declarations = switch (kind) {
+            case ACTIVITY -> parsed.getActivities();
+            case SERVICE -> parsed.getServices();
+            case RECEIVER -> parsed.getReceivers();
+            case PROVIDER -> parsed.getProviders();
+        };
+        for (ParsedMainComponent component : declarations) {
+            if (!component.getName().equals(name)) continue;
+            return switch (state.component(name)) {
+                case PackageManager.COMPONENT_ENABLED_STATE_ENABLED -> true;
+                case PackageManager.COMPONENT_ENABLED_STATE_DISABLED -> false;
+                default -> component.isEnabled();
+            };
+        }
+        return false;
     }
     private boolean matchesEnabledApplication(PackageEnabledStore.State state, long flags) {
         if ((flags & PackageManager.MATCH_DISABLED_COMPONENTS) != 0) return true;

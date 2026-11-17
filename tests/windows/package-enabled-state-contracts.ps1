@@ -25,6 +25,13 @@ try {
         $enabledOutput
       } @('Package enabled state contracts passed:', 'AIDL transactions=')
     }
+    $enabledOutput = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' +
+      'PackageEnabledLifecycleTest' + 'all') 120
+    $enabledCode = $LASTEXITCODE
+    Check "packages: enabled-state lifecycle, mode=$enabledMode, recording app threads" {
+      $global:LASTEXITCODE = $enabledCode
+      $enabledOutput
+    } @('Package enabled lifecycle contracts passed:', 'actual ART and PM AIDL')
   }
 } finally {
   foreach ($enabledName in $enabledSaved.Keys) {

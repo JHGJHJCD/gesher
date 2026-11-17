@@ -34,6 +34,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
+import java.util.function.Predicate;
 
 /**
  * ActiveServices, lite: started and bound services, in the app processes
@@ -114,6 +115,9 @@ final class ActiveServices {
         final ArrayDeque<IntentBindRecord> pendingUnbinds = new ArrayDeque<>();
         long bindingGeneration;
         boolean dispatchingBindings;
+        boolean disabled;
+        boolean stopped;
+        boolean preserveProcessOnStop;
 
         ServiceRecord(ServiceInfo info, ApkPackage owner) {
             super("ServiceRecord " + info.name);
@@ -293,7 +297,7 @@ final class ActiveServices {
     private ServiceRecord record(ServiceInfo info, ApkPackage owner) {
         ComponentName name = new ComponentName(info.packageName, info.name);
         ServiceRecord r = mServices.get(name);
-        if (r == null || r.owner != owner) {
+        if (r == null || r.owner != owner || r.disabled) {
             r = new ServiceRecord(info, owner);
             mServices.put(name, r);
         }
@@ -463,10 +467,14 @@ final class ActiveServices {
     }
 
     private void connected(ConnectionRecord connection, IBinder service) {
+        connected(connection, service, false);
+    }
+
+    private void connected(ConnectionRecord connection, IBinder service, boolean dead) {
         ServiceRecord r = connection.binding.service;
         if (!connection.lifetime.getAsBoolean() || service != null && !serviceCurrent(r)) return;
         try {
-            connection.conn.connected(r.name, service, null /* session */, false /* dead */);
+            connection.conn.connected(r.name, service, null /* session */, dead);
         } catch (RemoteException e) {
             SystemServer.log("connected " + r + ": " + e);
         }
@@ -705,8 +713,8 @@ final class ActiveServices {
     }
 
     private boolean serviceCurrent(ServiceRecord r) {
-        return r.owner != null && mPm.get(r.info.packageName) == r.owner
-                && !mPm.isRemovalPending(r.info.packageName);
+        return !r.disabled && r.owner != null && mPm.get(r.info.packageName) == r.owner
+                && !mPm.isRemovalPending(r.info.packageName) && r.owner.componentEnabled(r.info.name, ApkPackage.ComponentKind.SERVICE);
     }
 
     /** Guarded by this. Retire queued authority without entering any application. */
@@ -742,7 +750,7 @@ final class ActiveServices {
     /** ActiveServices.bringUpServiceLocked: create, then the starts and bind requests. */
     private void bringUp(ServiceRecord r) {
         if (!workCurrent(r)) { maybeBringDown(r); return; }
-        mAtm.withProcess(r.info.packageName, r.info.processName, "service " + r, app -> {
+        mAtm.withProcess(r.owner, r.info.name, ApkPackage.ComponentKind.SERVICE, r.info.processName, "service " + r, app -> {
             if (!workCurrent(r)) { maybeBringDown(r); return; }
             boolean create;
             List<PendingStart> starts;
@@ -791,17 +799,27 @@ final class ActiveServices {
             } catch (RemoteException e) {
                 SystemServer.log("bringing up " + r + " failed: " + e);
             }
+        }, () -> {
+            // Attach may observe the disabled state before PM's event executor.
+            // Retire the service reservation now, including its dead bindings.
+            if (workCurrent(r)) bringUp(r);
+            else maybeBringDown(r);
         });
     }
 
     /** ActiveServices.bringDownServiceIfNeededLocked: destroy it if nothing keeps it. */
     private void maybeBringDown(ServiceRecord r) {
+        if (!r.disabled && !serviceCurrent(r)) {
+            stopServices(candidate -> candidate == r && !serviceCurrent(candidate), true);
+            return;
+        }
         synchronized (this) {
             pruneRetired(r);
             if (r.startRequested || r.hasAutoCreateConnections()) return;
-            if (mServices.get(r.name) != r) return;
+            if (r.stopped || mServices.get(r.name) != r && !r.disabled) return;
             if (r.dispatchingBindings) return;
-            mServices.remove(r.name);
+            r.stopped = true;
+            mServices.remove(r.name, r);
             resetBindingsLocked(r);
             if (r.restart != null) { r.restart.cancel(false); r.restart = null; }
             for (IntentBindRecord b : r.bindings.values()) {
@@ -820,7 +838,7 @@ final class ActiveServices {
             SystemServer.log("scheduleStopService " + r + ": " + e);
         }
         // A process kept by the service alone ends now (scheduleExit follows the stop).
-        mAtm.maybeExit(r.app);
+        if (!r.preserveProcessOnStop) mAtm.maybeExit(r.app);
     }
 
     /** Whether a service runs (or is being brought up) in the process. */
@@ -883,29 +901,43 @@ final class ActiveServices {
 
     /** Explicit force-stop/uninstall also cancels a service waiting for its retry timer. */
     void stopPackage(String packageName) {
+        stopServices(record -> packageName.equals(record.info.packageName), false);
+    }
+
+    void cleanupDisabledPackageComponents(PackageManagerService.EnabledChange change) {
+        stopServices(record -> change.disables(mPm, record.owner, record.info.name, ApkPackage.ComponentKind.SERVICE), true);
+    }
+
+    private void stopServices(Predicate<ServiceRecord> selected, boolean disabled) {
         List<ServiceRecord> stopped = new ArrayList<>();
         List<ConnectionRecord> disconnected = new ArrayList<>();
         synchronized (this) {
             for (ServiceRecord r : mServices.values()) {
-                if (!packageName.equals(r.info.packageName)) continue;
+                if (!selected.test(r)) continue;
+                r.disabled |= disabled;
+                r.preserveProcessOnStop |= disabled;
                 r.startRequested = false;
+                r.lastStartIntent = null;
                 r.pendingStarts.clear();
                 // A running binding dispatch may defer the final stop, but a
-                // force-stop must not allow its queued callbacks to run first.
+                // stop must not allow its queued callbacks to run first.
                 resetBindingsLocked(r);
                 if (r.restart != null) { r.restart.cancel(false); r.restart = null; }
                 for (IntentBindRecord b : r.bindings.values()) {
                     for (ConnectionRecord c : b.connections) {
                         disconnected.add(c);
                         List<ConnectionRecord> list = mConnections.get(c.conn.asBinder());
-                        if (list != null) list.remove(c);
+                        if (list != null) {
+                            list.remove(c);
+                            if (list.isEmpty()) mConnections.remove(c.conn.asBinder());
+                        }
                     }
                     b.connections.clear();
                 }
                 stopped.add(r);
             }
         }
-        for (ConnectionRecord c : disconnected) connected(c, null);
+        for (ConnectionRecord c : disconnected) connected(c, null, disabled);
         for (ServiceRecord r : stopped) maybeBringDown(r);
     }
 

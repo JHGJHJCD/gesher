@@ -69,6 +69,18 @@ public final class ActivityManagerService extends IActivityManager.Default {
         mProviders = new ContentProviders(pm, atm);
         mPendingIntents = new PendingIntents(this, pm);
         atm.setActivityManager(this);
+        pm.setEnabledStateListener(this::cleanupDisabledPackageComponents,
+                change -> atm.restartForEnabledState(change.pkg, () -> change.restartCurrent(pm)));
+    }
+
+    /** Like AMS cleanupDisabledPackageComponentsLocked, independent of process killing. */
+    private void cleanupDisabledPackageComponents(PackageManagerService.EnabledChange change) {
+        // Each controller rechecks current owner/state, including after local reentry.
+        // Never nest the controllers' monitors or call an application under PM's lock.
+        mAtm.cleanupDisabledPackageComponents(change);
+        mServices.cleanupDisabledPackageComponents(change);
+        mProviders.cleanupDisabledPackageComponents(change);
+        mBroadcasts.cleanupDisabledPackageComponents(change);
     }
 
     CallerIdentity callers() { return mCallers; }

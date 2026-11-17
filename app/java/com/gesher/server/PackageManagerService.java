@@ -52,6 +52,14 @@ public final class PackageManagerService extends IPackageManager.Default {
     });
     private Consumer<Intent> mPackageEventSender = PackageManagerService::broadcastPackageEvent;
     private Consumer<ApkPackage> mEnabledStateKiller = this::restartEnabledPackage;
+    private volatile Consumer<EnabledChange> mEnabledStateListener;
+    private volatile Consumer<EnabledChange> mEnabledStateRestarter;
+
+    /** Server-local lifecycle wiring: an app's PACKAGE_CHANGED extras confer no authority. */
+    void setEnabledStateListener(Consumer<EnabledChange> listener, Consumer<EnabledChange> restarter) {
+        mEnabledStateListener = listener;
+        mEnabledStateRestarter = restarter;
+    }
     private final List<Consumer<String>> mPackageRemoval = new ArrayList<>();
     private final List<Consumer<String>> mPackageRemovalChecks = new ArrayList<>();
     private volatile Map<String, ApkPackage> mRemoving = new LinkedHashMap<>();
@@ -637,18 +645,30 @@ public final class PackageManagerService extends IPackageManager.Default {
             changed.put(pkg.packageName, new PackageEnabledStore.Entry(pkg.enabledStateOwner(), after));
             EnabledChange event = events.computeIfAbsent(pkg.packageName, ignored -> new EnabledChange(pkg));
             event.components.add(setting.isComponent() ? setting.getClassName() : pkg.packageName);
+            if ((setting.getEnabledFlags() & PackageManager.DONT_KILL_APP) == 0) {
+                event.restartComponents.add(setting.isComponent() ? setting.getClassName() : pkg.packageName);
+            }
             event.dontKill &= (setting.getEnabledFlags() & PackageManager.DONT_KILL_APP) != 0;
         }
         if (changed.isEmpty()) return;
         // Synchronous durability is also used for flags=0. SYNCHRONOUS therefore never
         // returns early, and a failed write publishes neither state nor side effects.
         store.commit(changed);
+        for (EnabledChange event : events.values()) {
+            event.state = changed.get(event.pkg.packageName).state();
+        }
         PackageManager.invalidatePackageInfoCache();
         mPackageEventExecutor.execute(() -> {
             synchronized (PackageManagerService.this) { } // never call app code under PM's monitor
             for (EnabledChange event : events.values()) {
-                if (!event.dontKill) {
-                    try { mEnabledStateKiller.accept(event.pkg); }
+                Consumer<EnabledChange> listener = mEnabledStateListener;
+                if (listener != null && event.current(this)) listener.accept(event);
+                if (!event.dontKill && event.restartCurrent(this)) {
+                    try {
+                        Consumer<EnabledChange> restarter = mEnabledStateRestarter;
+                        if (restarter != null) restarter.accept(event);
+                        else mEnabledStateKiller.accept(event.pkg);
+                    }
                     catch (RuntimeException failure) {
                         SystemServer.log("enabled-state process restart unavailable: " + failure.getClass().getSimpleName());
                     }
@@ -667,11 +687,36 @@ public final class PackageManagerService extends IPackageManager.Default {
         });
     }
 
-    private static final class EnabledChange {
+    static final class EnabledChange {
         final ApkPackage pkg;
         final List<String> components = new ArrayList<>();
+        final List<String> restartComponents = new ArrayList<>();
+        PackageEnabledStore.State state;
         boolean dontKill = true;
         EnabledChange(ApkPackage pkg) { this.pkg = pkg; }
+
+        boolean current(PackageManagerService pm) {
+            return pm.get(pkg.packageName) == pkg && !pm.isRemovalPending(pkg.packageName);
+        }
+        boolean disablesApplication(PackageManagerService pm) {
+            return current(pm) && !pkg.matchesEnabledApplication(0);
+        }
+        boolean disables(PackageManagerService pm, ApkPackage owner, String component, ApkPackage.ComponentKind kind) {
+            return owner == pkg && current(pm) && (!pkg.matchesEnabledApplication(0)
+                    || components.contains(component) && !pkg.componentEnabled(component, kind));
+        }
+        boolean restartCurrent(PackageManagerService pm) {
+            if (!current(pm)) return false;
+            PackageEnabledStore.State now = pkg.enabledState();
+            // An unrelated component change must not cancel a requested restart.
+            // A change to the same setting makes this delayed action obsolete.
+            for (String component : restartComponents) {
+                if (component.equals(pkg.packageName)
+                        ? now.application() == state.application()
+                        : now.component(component) == state.component(component)) return true;
+            }
+            return false;
+        }
     }
 
     private void restartEnabledPackage(ApkPackage pkg) {

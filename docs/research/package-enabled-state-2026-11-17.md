@@ -98,7 +98,9 @@ uses the new policy. Without it, the activity manager retires captured live
 process records. The record's recovery flag allows still-enabled sticky services
 to recover; process-death and queued-restart paths reject newly disabled services.
 An event for a replaced/retiring package record cannot kill its replacement.
-This is not a new force-stop state or a redesign of pending process starts.
+Enabled-state changes do not add force-stop state. Queued component admission is
+revalidated and canceled independently, and disabling an application cancels its
+pending process reservations using their retained child identity.
 
 Independent QA found a race in the first implementation: the generic process-ending
 loop could accept a captured record, invoke an earlier application's exit callback,
@@ -124,6 +126,101 @@ PID, rather than a shared UID. This does not repair the broader shared-UID and
 default-dangerous-permission issues tracked by F07/S02.
 
 ## Verification and limits
+
+### Maintainer lifecycle follow-up
+
+The lifecycle correction starts from reviewed PR head
+`e3a3c7cd5d62e97a6512b648e20650a579dc6e6b`, preserving its user-ordering,
+install-owner preparation, registry rollback and metadata-fixture repairs.
+The new `AGENTS.md` and `CONTRIBUTING.md` policy at main
+`e6c16e84398f5101863b6da8eb42fb15a81d4de7` was read before completing this
+correction. Scope verdict: ordinary Android compatibility. The changes apply to
+installed components generally and preserve requested lifecycle and binding
+outcomes; they introduce no application-specific exception, substituted input,
+synthetic production capability or changed application workflow.
+
+The contract evidence is pinned Android 16 `android-16.0.0_r4`:
+
+- [BroadcastController](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r4/services/core/java/com/android/server/am/BroadcastController.java)
+  invokes disabled-component cleanup outside its process-kill condition.
+- [ActivityManagerService](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r4/services/core/java/com/android/server/am/ActivityManagerService.java)
+  rechecks current package/component settings and cleans activities, services,
+  providers and queued receivers.
+- [ActiveServices](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r4/services/core/java/com/android/server/am/ActiveServices.java)
+  marks torn-down service connections dead;
+  [LoadedApk](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r4/core/java/android/app/LoadedApk.java)
+  dispatches that signal to `onBindingDied`, rather than the `onNullBinding`
+  callback for a service returning null from `onBind`.
+- [ContentProviderHelper](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r4/services/core/java/com/android/server/am/ContentProviderHelper.java)
+  removes disabled authorities and connections, invalidates unstable provider
+  clients and retires nonpersistent stable dependent clients.
+- [BroadcastRecord](https://android.googlesource.com/platform/frameworks/base/+/refs/tags/android-16.0.0_r4/services/core/java/com/android/server/am/BroadcastRecord.java)
+  removes queued disabled manifest receiver targets.
+
+PMS now invokes a server-local lifecycle observer registered by AMS. A broadcast
+with `PACKAGE_CHANGED` extras is only a notification, never authority to stop a
+component. Each controller checks the captured installation owner and current
+effective enabled state. A later change to B cannot discard still-relevant A
+cleanup. A requested process restart remains relevant if any of its non-KEEP
+settings still matches; re-enabling A cannot cancel an independent B restart
+from the same batch. Owner and setting checks repeat at each process retirement,
+alongside the existing process-generation and retained-child-handle checks.
+
+Process work now captures its installation, component name and component family.
+The family matters because an activity-alias can share another component's name
+while having a different manifest default. Admission rechecks enabled state both
+before queuing and before attach-time execution. Rejected work invokes its
+controller's cancellation path outside the task-manager monitor; it cannot leave
+an old service reservation stranded until a delayed event, or resurrect it on
+a later enable. Whole-application disable cancels unauthenticated process starts;
+a late starter result is retired with its retained child identity, never a PID
+reopen, and its watcher cannot remove a newer generation's work.
+
+Service cleanup stops only the disabled service, cancels starts/restarts and
+binding dispatch, reports binding death and releases client-capability entries.
+`DONT_KILL_APP` also preserves the process when its last service or activity is
+removed. Activity cleanup completes pending results with cancellation and uses
+the ordinary finish/destroy lifecycle. Provider cleanup is scoped by authority
+and installation, preserves sibling providers, wakes publication waiters and
+rejects stale acquisitions, references and publications. Provider dependency
+notifications use captured application-thread capabilities outside monitors.
+Existing raw provider objects are not rewritten or represented as revoked OS
+capabilities; cleanup affects the runtime's authority and connection lifecycle.
+
+Queued manifest receivers are canceled. A dispatched receiver retains its
+acknowledgement slot until finish, death or timeout, because this runtime uses the
+application-thread Binder as the completion token for every receiver in a
+process. Reusing that slot would let an old receiver finish a peer's delivery.
+An already-disabled ordered receiver's late result/abort cannot change the
+remaining chain.
+
+`tools/test_package_enabled_lifecycle.py` executes real PM setters, AMS wiring,
+service/receiver/provider controllers and `finishAttachApplication`, using only
+constructed manifests, recording application threads, controlled event timing
+and native boundaries. It covers both event/attach orders, same-process peers,
+binding death, reentrant callbacks, application cancellation, pending activity
+results, provider dependencies/waiters, ordered acknowledgement ownership,
+mixed/stale/replacement events, family name collisions and retained pending-child
+identity. The same unchanged fixture compiles against the e3a3c7 baseline and
+fails behaviorally on both maintainer blockers: the running service remains
+alive with KEEP, and disabled pre-attach work schedules create/start callbacks.
+Normal framework CI runs it, and the Windows contract track builds/runs its ART
+and PM-AIDL counterpart. Local validation is host execution; the Windows gate
+and real remote-process/OS process-control behavior were not executed here.
+
+The older activity-finish and component-caller fixtures now declare the synthetic
+activities their records represent. The identity fixture's pending process now
+captures its declared package owner, matching real process-start admission.
+These changes keep the existing regression scenarios valid without adding
+production allowances for malformed fixture records.
+
+Local follow-up validation passed: 239 lifecycle checks in each mode; the existing
+211 enabled-state checks in each mode plus separate write/read JVMs; 431 service
+rebinding checks; 170 activity-finish checks; and 177 ComponentCaller checks plus
+16 bootstrap checks. The full application and all service fixtures compiled
+against the pinned framework/core classes and passed D8. Both old-head lifecycle
+negative controls compiled and failed at their behavioral assertions, rather
+than at a missing method or host initialization boundary.
 
 The implementation and all service fixtures compile against the real pinned
 framework/core classes, followed by D8. Host tests execute those actual app classes

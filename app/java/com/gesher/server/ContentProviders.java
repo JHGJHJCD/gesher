@@ -10,6 +10,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ProviderInfo;
 import android.os.Binder;
 import android.os.IBinder;
+import android.os.RemoteException;
 import android.os.SystemClock;
 
 import java.util.ArrayList;
@@ -61,9 +62,9 @@ final class ContentProviders {
     private final Map<String, ContentProviderHolder> mPublished = new HashMap<>();
     private final Map<String, ActivityTaskManagerService.ProcessRecord> mPublishedBy =
             new HashMap<>();
-    /** The processes (of other packages) using each process's providers. */
-    private final Map<ActivityTaskManagerService.ProcessRecord,
-            Set<ActivityTaskManagerService.ProcessRecord>> mClients = new HashMap<>();
+    private final Map<String, ApkPackage> mPublishedCode = new HashMap<>();
+    /** Keep acquisition ownership per authority, so removing one provider preserves peers. */
+    private final Map<String, Set<ActivityTaskManagerService.ProcessRecord>> mClients = new HashMap<>();
     /** The reference-counted connections, by their Binder (ContentProviderHolder.connection). */
     private final Map<IBinder, Connection> mConnections = new HashMap<>();
 
@@ -77,16 +78,23 @@ final class ContentProviders {
         final ActivityTaskManagerService.ProcessRecord client;
         final IBinder provider;
         final String authority;
+        final ApkPackage ownerCode;
+        final ApkPackage clientCode;
+        final String component;
         int stable;
         int unstable;
 
         Connection(ActivityTaskManagerService.ProcessRecord owner,
-                ActivityTaskManagerService.ProcessRecord client, IBinder provider, String authority) {
+                ActivityTaskManagerService.ProcessRecord client, IBinder provider, String authority,
+                ApkPackage ownerCode, ApkPackage clientCode, String component) {
             super("ContentProviderConnection");
             this.owner = owner;
             this.client = client;
             this.provider = provider;
             this.authority = authority;
+            this.ownerCode = ownerCode;
+            this.clientCode = clientCode;
+            this.component = component;
         }
 
         @Override
@@ -204,28 +212,35 @@ final class ContentProviders {
         }
         ProviderInfo declared = null;
         long deadline = 0;
+        java.util.concurrent.atomic.AtomicBoolean canceled = new java.util.concurrent.atomic.AtomicBoolean();
         while (true) {
+            if (canceled.get()) return null;
             declared = declaredProvider(mPm, name);
             if (declared == null) return null;
+            ApkPackage declaredCode = mPm.get(declared.packageName);
             enforceAccess(actualPackage, declared);
             Set<ActivityTaskManagerService.ProcessRecord> live = new HashSet<>(mAtm.processes());
             synchronized (this) {
+                if (declaredCode == null || mPm.get(declared.packageName) != declaredCode
+                        || !declaredCode.componentEnabled(declared.name, ApkPackage.ComponentKind.PROVIDER)) continue;
                 if (caller != null && (caller.exiting || caller.dead)) {
                     throw new SecurityException("Content provider caller retired before acquisition");
                 }
                 ContentProviderHolder published = mPublished.get(name);
                 if (published != null) {
                     ActivityTaskManagerService.ProcessRecord owner = mPublishedBy.get(name);
-                    if (owner == null || owner.exiting || owner.dead || !declared.packageName.equals(owner.packageName)
+                    if (owner == null || owner.exiting || owner.dead || mPublishedCode.get(name) != declaredCode
+                            || !declared.packageName.equals(owner.packageName)
                             || !declared.name.equals(published.info.name)
                             || !mAtm.componentProcess(declared.packageName, declared.processName)
                                     .equals(mAtm.componentProcess(owner.packageName, owner.processName))
                             || !live.contains(owner)) {
-                        mPublished.remove(name); mPublishedBy.remove(name);
+                        mPublished.remove(name); mPublishedBy.remove(name); mPublishedCode.remove(name);
+                        mClients.remove(name);
                         continue;
                     }
                     if (caller != null && owner != null && caller != owner) {
-                        if (mClients.computeIfAbsent(owner, k -> new HashSet<>()).add(caller)) {
+                        if (mClients.computeIfAbsent(name, k -> new HashSet<>()).add(caller)) {
                             SystemServer.log("getContentProvider " + name + " from "
                                     + callingPackage + ": " + owner + " has a client, "
                                     + caller);
@@ -236,7 +251,7 @@ final class ContentProviders {
                     h.noReleaseNeeded = true;
                     if (counted && caller != null && owner != null && caller != owner) {
                         Connection c = connectionLocked(owner, caller,
-                                published.provider.asBinder(), name);
+                                published.provider.asBinder(), name, declaredCode, declared.name);
                         if (stable) c.stable++; else c.unstable++;
                         h.connection = c;
                         h.noReleaseNeeded = false;
@@ -276,7 +291,10 @@ final class ContentProviders {
             SystemServer.log("getContentProvider " + name + " from " + callingPackage
                     + ": declared by " + declared.packageName + ", waiting for its process");
             deadline = SystemClock.uptimeMillis() + PUBLISH_TIMEOUT_MS;
-            mAtm.withProcess(declared.packageName, declared.processName, "provider " + name, app -> { });
+            mAtm.withProcess(declaredCode, declared.name, ApkPackage.ComponentKind.PROVIDER,
+                    declared.processName, "provider " + name, app -> { }, () -> {
+                        synchronized (ContentProviders.this) { canceled.set(true); notifyAll(); }
+                    });
         }
     }
 
@@ -334,6 +352,10 @@ final class ContentProviders {
             if (app.exiting || app.dead) throw new SecurityException("Provider publisher retired before publication");
             // Validate the entire batch before mutating any authority mapping.
             for (ContentProviderHolder h : checked) {
+                if (mPm.get(pkg.packageName) != pkg || mPm.isRemovalPending(pkg.packageName)
+                        || !pkg.componentEnabled(h.info.name, ApkPackage.ComponentKind.PROVIDER)) {
+                    throw new SecurityException("Provider disabled or replaced before publication");
+                }
                 for (String authority : h.info.authority.split(";")) {
                     ActivityTaskManagerService.ProcessRecord owner = mPublishedBy.get(authority);
                     if (owner != null && owner != app && !owner.exiting
@@ -346,6 +368,7 @@ final class ContentProviders {
                 for (String authority : h.info.authority.split(";")) {
                     mPublished.put(authority, h);
                     mPublishedBy.put(authority, app);
+                    mPublishedCode.put(authority, pkg);
                 }
             }
             notifyAll();
@@ -358,11 +381,14 @@ final class ContentProviders {
 
     /** The client's connection to the provider, made on its first acquisition. Locked. */
     private Connection connectionLocked(ActivityTaskManagerService.ProcessRecord owner,
-            ActivityTaskManagerService.ProcessRecord client, IBinder provider, String authority) {
+            ActivityTaskManagerService.ProcessRecord client, IBinder provider, String authority,
+            ApkPackage code, String component) {
         for (Connection c : mConnections.values()) {
-            if (c.client == client && c.provider == provider && c.owner == owner) return c;
+            if (c.client == client && c.provider == provider && c.owner == owner
+                    && c.ownerCode == code && c.component.equals(component)) return c;
         }
-        Connection c = new Connection(owner, client, provider, authority);
+        Connection c = new Connection(owner, client, provider, authority,
+                code, mPm.get(client.packageName), component);
         mConnections.put(c, c);
         return c;
     }
@@ -389,6 +415,8 @@ final class ContentProviders {
         synchronized (this) {
             Connection c = callerConnectionLocked(connection, system, pid, uid);
             if (c == null) return false;
+            if (mPm.get(c.ownerCode.packageName) != c.ownerCode
+                    || !c.ownerCode.componentEnabled(c.component, ApkPackage.ComponentKind.PROVIDER)) return false;
             if (c.stable + stable < 0 || c.unstable + unstable < 0) {
                 SystemServer.log("refContentProvider " + c + ": counts would go below zero ("
                         + stable + ", " + unstable + "); kept at zero");
@@ -424,8 +452,10 @@ final class ContentProviders {
 
     /** Whether processes of other packages use the process's providers. */
     synchronized boolean hasClients(ActivityTaskManagerService.ProcessRecord app) {
-        Set<ActivityTaskManagerService.ProcessRecord> clients = mClients.get(app);
-        return clients != null && !clients.isEmpty();
+        for (Map.Entry<String, Set<ActivityTaskManagerService.ProcessRecord>> clients : mClients.entrySet()) {
+            if (mPublishedBy.get(clients.getKey()) == app && !clients.getValue().isEmpty()) return true;
+        }
+        return false;
     }
 
     /**
@@ -458,8 +488,42 @@ final class ContentProviders {
         mPublishedBy.entrySet().removeIf(e -> {
             if (e.getValue() != app) return false;
             mPublished.remove(e.getKey());
+            mPublishedCode.remove(e.getKey());
+            mClients.remove(e.getKey());
             return true;
         });
+    }
+
+    void cleanupDisabledPackageComponents(PackageManagerService.EnabledChange change) {
+        List<Connection> lost = new ArrayList<>();
+        synchronized (this) {
+            for (String authority : new ArrayList<>(mPublished.keySet())) {
+                ContentProviderHolder holder = mPublished.get(authority);
+                if (!change.disables(mPm, mPublishedCode.get(authority), holder.info.name, ApkPackage.ComponentKind.PROVIDER)) continue;
+                mPublished.remove(authority);
+                mPublishedBy.remove(authority);
+                mPublishedCode.remove(authority);
+                mClients.remove(authority);
+            }
+            mConnections.values().removeIf(connection -> {
+                if (!change.disables(mPm, connection.ownerCode, connection.component, ApkPackage.ComponentKind.PROVIDER)) return false;
+                lost.add(connection);
+                return true;
+            });
+            // A waiter must re-resolve disabled declarations instead of waiting two minutes.
+            notifyAll();
+        }
+        for (Connection connection : lost) {
+            if (connection.stable > 0) {
+                mAtm.providerDependencyDied(connection.client, connection.clientCode);
+            } else if (!connection.client.exiting && !connection.client.dead
+                    && connection.clientCode != null
+                    && mPm.get(connection.client.packageName) == connection.clientCode
+                    && mAtm.callerProcess(connection.client.pid) == connection.client) {
+                try { connection.client.thread.unstableProviderDied(connection.provider); }
+                catch (RemoteException ignored) { }
+            }
+        }
     }
 
     /**
@@ -469,12 +533,14 @@ final class ContentProviders {
     synchronized List<ActivityTaskManagerService.ProcessRecord> processDied(
             ActivityTaskManagerService.ProcessRecord app) {
         unpublish(app);
-        mClients.remove(app);
         mConnections.values().removeIf(c -> c.client == app || c.owner == app);
         List<ActivityTaskManagerService.ProcessRecord> unused = new ArrayList<>();
-        for (Map.Entry<ActivityTaskManagerService.ProcessRecord,
+        for (Map.Entry<String,
                 Set<ActivityTaskManagerService.ProcessRecord>> e : mClients.entrySet()) {
-            if (e.getValue().remove(app) && e.getValue().isEmpty()) unused.add(e.getKey());
+            if (e.getValue().remove(app) && e.getValue().isEmpty()) {
+                ActivityTaskManagerService.ProcessRecord owner = mPublishedBy.get(e.getKey());
+                if (owner != null && !hasClients(owner) && !unused.contains(owner)) unused.add(owner);
+            }
         }
         return unused;
     }
