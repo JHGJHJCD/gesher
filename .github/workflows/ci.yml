@@ -1599,12 +1599,31 @@ jobs:
       - name: Run real apps
         shell: pwsh
         run: |
+          $invocation = [guid]::NewGuid().ToString('N')
+          "GESHER_E2E_INVOCATION_ID=$invocation" >> $env:GITHUB_ENV
           pwsh -NoProfile -File tests/e2e/test-apks.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pwsh -NoProfile -File tests/e2e/test-evidence.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/e2e/test_coverage.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python tests/e2e/test_evidence_process.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $setup = (Get-ChildItem installer\gesher-setup-*.exe).FullName
           $env:GESHER_TRACE_MISSING_BOOT_CLASSES = '1'
-          pwsh -NoProfile -File tests/e2e/run-e2e.ps1 -Setup $setup -Out e2e-results
+          pwsh -NoProfile -File tests/e2e/run-e2e.ps1 -Setup $setup -Out e2e-results -InvocationId $invocation
           exit $LASTEXITCODE
+
+      - name: Validate and publish real-app coverage
+        if: always()
+        shell: pwsh
+        run: |
+          python tests/e2e/coverage.py --manifest tests/e2e/apps.json --observations e2e-results/observations.json --out-dir e2e-results
+          $result = $LASTEXITCODE
+          if (Test-Path e2e-results/coverage.md) {
+            Get-Content e2e-results/coverage.md | Add-Content $env:GITHUB_STEP_SUMMARY
+          }
+          exit $result
 
       - uses: actions/upload-artifact@v4
         if: always()
