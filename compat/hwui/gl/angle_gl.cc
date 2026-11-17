@@ -40,6 +40,7 @@
 #include <GLES2/gl2ext.h>
 #include <GLES3/gl3.h>
 
+#include <include/gpu/ganesh/GrDirectContext.h>
 #include <include/gpu/ganesh/gl/GrGLInterface.h>
 #include <include/gpu/ganesh/gl/GrGLDirectContext.h>
 
