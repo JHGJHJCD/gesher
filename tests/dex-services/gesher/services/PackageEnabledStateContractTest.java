@@ -427,6 +427,14 @@ public final class PackageEnabledStateContractTest {
         invoke(removal, "rollback", new Class<?>[0]);
         check(new Harness(record(a, true)).client.getApplicationEnabledSetting(a) == 3, "Removal rollback lost enabled state");
         removal = constructor.newInstance(a, code.toString()); invoke(removal, "stage", new Class<?>[0]);
+        var reserves = type.getDeclaredMethod("reserves", Path.class); reserves.setAccessible(true);
+        check((boolean) reserves.invoke(null, code), "Pending removal lost its code generation reservation");
+        var recover = type.getDeclaredMethod("recover", Map.class); recover.setAccessible(true);
+        recover.invoke(null, Map.of(a, code.toString()));
+        check(new Harness(record(a, true)).client.getApplicationEnabledSetting(a) == 3,
+                "Crash recovery discarded enabled state of a retained installation");
+        check(!(boolean) reserves.invoke(null, code), "Recovered removal retained its generation reservation");
+        removal = constructor.newInstance(a, code.toString()); invoke(removal, "stage", new Class<?>[0]);
         invoke(removal, "discard", new Class<?>[0]);
         check(new Harness(record(a, true)).client.getApplicationEnabledSetting(a) == 0,
                 "Committed quarantine let a later install inherit stale enabled state");
