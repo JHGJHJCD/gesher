@@ -179,6 +179,7 @@ struct Inotify {};
 int ReadInotify(Inotify&, void*, unsigned int) { return errno = EINVAL, -1; }
 struct TimerFd;
 struct EventFd;
+void RefreshTimerFd(TimerFd&);
 int ReadTimerFd(TimerFd&, void*, unsigned int);
 std::shared_ptr<TimerFd> LookupTimerFd(int);
 int RegisterTimerFd(std::shared_ptr<TimerFd>, std::shared_ptr<EventFd>);
@@ -462,6 +463,14 @@ static void SuspendDomains() {
   monotonic_ns += 100;
   Check("remaining awake budget makes timer eligible", FireIfEligible(prompt_native));
   Check("partial resume expiration is counted once", Read(prompt, &ticks, 8) == 8 && ticks == 1);
+  Set(prompt, 0, &far);
+  gesher::suspended_ns += 7200000000000LL;
+  // User code may run before the queued power notification. A new poll must
+  // observe the same expired timer that read/gettime already account for.
+  Check("fresh poll sees elapsed BOOTTIME before resume callback dispatch", Poll(prompt, POLLIN) == POLLIN);
+  Check("poll-refreshed expiration is consumed exactly once", Read(prompt, &ticks, 8) == 8 && ticks == 1);
+  power_transport::Notify();
+  Check("later resume cannot duplicate poll-refreshed expiration", Poll(prompt, POLLIN) == 0);
   Close(prompt); Close(mono); Close(boot); Close(relative_real);
 
   const int reading = Create(7, 0), polling = Create(7);

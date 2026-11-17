@@ -120,11 +120,11 @@ int main(int argc, char** argv) {
     const int64_t boot_delta = observed.boot - start_boot;
     std::printf("boottime-windows: physical awake=%" PRId64 " boot=%" PRId64 " ns\n", awake_delta, boot_delta);
     Check("recorded run actually crosses deadline only in BOOTTIME", awake_delta < duration && boot_delta >= duration);
-    // Timer subscriptions precede the audit observer in the dispatcher. This
-    // check runs after their real resume notifications, with no direct read or
-    // gettime available to refresh a stale readiness flag.
+    // Timer subscriptions precede the audit observer in the dispatcher.
+    // Fresh poll also refreshes an expired clock independently; callback wake
+    // evidence comes from the outstanding workers and admitted-wait host tests.
     pollfd ready{poll_fd, POLLIN, 0};
-    Check("resume notification publishes readiness without another awake timeout", poll(&ready, 1, 0) == 1 &&
+    Check("expired BOOTTIME timer is poll-readable after resume", poll(&ready, 1, 0) == 1 &&
           (ready.revents & POLLIN) != 0);
     pollfd still_waiting{mono_fd, POLLIN, 0};
     Check("MONOTONIC retains its remaining awake timeout", poll(&still_waiting, 1, 0) == 0);

@@ -138,8 +138,9 @@ conversion overflow, and audio sample production through suspend/resume.
 | --- | --- |
 | `test_clock_domains.py --sanitize` | 71 assertions pass |
 | Same command with `--source-ref 6f5e23a598c10906e4518045bc8d73f5c0cf3a9f` | Compiles; 30 semantic assertion failures, expected negative control |
-| `test_timerfd_contracts.py --sanitize` | 130 host assertions and 68 Linux reference assertions pass |
-| Timerfd `--case suspend --skip-linux-reference --sanitize --source-ref 35c55f3b7024fd5f0b7cd91f2b46b77f87aadd26` | Compiles; 10 of 28 assertions fail, expected negative control |
+| `test_timerfd_contracts.py --sanitize` | 133 host assertions and 68 Linux reference assertions pass |
+| Timerfd `--case suspend --skip-linux-reference --sanitize --source-ref 35c55f3b7024fd5f0b7cd91f2b46b77f87aadd26` | Compiles; 11 of 31 assertions fail, expected negative control |
+| Same timerfd control at `b136d57afbb368661d99ef097a1d8651b0edebaf` | Compiles; only fresh poll before callback dispatch fails (one of 31) |
 | `test_boottime_resume.py --sanitize` | 35 assertions across six groups pass |
 | BOOTTIME sleep `--case resume --case partial --case registration-race --sanitize --source-ref 35c55f3b7024fd5f0b7cd91f2b46b77f87aadd26` | Compiles; seven of 18 assertions fail, expected negative control |
 | `test_sleep_contracts.py --sanitize` | 107 host checks and 30 Linux reference checks pass |
@@ -151,6 +152,12 @@ never fires an ineligible native timer in its suspend group. It covers blocked
 read and readiness-event waits, retained reads after final descriptor close,
 partial suspension, duplicate notifications, UTC changes, registration failure,
 stale snapshots, descriptor reuse, disarm and final-close callback quiescence.
+The fresh-poll case also advances BOOTTIME before dispatching the power
+notification: readiness lookup samples the selected clock under the timer
+mutex, matching the expiry already observed by read/gettime. The object
+registry lock is released before acquiring that mutex, and its shared timer
+reference protects the refresh across a concurrent descriptor close. A later
+resume callback cannot count the poll-refreshed expiration again.
 The sleep fixture compiles the actual dispatcher, signal wait and public sleep
 wrapper together and controls the relative native wait eligibility. Existing
 clock/ordinary-sleep fixtures remain arithmetic tests rather than evidence for
@@ -177,6 +184,8 @@ The review correction also cross-compiles the actual `resume.cc`, `timerfd.cc`,
 the pinned LLVM-MinGW headers and the repository's 64-bit file-offset flags.
 The resume dispatcher is separately linked against the real `powrprof` import
 library. Full Windows runtime integration remains a CI gate.
+The ARM64 workflow also builds `boottime_resume_windows_test.exe` and verifies
+its PE architecture; that build is not an ARM64 execution result.
 
 ## Windows and Android acceptance gates
 
@@ -215,9 +224,11 @@ within 20 seconds, stay suspended for at least 75 seconds, then resume. It arms
 60-second absolute BOOTTIME and MONOTONIC deadlines, waits on actual read/poll/
 epoll and the public guest sleep, and records both elapsed domains at the power
 notification. A run qualifies only if the BOOTTIME deadline elapsed while the
-MONOTONIC deadline remains future. The probe checks readiness immediately after
-its timer resume observers run, before any direct read/gettime can repair it,
-and checks blocked-wait completion and periodic counts. Record its complete
+MONOTONIC deadline remains future. The probe checks readiness after its timer
+resume observers run, blocked-wait completion and periodic counts. Fresh poll
+can also account for an expired deadline, so that readiness sample alone is
+not evidence that an already-blocked waiter was notified. The admitted-wait
+host regressions check that transport separately. Record its complete
 output separately for suspend and hibernate. No physical run was performed in
 the Linux implementation environment.
 

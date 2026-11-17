@@ -203,6 +203,11 @@ int TimerFdCreate(int clockid, int flags) {
   return RegisterTimerFd(std::move(timer), std::move(readiness));
 }
 
+void RefreshTimerFd(TimerFd& timer) {
+  std::lock_guard<std::mutex> lock(timer.mutex);
+  if (!timer.changing) timer.Expire(timer.Now());
+}
+
 int TimerFdGetTime(int fd, TimerFdSpec* value) {
   auto timer = CheckedTimer(fd);
   if (timer == nullptr) return -1;
