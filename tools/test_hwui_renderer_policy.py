@@ -44,6 +44,10 @@ def main():
     if args.sanitize:
         probe.append("--sanitize")
     subprocess.run(probe, cwd=ROOT, check=True, timeout=180)
+    trim = [sys.executable, str(ROOT / "tools/test_hwui_trim.py"), "--cxx", args.cxx]
+    if args.sanitize:
+        trim.append("--sanitize")
+    subprocess.run(trim, cwd=ROOT, check=True, timeout=180)
     print("hwui GPU policy, selector and actual Ganesh preflight all passed")
 
 if __name__ == "__main__":

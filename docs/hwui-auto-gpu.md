@@ -81,7 +81,10 @@ and Basic Render Driver/WARP:
   ImageReader, device loss, repeated open/close and concurrent rendering.
 - Report warm p50/p95 frame time, dropped/late frames, CPU/GPU utilization,
   private committed/resident memory, peak GPU memory and memory after
-  trimming/closing (the host RenderThread currently lacks full cache trims).
+  trimming/closing. Explicit trim signals now purge the real Ganesh context:
+  UI_HIDDEN temporarily reduces cache budgets and restores them; BACKGROUND
+  and above synchronize, release resources and retire the rendering context.
+  Automatic idle cache budgeting remains separate work.
 - Compare boot-to-first-frame and per-app startup cost; the preflight creates
   and tears down a short-lived Ganesh context and may cost startup latency.
 - Do not enable GPU by default based only on successful host tests or declare
@@ -90,3 +93,25 @@ and Basic Render Driver/WARP:
 Limitations: some TextureView/HardwareBitmap paths are still stand-ins;
 translucent popups and child surfaces may perform glReadPixels; and
 recovering from device loss is a separate architectural task.
+
+## Local physical acceptance, 2026-11-17
+
+The local AOSP build ran on Intel UHD Graphics 770, driver 32.0.101.6556,
+using ANGLE 2.1.1 (ab6a82e0ed14). The native Ganesh probe passed its existing
+CPU comparison tolerance. The actual ART HardwareRenderer selected SkiaGL
+for explicit auto; both glReadPixels and the Windows-composed HWND frame
+matched the CPU frame outside text with zero differing pixels, and the text
+had 473 dark pixels in both pipelines.
+
+Physical resize and redraw passed for 32 alternating 240x160/320x200 frames.
+The committed trim/resize fixture separately passed levels 20, 40, 60 and 80
+on hardware and WARP, including context recreation and subsequent drawing.
+An isolated diagnostic build querying actual Ganesh cache usage measured
+4,278,272 bytes before a background trim, 49,152 bytes after freeing unlocked
+resources, then no rendering context after retirement. The diagnostic logging
+was removed and the ordinary binary rebuilt and retested.
+
+These are local acceptance checks, not a general performance benchmark or
+qualification of other GPUs, device loss, hardware bitmaps or diverse APKs.
+CPU remains the default. The exact-method host regression fails on the old
+no-op implementation and runs in CI alongside the qualification tests.

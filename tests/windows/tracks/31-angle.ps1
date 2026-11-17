@@ -36,7 +36,7 @@ GraphicsDex 'HardwareRenderer: the CPU pipeline''s frame (child node, text, bitm
 $env:GESHER_HWUI_RENDERER = 'skiagl'
 $env:GESHER_EGL_DEVICE = 'warp'
 GraphicsDex 'HardwareRenderer: SkiaGL over ANGLE (WARP) into the Win32 window, the same frame as the CPU pipeline' `
-  HardwareRendererGlTest @($hwuiFont, $hwuiFrame, 'gl', 'GESHER_HWUI_RENDERER')
+  HardwareRendererGlTest @($hwuiFont, $hwuiFrame, 'gl', 'GESHER_HWUI_RENDERER', 'trim-resize')
 Remove-Item Env:GESHER_EGL_DEVICE
 Remove-Item Env:GESHER_HWUI_RENDERER
 
