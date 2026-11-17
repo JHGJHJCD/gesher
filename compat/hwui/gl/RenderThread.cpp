@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2024 The Android Open Source Project
+ * Copyright (C) 2017, 2024 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -194,6 +194,7 @@ void RenderThread::preload() {}
 
 void RenderThread::trimMemory(TrimLevel level) {
     if (!mGrContext) return;
+    // Adapted from frameworks/base/libs/hwui/renderthread/CacheManager.cpp.
     // AOSP CacheManager's device behavior, applied to the real host GL context.
     // The layoutlib CacheManager used by this build has no GPU context.
     mGrContext->flushAndSubmit(GrSyncCpu::kYes);
