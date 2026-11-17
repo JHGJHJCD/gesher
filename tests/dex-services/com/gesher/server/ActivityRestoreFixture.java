@@ -147,6 +147,11 @@ public final class ActivityRestoreFixture {
         IActivityClientController controller;
         boolean autoAck = true;
         boolean failNextTransaction;
+        Operation onExit;
+        @Override public void scheduleExit() {
+            try { if (onExit != null) onExit.run(); }
+            catch (Exception failure) { throw new AssertionError(failure); }
+        }
 
         @Override public IBinder asBinder() { return binder; }
 
@@ -599,11 +604,32 @@ public final class ActivityRestoreFixture {
         check(get(record, "savedState") == null, "Successful resumed acknowledgment did not release snapshot");
     }
 
+    private static void testForceStopLiveSavedRecord() throws Exception {
+        Harness h = new Harness();
+        Object original = h.record("MainAct", 1, "a", "STOPPED");
+        set(original, "savedState", new Bundle());
+        Object[] replacement = new Object[1];
+        h.thread.onExit = () -> {
+            check((boolean)get(original, "finishing"), "Force stop did not retire live activity before exit callback");
+            h.processDied(h.process);
+            Object next = h.newProcess(PID + 1, new AppThread());
+            replacement[0] = h.record("Replacement", 2, "b", "RESUMED", next, null, null, -1);
+        };
+        Method stop = h.atmType.getDeclaredMethod("forceStopPackage", String.class);
+        stop.setAccessible(true); stop.invoke(h.atm, OWNER);
+        check(!h.records.contains(original), "Force stop restored saved live activity");
+        check(h.records.size() == 1 && h.records.contains(replacement[0]), "Force stop consumed concurrent replacement");
+        check(!(boolean)get(get(replacement[0], "app"), "exiting"), "Force stop killed replacement generation");
+    }
+
     public static int run(boolean realBinder, String group) throws Exception {
         binder = realBinder;
         checks = 0;
         if (group.equals("all") || group.equals("saved")) { testSavedStatePreservedAcrossProcessDeath(); testFailedRestoreDelivery(); }
-        if (group.equals("all") || group.equals("cleanup")) testFinishingActivitiesCleanedUpWhileNonFinishingPreserved();
+        if (group.equals("all") || group.equals("cleanup")) {
+            testFinishingActivitiesCleanedUpWhileNonFinishingPreserved();
+            testForceStopLiveSavedRecord();
+        }
         if (group.equals("all") || group.equals("results")) testPendingResultsPreservedAcrossProcessDeath();
         if (group.equals("all") || group.equals("movetask")) testMoveTaskToFrontRelaunch();
         if (group.equals("all") || group.equals("paused")) testActivityPausedFinishingRelaunchesUnderlying();

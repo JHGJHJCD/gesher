@@ -2153,11 +2153,15 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
      * others told to exit; waits up to 5 s for them to go.
      */
     void forceStopPackage(String packageName) {
-        // Also cancel sticky-service restarts when the old process has already died.
-        if (mAm != null) mAm.stopServicesForPackage(packageName);
         List<ProcessRecord> stop = new ArrayList<>();
         synchronized (this) {
             mPendingWork.removeIf(work -> packageName.equals(work.packageName));
+            // Service teardown can synchronously report process death. Retire
+            // captured activities first so saved state cannot turn an explicit
+            // force stop into ordinary crash restoration.
+            for (ActivityRecord activity : mActivities) {
+                if (packageName.equals(activity.info.packageName)) activity.finishing = true;
+            }
             for (ActivityRecord activity : new ArrayList<>(mActivities)) {
                 if (activity.app != null || !packageName.equals(activity.info.packageName)) continue;
                 activity.finishing = true; activity.state = State.DESTROYED;
@@ -2165,17 +2169,22 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 accountActivityFinished(activity); mActivities.remove(activity);
             }
             for (ProcessRecord p : mProcesses) {
-                if (packageName.equals(p.packageName)) stop.add(p);
+                if (packageName.equals(p.packageName)) {
+                    p.exiting = true;
+                    stop.add(p);
+                }
             }
             for (Map.Entry<Long, PendingProcess> entry : new ArrayList<>(mStarting.entrySet())) {
                 PendingProcess p = entry.getValue();
                 if (!p.packageName.equals(packageName)) continue;
                 p.cancelled = true;
-                if (p.pid > 0) Zygote.kill(p.pid);
+                if (p.pid > 0) Zygote.killChild(p.pid, p.nativeStartTime);
                 else startFailed(entry.getKey(), p);
             }
             notifyAll();
         }
+        // Also cancel sticky-service restarts when the old process has died.
+        if (mAm != null) mAm.stopServicesForPackage(packageName);
         if (stop.isEmpty()) return;
         SystemServer.log("force-stopping " + packageName);
         endProcesses(stop, 5000);
@@ -2357,7 +2366,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 p.exiting = true;
             }
             if (p.spawned) {
-                Zygote.kill(p.pid);
+                Zygote.killChild(p.pid, p.nativeStartTime);
             } else {
                 try {
                     p.thread.scheduleExit();
