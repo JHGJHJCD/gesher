@@ -25,6 +25,7 @@ import android.os.Parcel;
 import android.os.PersistableBundle;
 import android.os.RemoteException;
 import com.android.internal.pm.parsing.pkg.PackageImpl;
+import com.android.internal.pm.pkg.component.ParsedActivityImpl;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -114,6 +115,11 @@ public final class ActivityRestoreFixture {
         PackageImpl parsed = (PackageImpl) PackageImpl.forTesting(OWNER, "/fixture/restore/base.apk");
         parsed.setEnabled(true);
         parsed.setTargetSdkVersion(36);
+        for (String name : List.of("MainAct", "RootAct", "TopAct", "TransientAct", "ParentAct", "ChildAct", "TaskRoot", "BottomAct")) {
+            ParsedActivityImpl activity = new ParsedActivityImpl();
+            activity.setPackageName(OWNER); activity.setName(OWNER + "." + name);
+            activity.setEnabled(true); activity.setExported(true); parsed.addActivity(activity);
+        }
         parsed.hideAsFinal();
         ApkPackage code = (ApkPackage) UNSAFE.allocateInstance(ApkPackage.class);
         set(code, "packageName", OWNER);
@@ -302,6 +308,7 @@ public final class ActivityRestoreFixture {
             Method method = atmType.getDeclaredMethod("attach", recordType, processType);
             method.setAccessible(true);
             method.invoke(atm, record, proc);
+            set(record, "state", state("INITIALIZING"));
         }
 
         void moveTaskToFront(int taskId) throws Exception {
@@ -358,6 +365,7 @@ public final class ActivityRestoreFixture {
 
         // Relaunch simulation with a new process
         AppThread newThread = new AppThread();
+        newThread.autoAck = false; // Process can die again before acknowledging resume.
         Object newProcess = h.newProcess(PID + 1, newThread);
         h.attach(r1, newProcess);
         h.realStartActivity(r1);
@@ -375,11 +383,29 @@ public final class ActivityRestoreFixture {
         check("doc_98765".equals(deliveredPersist.getString("persist_doc_id")),
                 "Delivered persistable bundle did not match original persistent state");
 
-        check(get(r1, "savedState") == null, "savedState on record was not reset to null after delivery");
-        check(get(r1, "persistentState") == null, "persistentState on record was not reset to null after delivery");
+        check(get(r1, "savedState") == saved, "Server snapshot must survive launch until a later stop replaces it");
+        check(get(r1, "persistentState") == persist, "Persistent snapshot must survive launch");
 
         tasks = h.getTasks(10);
         check(tasks.get(0).isRunning, "Task should be running after relaunch");
+        boolean staleRejected = false;
+        try { h.asApp(() -> h.controller.activityStopped(token(r1), new Bundle(), null, null, null)); }
+        catch (SecurityException expected) { staleRejected = true; }
+        check(staleRejected, "Retired process could overwrite relaunched activity snapshot");
+        // A second death before another onStop must still recover the last committed snapshot.
+        h.processDied(newProcess);
+        check(get(r1, "savedState") == saved, "Repeated death lost the last stopped snapshot");
+        check(get(r1, "launchGeneration") == null, "Dead process generation leaked into restart");
+        check(!(boolean)get(r1, "launchScheduled"), "Restart retained an already scheduled launch");
+        AppThread thirdThread = new AppThread();
+        h.newProcess(PID + 10, thirdThread);
+        h.moveTaskToFront(1);
+        LaunchActivityItem repeated = thirdThread.findLaunchItem(r1);
+        check(repeated != null, "Repeated death failed to relaunch");
+        check("user_entered_form_data".equals(((Bundle)field(LaunchActivityItem.class, "mState").get(repeated)).getString("saved_text")),
+                "Repeated relaunch omitted the last snapshot");
+        check(get(r1, "savedState") == null, "Acknowledged resume retained stale state");
+
         System.out.println("Activity state restore: savedState bundle and persistable retention across process death and delivery passed");
     }
 
