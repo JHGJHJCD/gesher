@@ -363,6 +363,31 @@ public final class TaskStackContractTest {
                 "History lease release changed ordinary async launch admission");
     }
 
+    /** Disabled deferred entries must be removed without creating them or disturbing the top. */
+    @SuppressWarnings("unchecked")
+    private static void disabledDeferredHistory() throws Exception {
+        Harness h = new Harness();
+        h.start(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), launch("Middle"), launch("Top"));
+        Object root = h.record("Root"), middle = h.record("Middle"), top = h.record("Top");
+        Method enabled = ApkPackage.class.getDeclaredMethod("setComponentEnabledState", String.class, int.class);
+        enabled.setAccessible(true);
+        enabled.invoke(h.owner, PKG + ".Middle", 2);
+        Class<?> changeType = type("PackageManagerService$EnabledChange");
+        Object change = make(changeType, new Class<?>[]{ApkPackage.class}, h.owner);
+        ((List<String>)get(change, "components")).add(PKG + ".Middle");
+        Method cleanup = h.tasks.getClass().getDeclaredMethod("cleanupDisabledPackageComponents", changeType);
+        cleanup.setAccessible(true); cleanup.invoke(h.tasks, change);
+        check(!h.records().contains(middle) && h.records().contains(root) && h.records().contains(top),
+                "Disabled deferred parent retained or its live siblings were removed");
+        check(h.thread.launches(middle) == 0 && h.thread.launches(root) == 0,
+                "Disabled parent cleanup eagerly instantiated history");
+        enabled.invoke(h.owner, PKG + ".Middle", 1);
+        check(!h.records().contains(middle), "Enabling revived a previously removed history entry");
+        h.acknowledge("activityResumed", top); h.finish(top);
+        check(h.thread.launches(root) == 1 && h.thread.launches(middle) == 0,
+                "Back did not skip the disabled/removed deferred parent");
+    }
+
     private static void invalidBatch() throws Exception {
         Harness h = new Harness();
         Intent root = launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -649,7 +674,7 @@ public final class TaskStackContractTest {
 
     public static int run(boolean binder, String selected) throws Exception {
         realBinder = binder; checks = 0;
-        if (selected.equals("all") || selected.equals("history")) { fullStack(); acceptedHistoryLifetimes(); }
+        if (selected.equals("all") || selected.equals("history")) { fullStack(); acceptedHistoryLifetimes(); disabledDeferredHistory(); }
         if (selected.equals("all") || selected.equals("validation")) invalidBatch();
         if (selected.equals("all") || selected.equals("tasks")) taskFlags();
         if (selected.equals("all") || selected.equals("attach")) attachAndReentry();
