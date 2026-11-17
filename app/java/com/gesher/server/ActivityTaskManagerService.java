@@ -41,6 +41,7 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Parcel;
+import android.os.PersistableBundle;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.MergedConfiguration;
@@ -224,6 +225,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         final List<ResultInfo> pendingResults = new ArrayList<>();
         /** The state it saved when it was last stopped. */
         Bundle savedState;
+        PersistableBundle persistentState;
         /**
          * Its theme is translucent or floating (ActivityTheme): it does not occlude the
          * activities below it, as ActivityRecord.occludesParent; convertToTranslucent and
@@ -1930,7 +1932,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
     }
 
-    private void attach(ActivityRecord r, ProcessRecord app) {
+    void attach(ActivityRecord r, ProcessRecord app) {
         r.app = app;
         if (r.launchGeneration == null) r.launchGeneration = app.exitGeneration;
         app.activities.add(r);
@@ -2140,21 +2142,40 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
     }
 
-    private void processDied(ProcessRecord app) {
+    void processDied(ProcessRecord app) {
         synchronized (this) {
             if (!mProcesses.remove(app)) return;
             app.dead = true;
-            for (ActivityRecord r : app.activities) {
-                if (!r.finishing && !r.idle) r.launchFailed = true;
-                r.state = State.DESTROYED;
-                accountActivityFinished(r);
-                mActivities.remove(r);
+            for (ActivityRecord r : new ArrayList<>(app.activities)) {
+                for (ActivityRecord a : mActivities) {
+                    if (a.waitingFor == r) a.waitingFor = null;
+                }
+                if (r.finishing || r.state == State.DESTROYED) {
+                    r.state = State.DESTROYED;
+                    accountActivityFinished(r);
+                    mActivities.remove(r);
+                    if (topOf(r.taskId) == null) {
+                        mTaskOrder.remove(Integer.valueOf(r.taskId));
+                        mTaskRotation.delete(r.taskId);
+                    }
+                } else {
+                    if (!r.idle) r.launchFailed = true;
+                    r.app = null;
+                    r.state = State.STOPPED;
+                    r.idle = false;
+                    r.stopWhenIdle = false;
+                    r.waitingFor = null;
+                    r.activityWindowGrant = null;
+                }
             }
+            app.activities.clear();
+            if (mTopResumed != null && mTopResumed.app == null) mTopResumed = null;
             updateIdle();
             notifyAll();
         }
+        updateTopResumed();
         SystemServer.log(app + " died");
-        mAm.processDied(app);
+        if (mAm != null) mAm.processDied(app);
         if (!app.spawned) mExitStatus.unavailable(app.exitGeneration);
         if (app.spawned && app.packageName != null) {
             // Its exit code, once Windows has it (binder may tell first).
@@ -2255,7 +2276,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     /** ActivityTaskSupervisor.realStartActivityLocked: launch and resume. */
-    private void realStartActivity(ActivityRecord r) {
+    void realStartActivity(ActivityRecord r) {
         boolean current;
         synchronized (this) {
             current = mActivities.contains(r) && r.state != State.DESTROYED && activityCodeCurrent(r)
@@ -2267,11 +2288,17 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         Configuration config = LocaleManagerService.configurationFor(r.info.packageName);
         Rect task;
         int rotation;
+        Bundle state;
+        PersistableBundle persistentState;
         synchronized (this) {
             task = taskBoundsLocked(r.taskId);
             rotation = mTaskRotation.get(r.taskId, Surface.ROTATION_0);
             r.config = effectiveConfiguration(config, task, rotation);
             r.configPending = false;
+            state = r.savedState;
+            persistentState = r.persistentState;
+            r.savedState = null;
+            r.persistentState = null;
         }
         // A task the user resized, or turned for its orientation: the task's configuration
         // overrides the display's.
@@ -2291,7 +2318,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         t.addTransactionItem(new LaunchActivityItem(r.token, r.intent,
                 System.identityHashCode(r), r.info, config, override,
                 Context.DEVICE_ID_DEFAULT, r.launchedFromPackage, null /* voiceInteractor */,
-                ActivityManager.PROCESS_STATE_TOP, null /* state */, null /* persistentState */,
+                ActivityManager.PROCESS_STATE_TOP, state /* state */, persistentState /* persistentState */,
                 results /* pendingResults */, null /* pendingNewIntents */,
                 null /* sceneTransitionInfo */, true /* isForward */, null /* profilerInfo */,
                 new Binder() /* assistToken */, mClient.asInterface(),
@@ -2540,6 +2567,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
      * (ActivityResultItem, delivered before onResume), as TaskFragment.resumeTopActivity.
      */
     private void resume(ActivityRecord r) {
+        if (r.app == null || r.app.thread == null) return;
         List<ResultInfo> results = takeResults(r);
         ClientTransaction t = new ClientTransaction(r.app.thread);
         // The configuration changed while it was not in front (ActivityRecord's
@@ -2573,7 +2601,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         boolean resumed;
         IBinder callerToken = new Binder("New intent caller");
         synchronized (this) {
-            if (!mActivities.contains(r) || r.finishing || r.state == State.DESTROYED
+            if (!mActivities.contains(r) || r.app == null || r.app.thread == null || r.finishing || r.state == State.DESTROYED
                     || !activityCodeCurrent(r) || !sourceCurrent.getAsBoolean()) return;
             r.callerState.add(callerToken, snapshot);
             resumed = r.state == State.RESUMED || r.state == State.LAUNCHING
@@ -2623,6 +2651,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         synchronized (this) {
             if (!finishing) r.stopWhenIdle = true;
         }
+        if (r.app == null || r.app.thread == null) return;
         setState(r, State.PAUSING);
         ClientTransaction t = new ClientTransaction(r.app.thread);
         t.addTransactionItem(new PauseActivityItem(r.token, finishing /* finished */,
@@ -2952,6 +2981,16 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     private void stop(ActivityRecord r) {
+        if (r.app == null || r.app.thread == null) {
+            synchronized (this) {
+                r.state = State.STOPPED;
+                if (r.finishing) {
+                    remove(r);
+                    return;
+                }
+            }
+            return;
+        }
         setState(r, State.STOPPING);
         ClientTransaction t = new ClientTransaction(r.app.thread);
         t.addTransactionItem(new StopActivityItem(r.token));
@@ -2959,6 +2998,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     private void destroy(ActivityRecord r) {
+        if (r.app == null || r.app.thread == null) {
+            remove(r);
+            return;
+        }
         setState(r, State.DESTROYING);
         ClientTransaction t = new ClientTransaction(r.app.thread);
         synchronized (this) {
@@ -2973,6 +3016,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     private void schedule(ActivityRecord r, ClientTransaction t, String what) {
+        if (r.app == null || r.app.thread == null) return;
         SystemServer.log("scheduleTransaction " + what + " to " + r.name() + " in " + r.app);
         try {
             r.app.thread.scheduleTransaction(t);
@@ -3219,7 +3263,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
      */
     private void makeVisible(ActivityRecord r) {
         synchronized (this) {
-            if (r.state != State.STOPPED || r.finishing) return;
+            if (r.state != State.STOPPED || r.finishing || r.app == null || r.app.thread == null) return;
             r.state = State.STARTED;
             notifyAll();
         }
@@ -3289,32 +3333,57 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             int flags, Bundle options) {
         ActivityRecord top;
         boolean resumeNow = false;
+        boolean launchNow = false;
+        boolean needProcess = false;
         List<ActivityRecord> toStart;
         boolean wasHidden;
         boolean refocused;
         synchronized (this) {
             wasHidden = mHiddenTasks.remove(taskId);
             top = topOf(taskId);
-            if (top == null || top.app == null || !top.app.ready) return;
+            if (top == null) return;
             refocused = mTaskOrder.isEmpty() || mTaskOrder.get(mTaskOrder.size() - 1) != taskId;
             focusTaskLocked(taskId);
-            switch (top.state) {
-                case PAUSED:
-                case STARTED:
-                case STOPPING:
-                case STOPPED:
-                    resumeNow = true;
-                    break;
-                default:
-                    // Resumed, or on its way to it (or being paused in its own task).
-                    if (!wasHidden && !refocused) return;  // in front already
-                    top = null;
+            if (top.app == null) {
+                ProcessRecord proc = processFor(top.info.packageName,
+                        componentProcess(top.info.packageName, top.info.processName));
+                if (proc != null && proc.ready) {
+                    attach(top, proc);
+                    launchNow = true;
+                } else if (proc != null) {
+                    attach(top, proc);
+                    top.state = State.INITIALIZING;
+                } else {
+                    top.state = State.INITIALIZING;
+                    needProcess = true;
+                }
+            } else if (!top.app.ready) {
+                return;
+            } else {
+                switch (top.state) {
+                    case PAUSED:
+                    case STARTED:
+                    case STOPPING:
+                    case STOPPED:
+                        resumeNow = true;
+                        break;
+                    default:
+                        // Resumed, or on its way to it (or being paused in its own task).
+                        if (!wasHidden && !refocused) return;  // in front already
+                        top = null;
+                }
             }
             toStart = starting();
             if (top != null) toStart.remove(top);
         }
         SystemServer.log("moving task " + taskId + " to the front"
-                + (top != null ? ": resuming " + top.name() : ""));
+                + (top != null ? ": " + (launchNow ? "launching " : "resuming ") + top.name() : ""));
+        if (needProcess) {
+            startProcess(top.info.packageName,
+                    componentProcess(top.info.packageName, top.info.processName),
+                    "activity " + top.name(), top.inheritedWindowMode);
+        }
+        if (launchNow) realStartActivity(top);
         if (resumeNow) resume(top);
         for (ActivityRecord a : toStart) makeVisible(a);
         updateTopResumed();
@@ -3353,6 +3422,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         ActivityRecord resume = null;
         boolean finishing;
         boolean stopNow;
+        boolean needProcess = false;
+        ActivityRecord processTarget = null;
         synchronized (this) {
             r.state = State.PAUSED;
             finishing = r.finishing;
@@ -3380,7 +3451,22 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     ActivityRecord next = topResumedCandidateLocked();
                     if (next != null && next.taskId != r.taskId) resume = next;
                 }
-                if (resume != null && resume.app == null) resume = null;
+                if (resume != null && resume.app == null) {
+                    ProcessRecord proc = processFor(resume.info.packageName,
+                            componentProcess(resume.info.packageName, resume.info.processName));
+                    if (proc != null && proc.ready) {
+                        attach(resume, proc);
+                        launch.add(resume);
+                    } else if (proc != null) {
+                        attach(resume, proc);
+                        resume.state = State.INITIALIZING;
+                    } else {
+                        resume.state = State.INITIALIZING;
+                        needProcess = true;
+                        processTarget = resume;
+                    }
+                    resume = null;
+                }
                 if (resume != null) {
                     switch (resume.state) {
                         case PAUSED:
@@ -3396,6 +3482,11 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             notifyAll();
         }
         SystemServer.log("activityPaused: " + r.name());
+        if (needProcess && processTarget != null) {
+            startProcess(processTarget.info.packageName,
+                    componentProcess(processTarget.info.packageName, processTarget.info.processName),
+                    "activity " + processTarget.name(), processTarget.inheritedWindowMode);
+        }
         for (ActivityRecord a : launch) realStartActivity(a);
         for (ActivityRecord a : resumeAfter) resume(a);
         if (resume != null) resume(resume);
@@ -3403,9 +3494,14 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     void activityStopped(ActivityRecord r, Bundle savedState) {
+        activityStopped(r, savedState, null);
+    }
+
+    void activityStopped(ActivityRecord r, Bundle savedState, PersistableBundle persistentState) {
         boolean destroy;
         synchronized (this) {
             r.savedState = savedState;
+            r.persistentState = persistentState;
             // A resume may have been scheduled after the stop (the activity in front
             // finished first): it stays on its way to the front.
             if (r.state == State.STOPPING) r.state = State.STOPPED;

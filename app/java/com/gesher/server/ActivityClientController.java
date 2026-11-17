@@ -60,7 +60,7 @@ public final class ActivityClientController extends IActivityClientController.De
     public void activityStopped(IBinder token, Bundle state, PersistableBundle persistentState,
             HandoffActivityData handoffActivityData, CharSequence description) {
         ActivityTaskManagerService.ActivityRecord r = mAtm.forToken(token);
-        if (r != null) mAtm.activityStopped(r, state);
+        if (r != null) mAtm.activityStopped(r, state, persistentState);
     }
 
     @Override
