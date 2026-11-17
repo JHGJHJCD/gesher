@@ -3,16 +3,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
-using gesher::hwui::GraphicalAppWindowMode;
 using gesher::hwui::HardwareAngleD3D11;
 void Check(bool ok, const char* reason) {
   if (!ok) { std::fprintf(stderr, "FAIL %s\n", reason); std::exit(1); }
 }
 int main() {
-  Check(GraphicalAppWindowMode("window"), "visible app");
-  Check(GraphicalAppWindowMode("hidden"), "hidden app");
-  for (std::string_view mode : {"", "headless", "WINDOW", "none", "windowed"})
-    Check(!GraphicalAppWindowMode(mode), "headless or invalid mode");
   for (std::string_view gl : {
        "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0)",
        "ANGLE (Intel, Intel(R) Iris Xe Graphics Direct3D11 vs_5_0 ps_5_0)",

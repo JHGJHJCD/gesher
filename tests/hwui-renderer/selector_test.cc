@@ -41,10 +41,11 @@ int main() {
   const char* warp = "ANGLE (Microsoft, Microsoft Basic Render Driver Direct3D11 vs_5_0)";
   Check("headless no probe", "headless", intel, nullptr, nullptr, true, RenderPipelineType::SkiaCpu, 0);
   Check("launcher no probe", nullptr, intel, nullptr, nullptr, true, RenderPipelineType::SkiaCpu, 0);
-  Check("Intel window", "window", intel, nullptr, nullptr, true, RenderPipelineType::SkiaGL, 1);
-  Check("Intel hidden", "hidden", intel, nullptr, nullptr, true, RenderPipelineType::SkiaGL, 1);
-  Check("software fallback", "window", warp, nullptr, nullptr, true, RenderPipelineType::SkiaCpu, 1);
-  Check("unavailable fallback", "window", nullptr, nullptr, nullptr, false, RenderPipelineType::SkiaCpu, 1);
+  Check("Intel window default avoids probe", "window", intel, nullptr, nullptr, true, RenderPipelineType::SkiaCpu, 0);
+  Check("Intel hidden default avoids probe", "hidden", intel, nullptr, nullptr, true, RenderPipelineType::SkiaCpu, 0);
+  Check("explicit auto Intel window", "window", intel, "auto", nullptr, true, RenderPipelineType::SkiaGL, 1);
+  Check("software fallback", "window", warp, "auto", nullptr, true, RenderPipelineType::SkiaCpu, 1);
+  Check("unavailable fallback", "window", nullptr, "auto", nullptr, false, RenderPipelineType::SkiaCpu, 1);
   Check("force CPU", "window", intel, "skiacpu", nullptr, true, RenderPipelineType::SkiaCpu, 0);
   Check("explicit GL on WARP", "window", warp, "skiagl", "warp", true, RenderPipelineType::SkiaGL, 1);
   Check("auto avoids WARP", "window", intel, "auto", "warp", true, RenderPipelineType::SkiaCpu, 0);

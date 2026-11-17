@@ -76,7 +76,7 @@ void Setup(const Scenario& s, const char* override_renderer = nullptr) {
   scenario = s;
   stats = {};
   Env("GESHER_APP_WINDOW", "window");
-  Env("GESHER_HWUI_RENDERER", override_renderer);
+  Env("GESHER_HWUI_RENDERER", override_renderer ? override_renderer : "auto");
   Env("GESHER_EGL_DEVICE", nullptr);
   Env("GESHER_TEST_RENDERER_PROPERTY", nullptr);
   current_display = s.previous ? kOldDisplay : EGL_NO_DISPLAY;

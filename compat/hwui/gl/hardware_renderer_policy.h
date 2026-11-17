@@ -14,12 +14,6 @@ inline bool ContainsIgnoreCase(std::string_view haystack, std::string_view needl
                      }) != haystack.end();
 }
 
-// A real graphical app has this environment variable set by SystemServer.
-// Avoid initializing ANGLE during framework registration in headless tools.
-inline bool GraphicalAppWindowMode(std::string_view mode) {
-  return mode == "window" || mode == "hidden";
-}
-
 // ANGLE may successfully initialize on Microsoft Basic Render Driver even
 // when the "hardware" device was requested. Only automatically enable GL
 // after probing a known real D3D11 adapter; other devices remain opt-in.

@@ -40,14 +40,20 @@ GraphicsDex 'HardwareRenderer: SkiaGL over ANGLE (WARP) into the Win32 window, t
 Remove-Item Env:GESHER_EGL_DEVICE
 Remove-Item Env:GESHER_HWUI_RENDERER
 
-# Default windowed apps must not mistake WARP for a hardware GPU.
-# Compare against the previously saved CPU frame.
+# The default stays CPU even for graphical apps until hardware acceptance.
 $env:GESHER_APP_WINDOW = 'window'
+GraphicsDex 'HardwareRenderer: windowed default remains SkiaCpu, same frame as CPU' `
+  HardwareRendererGlTest @($hwuiFont, $hwuiFrame, 'default-cpu')
+
+# Explicit auto must not mistake WARP for a hardware GPU.
+# Compare against the previously saved CPU frame.
+$env:GESHER_HWUI_RENDERER = 'auto'
 $env:GESHER_EGL_DEVICE = 'warp'
 GraphicsDex 'HardwareRenderer: auto chooses SkiaCpu on WARP, same frame as CPU' `
   HardwareRendererGlTest @($hwuiFont, $hwuiFrame, 'auto-cpu')
 Remove-Item Env:GESHER_EGL_DEVICE
 Remove-Item Env:GESHER_APP_WINDOW
+Remove-Item Env:GESHER_HWUI_RENDERER
 
 # The same chosen by Android's switch, the system property debug.hwui.renderer
 # (in $ANDROID_ROOT/build.prop, which dalvikvm loads at start; here a copy of

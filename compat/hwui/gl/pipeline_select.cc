@@ -1,8 +1,7 @@
 // Gesher: choosing hwui's pipeline (docs/angle.md, ADR 0030).
 //
-// Windowed Android app processes automatically prefer SkiaGL through ANGLE
-// and Direct3D 11 when the probed renderer is a real hardware GPU, including
-// Intel integrated graphics. Headless framework services keep SkiaCpu.
+// CPU remains the default until real Windows hardware acceptance is complete.
+// Explicit auto qualifies real ANGLE D3D11 hardware, including Intel graphics.
 // GESHER_HWUI_RENDERER and debug.hwui.renderer explicitly override with
 // "auto", "skiacpu" or "skiagl"; explicit skiagl permits WARP for tests.
 // If EGL/Skia cannot initialize, use the original CPU pipeline.
@@ -46,16 +45,9 @@ RenderPipelineType gesher_hwui_choose_pipeline() {
     want = android::base::GetProperty("debug.hwui.renderer", "");
     from = "debug.hwui.renderer";
   }
-  if (want.empty()) {
-    // SystemServer marks only actual graphical app processes; probing ANGLE
-    // in launcher/headless service processes would slow down their startup.
-    const char* mode = std::getenv("GESHER_APP_WINDOW");
-    if (mode == nullptr || !gesher::hwui::GraphicalAppWindowMode(mode))
-      return RenderPipelineType::SkiaCpu;
-    want = "auto";
-    from = "windowed default";
-  }
-  if (want == "skiacpu") return RenderPipelineType::SkiaCpu;
+  // Window presence alone does not qualify the GL implementation's complete
+  // app workflow, memory retirement or device-loss behavior on real hardware.
+  if (want.empty() || want == "skiacpu") return RenderPipelineType::SkiaCpu;
   const bool automatic = want == "auto";
   if (!automatic && want != "skiagl") {
     *g_detail = from + "=" + want + ": not built";

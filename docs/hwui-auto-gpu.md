@@ -1,14 +1,15 @@
 # ANGLE/D3D11 hardware rendering: automatic GPU selection and safety gates
 
-Gesher already contains the SkiaGL -> ANGLE -> D3D11 renderer. This PR makes
-windowed Android application processes select it automatically on recognized
-hardware, including Intel UHD/Iris Xe/Arc. No WSA proprietary code is copied.
+Gesher already contains the SkiaGL -> ANGLE -> D3D11 renderer. Explicit
+`GESHER_HWUI_RENDERER=auto` selects it on recognized hardware, including
+Intel UHD/Iris Xe/Arc, after qualification. SkiaCpu remains the default
+for all processes until the physical acceptance below is recorded.
+No WSA proprietary code is copied.
 
 ## Selection
 
-- Default, GESHER_APP_WINDOW=window or hidden: probe the current ANGLE
-  renderer and request SkiaGL only after a complete GPU qualification succeeds.
-- Default, headless/services/CLI: stay on SkiaCpu with **zero GPU probes**.
+- Default, windowed/hidden/headless/services/CLI: stay on SkiaCpu with
+  **zero GPU probes**. Window presence alone never enables GPU rendering.
 - GESHER_HWUI_RENDERER=skiacpu: always SkiaCpu, even if an iGPU is present.
 - GESHER_HWUI_RENDERER=skiagl: explicit GL, including D3D11 WARP for tests.
 - GESHER_HWUI_RENDERER=auto: qualify hardware, otherwise fallback to SkiaCpu.
@@ -51,7 +52,8 @@ pipeline cannot safely change after HWUI windows and surfaces are created.
 Run `python3 tools/test_hwui_renderer_policy.py --sanitize` on a host with
 C++20, ASan and UBSan. Tests include:
 
-1. Production hardware/vendor matching, CPU override and headless mode.
+1. Production hardware/vendor matching, zero-probe defaults for windowed,
+   hidden and headless processes, explicit auto selection and CPU override.
 2. Production selector and exact production ANGLE qualification function
    extracted from angle_gl.cc with deterministic EGL/Ganesh adapters.
 3. Successful Intel qualification; failed GrDirectContexts::MakeGL; invalid
@@ -65,7 +67,8 @@ C++20, ASan and UBSan. Tests include:
 These isolated controls do not test actual Intel drivers. Windows track 31
 also exercises SkiaGL over WARP, the software auto/CPU fallback, window
 composition and GLES rendering. Full AOSP/ART/Windows CI is mandatory before
-merge, and both canonical build suppliers must be verified.
+merge, and both canonical build suppliers must be verified. Physical acceptance
+is required before changing the default; it is not established by these fixtures.
 
 ## Physical acceptance needed before default use
 
@@ -81,8 +84,8 @@ and Basic Render Driver/WARP:
   trimming/closing (the host RenderThread currently lacks full cache trims).
 - Compare boot-to-first-frame and per-app startup cost; the preflight creates
   and tears down a short-lived Ganesh context and may cost startup latency.
-- Do not merge based only on successful host tests or declare an FPS speedup
-  without this evidence.
+- Do not enable GPU by default based only on successful host tests or declare
+  an FPS speedup without this evidence. Explicit auto remains an opt-in path.
 
 Limitations: some TextureView/HardwareBitmap paths are still stand-ins;
 translucent popups and child surfaces may perform glReadPixels; and

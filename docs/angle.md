@@ -83,11 +83,12 @@ The decision record is [0030](decisions/0030-angle-hwui-skiagl.md).
   Android's EGL native types (`EGLNativeWindowType` is `ANativeWindow*`).
   `eglBeginFrame` does nothing; `EGL_KHR_swap_buffers_with_damage` (which
   EglManager requires) falls back to `eglSwapBuffers` when ANGLE lacks it.
-- **Choosing it**: windowed app processes automatically try SkiaGL on
-  verified D3D11 hardware (including Intel integrated graphics). Qualification
+- **Choosing it**: SkiaCpu remains the default for all processes. Explicit
+  `GESHER_HWUI_RENDERER=auto` tries recognized D3D11 hardware (including
+  Intel integrated graphics). Qualification
   requires a real GrDirectContexts::MakeGL to succeed, not merely an assembled
   GrGLInterface. A failed probe falls back to SkiaCpu *before* HWUI starts.
-  Services and headless processes keep SkiaCpu without a GPU probe. WARP,
+  Default windowed and headless processes avoid a GPU probe. In auto mode, WARP,
   Microsoft Basic Render Driver, missing ANGLE or other software/unknown
   devices fall back to SkiaCpu. `GESHER_HWUI_RENDERER=skiacpu|skiagl|auto` and
   `debug.hwui.renderer` (unless overridden by the environment)
