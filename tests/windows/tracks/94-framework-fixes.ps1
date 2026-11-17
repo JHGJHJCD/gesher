@@ -308,7 +308,7 @@ $intentUriGrantsCode = $LASTEXITCODE
 Check 'services: Intent URI grants, IBinder owner lifecycle and non-system ignore' {
   $global:LASTEXITCODE = $intentUriGrantsCode
   $intentUriGrantsOut
-} @('IntentUriGrantContractTest passed: 15 checks')
+} @('IntentUriGrantContractTest passed: 28 checks')
 
 # Caller identity and URI snapshots must survive actual ActivityThread delivery,
 # relaunch and results, including a PendingIntent holder cleared by its own send.
