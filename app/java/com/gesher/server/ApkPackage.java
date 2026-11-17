@@ -97,6 +97,23 @@ public final class ApkPackage {
     private volatile PackageEnabledStore.State mLocalEnabledState = PackageEnabledStore.State.DEFAULT;
     private volatile PackageEnabledStore mEnabledStore;
     private String mEnabledOwner;
+    // Only a committed non-DONT_KILL_APP change retires this process generation.
+    // Component cleanup itself follows AOSP's current enabled state at dispatch.
+    private EnabledProcess mEnabledProcess;
+    private static final class EnabledProcess implements java.util.function.BooleanSupplier {
+        volatile boolean current = true;
+        @Override public boolean getAsBoolean() { return current; }
+    }
+
+    synchronized java.util.function.BooleanSupplier enabledProcessLifetime() {
+        if (mEnabledProcess == null) mEnabledProcess = new EnabledProcess();
+        return mEnabledProcess;
+    }
+
+    synchronized void retireEnabledProcesses() {
+        if (mEnabledProcess != null) mEnabledProcess.current = false;
+        mEnabledProcess = null;
+    }
 
     void attachEnabledState(PackageEnabledStore store, String owner) {
         mEnabledOwner = owner; mEnabledStore = store;
@@ -123,6 +140,7 @@ public final class ApkPackage {
     }
 
     void clearComponentStates() {
+        retireEnabledProcesses();
         mEnabledStore = null; mEnabledOwner = null;
         mLocalEnabledState = PackageEnabledStore.State.DEFAULT;
     }

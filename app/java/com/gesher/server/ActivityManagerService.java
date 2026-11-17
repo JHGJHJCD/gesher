@@ -774,8 +774,9 @@ public final class ActivityManagerService extends IActivityManager.Default {
      * no services map (the app asks servicemanager), no font map (Typeface loads the
      * preinstalled one) and the shared memory region with the system features.
      */
-    void bindApplication(IApplicationThread thread, ApplicationInfo ai,
+    void bindApplication(ActivityTaskManagerService.ProcessRecord app, ApplicationInfo ai,
             android.content.res.Configuration config) throws Exception {
+        IApplicationThread thread = app.thread;
         FileDescriptor sharedMemory = sharedMemory().getReadOnlyFileDescriptor();
         Bundle coreSettings = new Bundle();
         // CoreSettingsObserver's bundle: the default device's settings, by device id.
@@ -783,7 +784,7 @@ public final class ActivityManagerService extends IActivityManager.Default {
         thread.bindApplication(ai.processName != null ? ai.processName : ai.packageName, ai,
                 null /* sdkSandboxClientAppVolumeUuid */, null /* sdkSandboxClientAppPackage */,
                 false /* isSdkInSandbox */,
-                ProviderInfoList.fromList(mProviders.providersFor(ai)),
+                ProviderInfoList.fromList(mProviders.providersFor(app, ai)),
                 null /* instrumentationName */, null /* profilerInfo */,
                 null /* instrumentationArgs */, null /* instrumentationWatcher */,
                 null /* instrumentationUiConnection */, ApplicationThreadConstants.DEBUG_OFF,

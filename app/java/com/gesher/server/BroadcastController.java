@@ -196,7 +196,7 @@ final class BroadcastController {
         final OrderedTarget target;
         final long sequence;
         ActivityTaskManagerService.ProcessRecord app;
-        boolean starting, dispatched, finished, disabled;
+        boolean starting, dispatched, finished;
         ScheduledFuture<?> timeout;
         long timeoutGeneration;
         OrderedDelivery(OrderedBroadcast chain, OrderedTarget target, long sequence) {
@@ -388,8 +388,7 @@ final class BroadcastController {
                         chain.excluded, chain.excludedPackages)) return false;
         if (target.registered != null) {
             ReceiverList rl = target.registered;
-            return rl.owner.matchesEnabledApplication(0)
-                    && mRegistered.get(rl.receiver.asBinder()) == rl && !rl.app.exiting
+            return mRegistered.get(rl.receiver.asBinder()) == rl && !rl.app.exiting
                     && mAtm.callerProcess(rl.app.pid) == rl.app
                     && !mTimedOut.contains(rl.app)
                     && componentAllowed(chain.sender, rl.packageName,
@@ -843,8 +842,7 @@ final class BroadcastController {
         }
         for (ReceiverList rl : registered) {
             if (!sender.lifetime.getAsBoolean()) break;
-            if (mPm.get(rl.packageName) != rl.owner || mPm.isRemovalPending(rl.packageName)
-                    || !rl.owner.matchesEnabledApplication(0)) continue;
+            if (mPm.get(rl.packageName) != rl.owner || mPm.isRemovalPending(rl.packageName)) continue;
             try {
                 rl.app.thread.scheduleRegisteredReceiver(rl.receiver, intent,
                         android.app.Activity.RESULT_OK, null /* data */, null /* extras */,
@@ -991,8 +989,9 @@ final class BroadcastController {
             if (mTimedOut.contains(app)) throw new SecurityException("Receiver process generation timed out");
             OrderedDelivery ordered = mOrderedActive.get(app);
             if (ordered != null) {
-                if (ordered.chain.ordered && !ordered.disabled
-                        && targetCurrent(ordered.chain, ordered.target)) {
+                // Android accepts the active receiver's result even when package
+                // cleanup removed subsequent pending deliveries while it ran.
+                if (ordered.chain.ordered) {
                     if (resultData != null && resultData.length() > 65536) {
                         throw new IllegalArgumentException("Broadcast result data too large");
                     }
@@ -1160,8 +1159,7 @@ final class BroadcastController {
                 OrderedDelivery active = chain.active;
                 if (active == null || !disabledTarget(change, active.target)) continue;
                 if (active.app != null) reconsider.add(active.app);
-                if (active.dispatched) active.disabled = true;
-                else completeOrdered(active);
+                if (!active.dispatched) completeOrdered(active);
             }
         }
         pumpOrdered();

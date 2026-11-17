@@ -115,6 +115,8 @@ final class ActiveServices {
         final ArrayDeque<IntentBindRecord> pendingUnbinds = new ArrayDeque<>();
         long bindingGeneration;
         boolean dispatchingBindings;
+        boolean bringingUp;
+        final List<IntentBindRecord> teardownBindings = new ArrayList<>();
         boolean disabled;
         boolean stopped;
         boolean preserveProcessOnStop;
@@ -149,6 +151,7 @@ final class ActiveServices {
         boolean requested;   // scheduleBindService sent
         boolean received;    // publishService came
         boolean hasBound;    // onBind/onRebind has not yet been paired with onUnbind
+        boolean boundDispatched;
         boolean doRebind;    // the last onUnbind returned true
         boolean unbindPending;
         IBinder binder;
@@ -477,6 +480,9 @@ final class ActiveServices {
             connection.conn.connected(r.name, service, null /* session */, dead);
         } catch (RemoteException e) {
             SystemServer.log("connected " + r + ": " + e);
+        } catch (RuntimeException e) {
+            if (!dead) throw e;
+            SystemServer.log("disconnecting " + r + ": " + e);
         }
     }
 
@@ -671,6 +677,7 @@ final class ActiveServices {
                         call.binding.unbindPending = true;
                         r.pendingUnbinds.addLast(call.binding);
                     }
+                    call.binding.boundDispatched = !call.unbind;
                 }
                 long identity = Binder.clearCallingIdentity();
                 try {
@@ -707,7 +714,7 @@ final class ActiveServices {
         r.bindingCalls.clear();
         r.pendingUnbinds.clear();
         for (IntentBindRecord b : r.bindings.values()) {
-            b.requested = b.received = b.hasBound = b.doRebind = b.unbindPending = false;
+            b.requested = b.received = b.hasBound = b.boundDispatched = b.doRebind = b.unbindPending = false;
             b.binder = null;
         }
     }
@@ -750,58 +757,74 @@ final class ActiveServices {
     /** ActiveServices.bringUpServiceLocked: create, then the starts and bind requests. */
     private void bringUp(ServiceRecord r) {
         if (!workCurrent(r)) { maybeBringDown(r); return; }
-        mAtm.withProcess(r.owner, r.info.name, ApkPackage.ComponentKind.SERVICE, r.info.processName, "service " + r, app -> {
-            if (!workCurrent(r)) { maybeBringDown(r); return; }
-            boolean create;
-            List<PendingStart> starts;
-            List<IntentBindRecord> binds = new ArrayList<>();
+        mAtm.withProcess(r.owner, r.info.name, ApkPackage.ComponentKind.SERVICE,
+                r.info.processName, "service " + r, app -> {
             synchronized (this) {
-                if (!workCurrent(r)) return;
-                if (mServices.get(r.name) != r) return;  // stopped meanwhile
-                if (r.app != null && r.app != app) return;
+                if (!workCurrent(r) || r.bringingUp || r.app != null && r.app != app) return;
                 r.app = app;
-                create = !r.created;
-                r.created = true;
-                if (create) r.createdAt = SystemClock.uptimeMillis();
-                starts = new ArrayList<>(r.pendingStarts);
-                r.pendingStarts.clear();
-                for (IntentBindRecord b : r.bindings.values()) {
-                    if (!b.requested && !b.connections.isEmpty()) binds.add(b);
-                }
+                r.bringingUp = true;
             }
+            boolean release = true;
             try {
-                if (create) {
-                    if (!workCurrent(r)) { maybeBringDown(r); return; }
-                    SystemServer.log("scheduleCreateService " + r + " in " + app);
-                    app.thread.scheduleCreateService(r, r.info,
-                            CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,
-                            ActivityManager.PROCESS_STATE_SERVICE);
-                }
-                // Recheck after scheduleCreateService: a local callback can remove
-                // and reinstall the creator before its queued start is delivered.
-                List<ServiceStartArgs> currentStarts = new ArrayList<>();
-                for (PendingStart start : starts) {
-                    if (start.lifetime.getAsBoolean() && serviceCurrent(r)) currentStarts.add(start.args);
-                }
-                if (!currentStarts.isEmpty() && workCurrent(r)) {
-                    SystemServer.log("scheduleServiceArgs " + r + ": " + currentStarts.size()
-                            + " start(s)");
-                    app.thread.scheduleServiceArgs(r, new ParceledListSlice<>(currentStarts));
-                }
-                for (IntentBindRecord b : binds) {
+                for (;;) {
+                    boolean create;
+                    List<PendingStart> starts;
+                    List<IntentBindRecord> binds = new ArrayList<>();
                     synchronized (this) {
-                        pruneRetired(r);
-                        requestBindingLocked(r, b, false);
+                        if (!workCurrent(r)) break;
+                        create = !r.created;
+                        r.created = true;
+                        if (create) r.createdAt = SystemClock.uptimeMillis();
+                        starts = new ArrayList<>(r.pendingStarts);
+                        r.pendingStarts.clear();
+                        for (IntentBindRecord b : r.bindings.values()) {
+                            if (!b.requested && !b.hasBound && !b.connections.isEmpty()) binds.add(b);
+                        }
+                        if (!create && starts.isEmpty() && binds.isEmpty()) {
+                            r.bringingUp = false;
+                            release = false;
+                            break;
+                        }
                     }
-                    drainBindingCalls(r);
+                    if (create) {
+                        if (!workCurrent(r)) {
+                            synchronized (this) { r.created = false; }
+                            break;
+                        }
+                        SystemServer.log("scheduleCreateService " + r + " in " + app);
+                        app.thread.scheduleCreateService(r, r.info,
+                                CompatibilityInfo.DEFAULT_COMPATIBILITY_INFO,
+                                ActivityManager.PROCESS_STATE_SERVICE);
+                    }
+                    // Creation may synchronously disable this component or retire a
+                    // sender. The accepted start must still be live at submission.
+                    List<ServiceStartArgs> currentStarts = new ArrayList<>();
+                    for (PendingStart start : starts) {
+                        if (start.lifetime.getAsBoolean() && serviceCurrent(r)) currentStarts.add(start.args);
+                    }
+                    if (!currentStarts.isEmpty() && workCurrent(r)) {
+                        SystemServer.log("scheduleServiceArgs " + r + ": " + currentStarts.size()
+                                + " start(s)");
+                        app.thread.scheduleServiceArgs(r, new ParceledListSlice<>(currentStarts));
+                    }
+                    for (IntentBindRecord b : binds) {
+                        synchronized (this) {
+                            pruneRetired(r);
+                            requestBindingLocked(r, b, false);
+                        }
+                        drainBindingCalls(r);
+                    }
                 }
-                if (!workCurrent(r)) maybeBringDown(r);
             } catch (RemoteException e) {
                 SystemServer.log("bringing up " + r + " failed: " + e);
+            } finally {
+                if (release) synchronized (this) { r.bringingUp = false; }
+                // A disabled record can already have been replaced by a fresh one.
+                // Finish this record only after its admitted submissions return.
+                maybeBringDown(r);
             }
         }, () -> {
-            // Attach may observe the disabled state before PM's event executor.
-            // Retire the service reservation now, including its dead bindings.
+            // An attachment can reject a disabled target before PM's event runs.
             if (workCurrent(r)) bringUp(r);
             else maybeBringDown(r);
         });
@@ -817,7 +840,7 @@ final class ActiveServices {
             pruneRetired(r);
             if (r.startRequested || r.hasAutoCreateConnections()) return;
             if (r.stopped || mServices.get(r.name) != r && !r.disabled) return;
-            if (r.dispatchingBindings) return;
+            if (r.dispatchingBindings || r.bringingUp) return;
             r.stopped = true;
             mServices.remove(r.name, r);
             resetBindingsLocked(r);
@@ -831,10 +854,15 @@ final class ActiveServices {
         }
         if (r.foregroundId != 0) mNotifications.cancel(r.info.packageName, null, r.foregroundId);
         if (r.app == null || !r.created) return;
+        for (IntentBindRecord binding : r.teardownBindings) {
+            try { r.app.thread.scheduleUnbindService(r, binding, binding.intent); }
+            catch (RemoteException | RuntimeException e) { SystemServer.log("teardown unbind " + r + ": " + e); }
+        }
+        r.teardownBindings.clear();
         SystemServer.log("scheduleStopService " + r);
         try {
             r.app.thread.scheduleStopService(r);
-        } catch (RemoteException e) {
+        } catch (RemoteException | RuntimeException e) {
             SystemServer.log("scheduleStopService " + r + ": " + e);
         }
         // A process kept by the service alone ends now (scheduleExit follows the stop).
@@ -921,6 +949,9 @@ final class ActiveServices {
                 r.pendingStarts.clear();
                 // A running binding dispatch may defer the final stop, but a
                 // stop must not allow its queued callbacks to run first.
+                for (IntentBindRecord binding : r.bindings.values()) {
+                    if (binding.boundDispatched) r.teardownBindings.add(binding);
+                }
                 resetBindingsLocked(r);
                 if (r.restart != null) { r.restart.cancel(false); r.restart = null; }
                 for (IntentBindRecord b : r.bindings.values()) {

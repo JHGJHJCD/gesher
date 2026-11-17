@@ -12,6 +12,7 @@ import android.content.Context;
 import android.content.IContentProvider;
 import android.content.IIntentReceiver;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.pm.IPackageManager;
 import android.content.pm.PackageManager;
@@ -31,6 +32,8 @@ import com.android.internal.pm.pkg.component.ParsedIntentInfoImpl;
 import com.android.internal.pm.pkg.component.ParsedProviderImpl;
 import com.android.internal.pm.pkg.component.ParsedServiceImpl;
 import java.lang.reflect.Field;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.util.ArrayDeque;
@@ -60,7 +63,7 @@ public final class PackageEnabledLifecycleFixture {
         catch (ReflectiveOperationException failure) { throw new ExceptionInInitializerError(failure); }
     }
     private interface Operation { void run() throws Exception; }
-    private static void check(boolean value, String reason) {
+    private static synchronized void check(boolean value, String reason) {
         if (!value) throw new AssertionError(reason); checks++;
     }
     private static Field field(Class<?> type, String name) throws Exception {
@@ -68,9 +71,35 @@ public final class PackageEnabledLifecycleFixture {
     }
     private static Object get(Object target, String name) throws Exception { return field(target.getClass(), name).get(target); }
     private static void set(Object target, String name, Object value) throws Exception { field(target.getClass(), name).set(target, value); }
+    private static Class<?> type(String name) throws Exception { return Class.forName("com.gesher.server." + name); }
+    private static Object rethrow(Throwable failure) throws Exception {
+        if (failure instanceof Error e) throw e;
+        if (failure instanceof Exception e) throw e;
+        throw new AssertionError(failure);
+    }
+    private static Object construct(Class<?> type, Class<?>[] signature, Object... arguments) throws Exception {
+        Constructor<?> constructor = type.getDeclaredConstructor(signature); constructor.setAccessible(true);
+        try { return constructor.newInstance(arguments); }
+        catch (InvocationTargetException failure) { return rethrow(failure.getCause()); }
+    }
+    private static Object invoke(Object target, String name, Class<?>[] signature, Object... arguments) throws Exception {
+        Method method = target.getClass().getDeclaredMethod(name, signature); method.setAccessible(true);
+        try { return method.invoke(target, arguments); }
+        catch (InvocationTargetException failure) { return rethrow(failure.getCause()); }
+    }
+    private static final class TestProcess {
+        final Object record;
+        final int pid, uid;
+        final IApplicationThread thread;
+        TestProcess(Object record) throws Exception {
+            this.record = record; pid = (Integer)get(record, "pid"); uid = (Integer)get(record, "uid");
+            thread = (IApplicationThread)get(record, "thread");
+        }
+        boolean exiting() throws Exception { return (Boolean)get(record, "exiting"); }
+    }
     private static ComponentName part(String suffix) { return new ComponentName(OWNER, OWNER + "." + suffix); }
     private static Intent intent(String suffix) { return new Intent().setComponent(part(suffix)); }
-    private static void as(ActivityTaskManagerService.ProcessRecord app, Operation operation) throws Exception {
+    private static void as(TestProcess app, Operation operation) throws Exception {
         long old = Binder.clearCallingIdentity();
         try { Binder.restoreCallingIdentity(((long)app.uid << 32) | (app.pid & 0xffffffffL)); operation.run(); }
         finally { Binder.restoreCallingIdentity(old); }
@@ -118,7 +147,7 @@ public final class PackageEnabledLifecycleFixture {
         ApkPackage result = (ApkPackage)UNSAFE.allocateInstance(ApkPackage.class);
         set(result, "packageName", name); set(result, "parsed", parsed); set(result, "apkPath", parsed.getBaseApkPath());
         set(result, "mDataDir", "/fixture/" + name + "/data"); set(result, "mUid", UID);
-        set(result, "sharedLibraries", field(SharedLibraryGraph.class, "EMPTY").get(null));
+        set(result, "sharedLibraries", field(type("SharedLibraryGraph"), "EMPTY").get(null));
         return result;
     }
     private static final class RecordingThread extends IApplicationThread.Default {
@@ -129,9 +158,10 @@ public final class PackageEnabledLifecycleFixture {
         final List<Integer> receiverResults = new ArrayList<>();
         final List<IBinder> providerDeaths = new ArrayList<>();
         final List<IBinder> destroys = new ArrayList<>();
+        final List<String> installs = new ArrayList<>(), serviceOrder = new ArrayList<>();
         final Map<IBinder, String> services = new java.util.HashMap<>();
-        int exits, binds;
-        Operation onCreate, onBind, onExit;
+        int exits, binds, registered;
+        Operation onCreate, onBind, onExit, onInstall;
         RecordingThread(Harness h) { this.h = h; }
         @Override public IBinder asBinder() { return binder; }
         void invoke(Operation operation) {
@@ -141,12 +171,19 @@ public final class PackageEnabledLifecycleFixture {
         }
         @Override public void scheduleCreateService(IBinder token, ServiceInfo info,
                 CompatibilityInfo compatibility, int state) {
-            services.put(token, info.name); creates.add(info.name); invoke(onCreate);
+            services.put(token, info.name); creates.add(info.name); serviceOrder.add("create"); invoke(onCreate);
+            serviceOrder.add("created");
         }
         @Override public void scheduleServiceArgs(IBinder token, ParceledListSlice args) {
             h.unlocked(); starts.add(services.get(token));
         }
-        @Override public void scheduleStopService(IBinder token) { h.unlocked(); stops.add(services.get(token)); }
+        @Override public void scheduleStopService(IBinder token) {
+            h.unlocked(); stops.add(services.get(token)); serviceOrder.add("stop");
+        }
+        @Override public void scheduleUnbindService(IBinder token, IBinder binding, Intent intent) {
+            h.unlocked(); serviceOrder.add("unbind");
+        }
+        @Override public void scheduleInstallProvider(ProviderInfo info) { installs.add(info.name); invoke(onInstall); }
         @Override public void scheduleBindService(IBinder token, IBinder binding, Intent intent,
                 boolean rebind, int state, long sequence) { binds++; invoke(onBind); }
         @Override public void scheduleExit() { exits++; invoke(onExit); }
@@ -155,6 +192,11 @@ public final class PackageEnabledLifecycleFixture {
                 int code, String data, Bundle extras, boolean ordered, boolean delivered, int user,
                 int state, int uid, String sender) {
             h.unlocked(); receivers.add(info.name); receiverResults.add(code);
+        }
+        @Override public void scheduleRegisteredReceiver(IIntentReceiver receiver, Intent intent,
+                int code, String data, Bundle extras, boolean ordered, boolean sticky,
+                boolean delivered, int user, int state, int uid, String sender) {
+            h.unlocked(); registered++;
         }
         @Override public void scheduleTransaction(ClientTransaction transaction) {
             h.unlocked();
@@ -173,14 +215,18 @@ public final class PackageEnabledLifecycleFixture {
     }
     private static final class Harness {
         final ApkPackage owner = code(OWNER), client = code(CLIENT);
-        final PackageManagerService pm = new PackageManagerService(List.of(owner, client), false);
-        final ActivityTaskManagerService atm = new ActivityTaskManagerService(pm);
-        final ActivityManagerService am = new ActivityManagerService(atm, pm, null);
+        final PackageManagerService pm = (PackageManagerService)construct(PackageManagerService.class,
+                new Class<?>[]{java.util.Collection.class, boolean.class}, List.of(owner, client), false);
+        final ActivityTaskManagerService atm = (ActivityTaskManagerService)construct(ActivityTaskManagerService.class,
+                new Class<?>[]{PackageManagerService.class}, pm);
+        final ActivityManagerService am = (ActivityManagerService)construct(ActivityManagerService.class,
+                new Class<?>[]{ActivityTaskManagerService.class, PackageManagerService.class,
+                        type("NotificationManagerService")}, atm, pm, null);
         final IPackageManager api;
         final Object services = get(am, "mServices"), broadcasts = get(am, "mBroadcasts"), providers = get(am, "mProviders");
         final ArrayDeque<Runnable> events = new ArrayDeque<>();
         final List<Intent> notifications = new ArrayList<>();
-        final List<ActivityTaskManagerService.ProcessRecord> processes;
+        final List<Object> processes;
         final List<?> pending;
         Harness() throws Exception {
             set(pm, "mPackageEventExecutor", (Executor)events::add);
@@ -188,24 +234,51 @@ public final class PackageEnabledLifecycleFixture {
                 unlocked(); notifications.add(event); broadcast(event, false, null, 0);
             });
             api = binder ? IPackageManager.Stub.asInterface(remote(StandIn.of(IPackageManager.class, pm).asBinder())) : pm;
-            processes = (List<ActivityTaskManagerService.ProcessRecord>)get(atm, "mProcesses");
+            processes = (List<Object>)get(atm, "mProcesses");
             pending = (List<?>)get(atm, "mPendingWork");
         }
         void unlocked() {
             check(!Thread.holdsLock(pm) && !Thread.holdsLock(atm) && !Thread.holdsLock(services)
                     && !Thread.holdsLock(broadcasts) && !Thread.holdsLock(providers), "Application callback ran under a lifecycle monitor");
         }
-        ActivityTaskManagerService.ProcessRecord process(String name, boolean ready) throws Exception {
+        TestProcess process(String name, boolean ready) throws Exception {
             RecordingThread thread = new RecordingThread(this);
             long old = Binder.clearCallingIdentity();
-            ActivityTaskManagerService.ProcessRecord app;
-            try { Binder.restoreCallingIdentity(((long)UID << 32) | nextPid);
-                app = atm.new ProcessRecord(nextPid++, thread); }
-            finally { Binder.restoreCallingIdentity(old); }
-            app.packageName = name; app.processName = name; app.ready = ready;
-            processes.add(app); return app;
+            Object app;
+            try {
+                Binder.restoreCallingIdentity(((long)UID << 32) | nextPid);
+                app = construct(type("ActivityTaskManagerService$ProcessRecord"),
+                        new Class<?>[]{ActivityTaskManagerService.class, int.class, IApplicationThread.class},
+                        atm, nextPid++, thread);
+            } finally { Binder.restoreCallingIdentity(old); }
+            synchronized (atm) {
+                invoke(atm, "assignPackage", new Class<?>[]{type("ActivityTaskManagerService$ProcessRecord"),
+                        String.class, String.class}, app, name, name);
+                set(app, "ready", ready); processes.add(app);
+            }
+            try {
+                invoke(providers, "providersFor", new Class<?>[]{type("ActivityTaskManagerService$ProcessRecord"),
+                        android.content.pm.ApplicationInfo.class}, app, pm.getApplicationInfo(name, 0, 0));
+            } catch (NoSuchMethodException oldHead) {
+                invoke(providers, "providersFor", new Class<?>[]{android.content.pm.ApplicationInfo.class},
+                        pm.getApplicationInfo(name, 0, 0));
+            }
+            return new TestProcess(app);
         }
-        RecordingThread thread(ActivityTaskManagerService.ProcessRecord app) { return (RecordingThread)app.thread; }
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        Object activity(String suffix, int task, TestProcess app, Object result, int request, String state) throws Exception {
+            Class<?> recordType = type("ActivityTaskManagerService$ActivityRecord");
+            Object record = construct(recordType, new Class<?>[]{ActivityTaskManagerService.class,
+                    ActivityInfo.class, Intent.class, int.class, int.class, String.class,
+                    recordType, String.class, int.class}, atm, pm.getActivityInfo(part(suffix), 0, 0),
+                    intent(suffix), task, 0, "android", result, "result", request);
+            set(record, "state", Enum.valueOf((Class)type("ActivityTaskManagerService$State"), state));
+            ((List<Object>)get(atm, "mActivities")).add(record);
+            if (app != null) invoke(atm, "attach", new Class<?>[]{recordType,
+                    type("ActivityTaskManagerService$ProcessRecord")}, record, app.record);
+            return record;
+        }
+        RecordingThread thread(TestProcess app) { return (RecordingThread)app.thread; }
         void start(String suffix) {
             check(part(suffix).equals(am.startService(null, intent(suffix), null, false, "android", null, 0)), "Service failed to start");
         }
@@ -216,7 +289,7 @@ public final class PackageEnabledLifecycleFixture {
             api.setApplicationEnabledSetting(OWNER, value, flags, 0, "android");
         }
         void drain() { while (!events.isEmpty()) events.remove().run(); }
-        void ready(ActivityTaskManagerService.ProcessRecord app) throws Exception {
+        void ready(TestProcess app) throws Exception {
             as(app, () -> am.finishAttachApplication(0, 0));
         }
         Map<?, ?> services() throws Exception { return (Map<?, ?>)get(services, "mServices"); }
@@ -224,7 +297,7 @@ public final class PackageEnabledLifecycleFixture {
             am.broadcastIntent(null, intent, null, result, code, null, null, null,
                     android.app.AppOpsManager.OP_NONE, null, ordered, false, 0);
         }
-        void finishReceiver(ActivityTaskManagerService.ProcessRecord app, int code, boolean abort) throws Exception {
+        void finishReceiver(TestProcess app, int code, boolean abort) throws Exception {
             as(app, () -> am.finishReceiver(app.thread.asBinder(), code, null, null, abort, 0));
         }
     }
@@ -241,15 +314,17 @@ public final class PackageEnabledLifecycleFixture {
                 "Component cleanup removed a peer or retained the disabled service");
         check(connection.disconnected == 1 && connection.died == 1,
                 "Disabled service did not retire its auto-create binding as binding death");
+        check(t.serviceOrder.indexOf("unbind") >= 0 && t.serviceOrder.indexOf("unbind") < t.serviceOrder.indexOf("stop"),
+                "Disabled bound service omitted onUnbind or delivered it after onDestroy");
         check(((Map<?, ?>)get(h.services, "mConnections")).isEmpty(),
                 "Disabled binding retained an empty client-capability entry");
-        check(t.exits == 0 && !app.exiting, "DONT_KILL_APP retired the shared process");
+        check(t.exits == 0 && !app.exiting(), "DONT_KILL_APP retired the shared process");
         h.component("ServiceA", 1, KEEP); h.drain(); h.start("ServiceA");
         check(t.creates.size() == 3 && t.starts.size() == 3, "Explicit re-enable/start reused the retired service generation");
 
         Harness last = new Harness(); var lastApp = last.process(OWNER, true);
         last.start("ServiceA"); last.component("ServiceA", 2, KEEP); last.drain();
-        check(last.thread(lastApp).stops.size() == 1 && last.thread(lastApp).exits == 0 && !lastApp.exiting,
+        check(last.thread(lastApp).stops.size() == 1 && last.thread(lastApp).exits == 0 && !lastApp.exiting(),
                 "Stopping the last disabled service violated DONT_KILL_APP");
 
         Harness reentrant = new Harness(); var reentrantApp = reentrant.process(OWNER, true);
@@ -269,7 +344,36 @@ public final class PackageEnabledLifecycleFixture {
                 && binding.thread(bindingApp).exits == 0 && binding.services().isEmpty(),
                 "Cleanup during binding dispatch lost final stop or killed the shared process");
 
-        Harness families = new Harness(); families.pm.add(code(OWNER, true));
+        Harness creating = new Harness(); var creatingApp = creating.process(OWNER, true);
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        creating.thread(creatingApp).onCreate = () -> {
+            entered.countDown(); check(release.await(3, TimeUnit.SECONDS), "Service creation was not released");
+        };
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread launch = new Thread(() -> {
+            try { creating.start("ServiceA"); } catch (Throwable problem) { failure.set(problem); }
+        }, "enabled-service-create");
+        launch.setDaemon(true); launch.start(); check(entered.await(3, TimeUnit.SECONDS), "Service creation did not enter");
+        creating.component("ServiceA", 2, KEEP); creating.drain();
+        check(creating.thread(creatingApp).stops.isEmpty(), "Cleanup overtook an admitted create callback");
+        release.countDown(); launch.join(3000);
+        check(!launch.isAlive() && failure.get() == null
+                && creating.thread(creatingApp).serviceOrder.equals(List.of("create", "created", "stop"))
+                && creating.thread(creatingApp).starts.isEmpty(),
+                "Concurrent service cleanup lost lifecycle order or delivered disabled start args: " + failure.get());
+
+        Harness replaced = new Harness(); var replacedApp = replaced.process(OWNER, true);
+        replaced.thread(replacedApp).onCreate = () -> {
+            replaced.thread(replacedApp).onCreate = null;
+            replaced.component("ServiceA", 2, KEEP); replaced.drain();
+            replaced.component("ServiceA", 1, KEEP); replaced.drain(); replaced.start("ServiceA");
+        };
+        replaced.start("ServiceA");
+        check(replaced.services().size() == 1 && replaced.thread(replacedApp).creates.size() == 2
+                && replaced.thread(replacedApp).starts.size() == 1 && replaced.thread(replacedApp).stops.size() == 1,
+                "Old service cleanup removed or started the replacement record");
+
+        Harness families = new Harness(); invoke(families.pm, "add", new Class<?>[]{ApkPackage.class}, code(OWNER, true));
         var familyApp = families.process(OWNER, true);
         check(families.pm.getActivityInfo(part("ServiceA"), 0, 0) == null
                 && families.pm.getServiceInfo(part("ServiceA"), 0, 0) != null,
@@ -304,7 +408,7 @@ public final class PackageEnabledLifecycleFixture {
             check(h.thread(app).creates.equals(List.of(OWNER + ".ServiceB"))
                     && h.thread(app).starts.equals(List.of(OWNER + ".ServiceB")),
                     "Component-only disable dispatched its work or canceled its pending peer");
-            check(h.pending.isEmpty() && h.services().size() == 1 && !app.exiting,
+            check(h.pending.isEmpty() && h.services().size() == 1 && !app.exiting(),
                     "Pending component cleanup did not converge without killing its peer");
         }
         Harness reenabled = new Harness(); var reenabledApp = reenabled.process(OWNER, false);
@@ -326,9 +430,19 @@ public final class PackageEnabledLifecycleFixture {
 
         Harness enabled = new Harness(); var valid = enabled.process(OWNER, true);
         enabled.start("ServiceA"); enabled.component("ServiceA", 2, 0); enabled.component("ServiceA", 1, KEEP);
+        var admittedAfterRestart = enabled.process(OWNER, true);
         enabled.drain();
-        check(enabled.thread(valid).stops.isEmpty() && enabled.thread(valid).exits == 0,
-                "A stale disable event retired a component re-enabled before dispatch");
+        check(enabled.thread(valid).stops.isEmpty() && enabled.thread(valid).exits == 1,
+                "A later KEEP enable canceled an already committed process restart");
+        check(enabled.thread(admittedAfterRestart).exits == 0,
+                "Old restart retired a newly admitted process generation");
+
+        Harness coalesced = new Harness(); var current = coalesced.process(OWNER, false);
+        coalesced.start("ServiceA"); coalesced.component("ServiceA", 2, KEEP);
+        coalesced.component("ServiceA", 1, KEEP); coalesced.drain(); coalesced.ready(current);
+        check(coalesced.thread(current).creates.equals(List.of(OWNER + ".ServiceA"))
+                && coalesced.thread(current).starts.size() == 1 && coalesced.thread(current).exits == 0,
+                "Coalesced KEEP enable invented cancellation before cleanup or dispatch");
 
         Harness mixed = new Harness(); var mixedApp = mixed.process(OWNER, true);
         mixed.start("ServiceA"); mixed.start("ServiceB"); mixed.component("ServiceA", 2, 0);
@@ -353,7 +467,7 @@ public final class PackageEnabledLifecycleFixture {
                 "Another package's snapshot suppressed owner cleanup");
 
         Harness replacement = new Harness(); replacement.component("ServiceA", 2, 0);
-        replacement.pm.add(code(OWNER)); var newer = replacement.process(OWNER, true); replacement.start("ServiceB");
+        invoke(replacement.pm, "add", new Class<?>[]{ApkPackage.class}, code(OWNER)); var newer = replacement.process(OWNER, true); replacement.start("ServiceB");
         replacement.drain();
         check(replacement.thread(newer).exits == 0 && replacement.thread(newer).stops.isEmpty(),
                 "Old installation event retired replacement work");
@@ -404,10 +518,45 @@ public final class PackageEnabledLifecycleFixture {
         check(ordered.thread(orderedApp).receivers.size() == 1 && result.isEmpty(),
                 "Disabled active ordered receiver lost acknowledgement ownership");
         ordered.finishReceiver(orderedApp, 99, true);
-        check(ordered.thread(orderedApp).receiverResults.equals(List.of(5, 5)),
-                "Retired receiver changed the ordered result or aborted its enabled peer");
-        ordered.finishReceiver(orderedApp, 7, false);
-        check(result.equals(List.of(7)), "Ordered chain failed to complete after component cleanup");
+        check(ordered.thread(orderedApp).receiverResults.equals(List.of(5)) && result.equals(List.of(99)),
+                "Cleanup discarded the active receiver's valid ordered result or abort");
+
+        Harness continued = new Harness(); var continuedApp = continued.process(OWNER, true); continued.start("ServiceB");
+        continued.broadcast(new Intent(OWNER + ".RECEIVE").setPackage(OWNER), true, null, 5);
+        continued.component("ReceiverA", 2, KEEP); continued.drain();
+        continued.finishReceiver(continuedApp, 17, false);
+        check(continued.thread(continuedApp).receiverResults.equals(List.of(5, 17)),
+                "Enabled next receiver lost the completed receiver's ordered result");
+        continued.finishReceiver(continuedApp, 0, false);
+        registeredReceivers();
+    }
+
+    private static void registeredReceivers() throws Exception {
+        Harness h = new Harness(); var app = h.process(OWNER, true); h.start("ServiceB");
+        String action = OWNER + ".DYNAMIC";
+        for (int priority : new int[]{10, 0}) {
+            IntentFilter filter = new IntentFilter(action); filter.setPriority(priority);
+            IIntentReceiver receiver = new IIntentReceiver.Stub() {
+                @Override public void performReceive(Intent i, int c, String d, Bundle e, boolean o, boolean s, int u) { }
+            };
+            as(app, () -> h.am.registerReceiver(app.thread, OWNER, receiver, filter, null, 0, Context.RECEIVER_EXPORTED));
+        }
+        h.broadcast(new Intent(action), true, null, 0);
+        h.component("ReceiverA", 2, KEEP); h.drain();
+        h.finishReceiver(app, 1, false);
+        check(h.thread(app).registered == 2, "Component cleanup canceled a pending registered receiver");
+        h.finishReceiver(app, 2, false);
+        h.broadcast(new Intent(action), true, null, 0);
+        h.application(2, KEEP); h.drain();
+        check(h.thread(app).registered == 3 && ((Map<?, ?>)get(h.broadcasts, "mRegistered")).size() == 2,
+                "Whole-package cleanup dispatched pending dynamic work or removed registrations");
+        // AOSP only removes the already pending broadcast. Registration itself
+        // continues to belong to the retained process, including new sends.
+        h.broadcast(new Intent(action), true, null, 0);
+        h.finishReceiver(app, 3, false);
+        check(h.thread(app).registered == 4, "Whole-package cleanup retained old pending work or filtered a new registered send");
+        h.finishReceiver(app, 4, false); h.finishReceiver(app, 5, false);
+        check(h.thread(app).registered == 5, "A disabled app setting suppressed retained receiver registrations");
     }
 
     private static ContentProviderHolder holder(Harness h, String suffix) {
@@ -421,7 +570,7 @@ public final class PackageEnabledLifecycleFixture {
                 });
         return holder;
     }
-    private static ContentProviderHolder acquire(Harness h, ActivityTaskManagerService.ProcessRecord client,
+    private static ContentProviderHolder acquire(Harness h, TestProcess client,
             String suffix, boolean stable) throws Exception {
         ContentProviderHolder[] result = new ContentProviderHolder[1];
         as(client, () -> result[0] = h.am.getContentProvider(client.thread, CLIENT, OWNER + ".provider" + suffix, 0, stable));
@@ -431,6 +580,23 @@ public final class PackageEnabledLifecycleFixture {
         Harness h = new Harness(); var owner = h.process(OWNER, true); h.start("ServiceB");
         var unstable = h.process(CLIENT, true); var stable = h.process(CLIENT, true);
         ContentProviderHolder a = holder(h, "A"), b = holder(h, "B");
+        ContentProviderHolder wrongAuthority = holder(h, "A"); wrongAuthority.info.authority += ";unrelated.authority";
+        try {
+            as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(wrongAuthority)));
+            throw new AssertionError("Admitted provider replaced its canonical authority");
+        } catch (SecurityException expected) { check(true, "Authority validation rejected publication"); }
+        ContentProviderHolder wrongUid = holder(h, "A");
+        wrongUid.info.applicationInfo = new android.content.pm.ApplicationInfo(wrongUid.info.applicationInfo);
+        wrongUid.info.applicationInfo.uid++;
+        try {
+            as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(wrongUid)));
+            throw new AssertionError("Admitted provider forged its package UID");
+        } catch (SecurityException expected) { check(true, "UID validation rejected publication"); }
+        ContentProviderHolder unknown = holder(h, "A"); unknown.info.name += "Missing";
+        as(owner, () -> h.am.publishContentProviders(owner.thread, java.util.Arrays.asList(null, unknown)));
+        as(unstable, () -> h.am.publishContentProviders(unstable.thread, List.of(a)));
+        check(((Map<?, ?>)get(h.providers, "mPublished")).isEmpty(),
+                "Unrequested, incomplete or wrong-process provider publication changed authority ownership");
         as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(a, b)));
         ContentProviderHolder lost = acquire(h, unstable, "A", false), peer = acquire(h, unstable, "B", true);
         check(lost != null && peer != null && acquire(h, stable, "A", true) != null, "Provider references were not acquired");
@@ -443,14 +609,23 @@ public final class PackageEnabledLifecycleFixture {
                 "Provider cleanup removed a peer authority or retained the disabled one");
         check(h.thread(unstable).providerDeaths.equals(List.of(a.provider.asBinder())) && h.thread(unstable).exits == 0,
                 "Unstable provider client did not receive scoped invalidation");
-        check(h.thread(stable).exits == 1 && stable.exiting, "Stable provider dependency was left alive");
+        check(h.thread(stable).exits == 1 && stable.exiting(), "Stable provider dependency was left alive");
         check(!h.am.refContentProvider(lost.connection, 0, 0) && h.am.refContentProvider(peer.connection, 0, 0),
                 "Disabled provider reference survived or peer reference was retired");
-        check(h.thread(owner).exits == 0 && !owner.exiting, "Provider cleanup violated owner DONT_KILL_APP");
-        try { as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(a))); }
-        catch (SecurityException expected) { checks++; }
+        check(h.thread(owner).exits == 0 && !owner.exiting(), "Provider cleanup violated owner DONT_KILL_APP");
+        as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(a)));
         check(!((Map<?, ?>)get(h.providers, "mPublished")).containsKey(OWNER + ".providerA"),
                 "Late provider publication resurrected a disabled authority");
+
+        h.component("ProviderA", 1, KEEP); h.drain();
+        ContentProviderHolder fresh = holder(h, "A");
+        h.thread(owner).onInstall = () -> as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(fresh)));
+        ContentProviderHolder reacquired = acquire(h, unstable, "A", false);
+        check(reacquired != null && reacquired.provider.asBinder() == fresh.provider.asBinder()
+                && h.thread(owner).installs.equals(List.of(OWNER + ".ProviderA")),
+                "Re-enabled provider was not installed in its retained live process");
+        check(h.am.refContentProvider(peer.connection, 0, 0), "Provider re-install invalidated an enabled peer's reference");
+        providerInstallRace();
 
         Harness waiting = new Harness(); var waitingClient = waiting.process(CLIENT, true);
         AtomicReference<Object> result = new AtomicReference<>();
@@ -470,32 +645,57 @@ public final class PackageEnabledLifecycleFixture {
                 "Disabled provider left its acquisition waiter or process admission pending: " + result.get());
     }
 
+    private static void providerInstallRace() throws Exception {
+        Harness h = new Harness(); var owner = h.process(OWNER, true); var client = h.process(CLIENT, true);
+        h.component("ProviderA", 2, KEEP); h.drain(); h.component("ProviderA", 1, KEEP); h.drain();
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        ContentProviderHolder stale = holder(h, "A");
+        h.thread(owner).onInstall = () -> {
+            entered.countDown(); check(release.await(3, TimeUnit.SECONDS), "Provider install callback was not released");
+            as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(stale)));
+        };
+        AtomicReference<Object> result = new AtomicReference<>();
+        Thread request = new Thread(() -> {
+            try { result.set(acquire(h, client, "A", false)); }
+            catch (Throwable failure) { result.set(failure); }
+        }, "enabled-provider-install");
+        request.setDaemon(true); request.start();
+        check(entered.await(3, TimeUnit.SECONDS), "Retained process never received scheduleInstallProvider");
+        h.component("ProviderA", 2, KEEP); h.drain();
+        h.component("ProviderA", 1, KEEP); h.drain(); release.countDown(); request.join(3000);
+        check(!request.isAlive() && result.get() == null,
+                "Re-enable revived a provider request canceled by actual cleanup: " + result.get());
+        check(!((Map<?, ?>)get(h.providers, "mPublished")).containsKey(OWNER + ".providerA"),
+                "Late publication recreated a removed pending provider after re-enable");
+        ContentProviderHolder fresh = holder(h, "A");
+        h.thread(owner).onInstall = () -> as(owner, () -> h.am.publishContentProviders(owner.thread, List.of(fresh)));
+        check(acquire(h, client, "A", false).provider.asBinder() == fresh.provider.asBinder(),
+                "A canceled installation blocked the next explicit provider acquisition");
+        check(((java.util.Set<?>)get(h.providers, "mRequests")).isEmpty(), "Provider waiters leaked after completion");
+    }
+
+    @SuppressWarnings("unchecked")
     private static void activities() throws Exception {
         for (boolean eventFirst : List.of(false, true)) {
             Harness h = new Harness(); var app = h.process(OWNER, false); h.start("ServiceB");
-            ActivityTaskManagerService.ActivityRecord result = h.atm.new ActivityRecord(
-                    h.pm.getActivityInfo(part("ActivityB"), 0, 0), intent("ActivityB"), 1, 0, "android", null, null, -1);
-            ActivityTaskManagerService.ActivityRecord queued = h.atm.new ActivityRecord(
-                    h.pm.getActivityInfo(part("ActivityA"), 0, 0), intent("ActivityA"), 2, 0, "android", result, "result", 19);
-            ((List<ActivityTaskManagerService.ActivityRecord>)get(h.atm, "mActivities")).addAll(List.of(result, queued));
-            result.state = ActivityTaskManagerService.State.STOPPED;
-            queued.app = app; app.activities.add(queued);
+            Object result = h.activity("ActivityB", 1, null, null, -1, "STOPPED");
+            Object queued = h.activity("ActivityA", 2, app, result, 19, "INITIALIZING");
             h.component("ActivityA", 2, KEEP); if (eventFirst) h.drain(); h.ready(app); h.drain();
-            check(queued.state == ActivityTaskManagerService.State.DESTROYED && queued.finishing,
+            check(get(queued, "state").toString().equals("DESTROYED") && (Boolean)get(queued, "finishing"),
                     "Disabled queued activity survived finishAttachApplication");
-            check(result.pendingResults.size() == 1 && result.pendingResults.get(0).mResultCode == Activity.RESULT_CANCELED,
+            List<android.app.ResultInfo> results = (List<android.app.ResultInfo>)get(result, "pendingResults");
+            check(results.size() == 1 && results.get(0).mResultCode == Activity.RESULT_CANCELED,
                     "Disabled activity did not complete its pending result exactly once");
-            check(!result.finishing && h.thread(app).exits == 0, "Activity cleanup finished a peer or killed the process");
+            check(!(Boolean)get(result, "finishing") && h.thread(app).exits == 0,
+                    "Activity cleanup finished a peer or killed the process");
         }
         Harness h = new Harness(); var app = h.process(OWNER, true);
-        var activity = h.atm.new ActivityRecord(h.pm.getActivityInfo(part("ActivityA"), 0, 0),
-                intent("ActivityA"), 1, 0, "android", null, null, -1);
-        activity.app = app; activity.state = ActivityTaskManagerService.State.STOPPED;
-        app.activities.add(activity); ((List<ActivityTaskManagerService.ActivityRecord>)get(h.atm, "mActivities")).add(activity);
+        Object activity = h.activity("ActivityA", 1, app, null, -1, "STOPPED");
         h.component("ActivityA", 2, KEEP); h.drain();
-        check(h.thread(app).destroys.equals(List.of(activity.token)), "Disabled attached activity did not get lifecycle destruction");
-        h.atm.activityDestroyed(activity);
-        check(h.thread(app).exits == 0 && !app.exiting, "Last activity cleanup violated DONT_KILL_APP");
+        check(h.thread(app).destroys.equals(List.of(get(activity, "token"))),
+                "Disabled attached activity did not get lifecycle destruction");
+        invoke(h.atm, "activityDestroyed", new Class<?>[]{type("ActivityTaskManagerService$ActivityRecord")}, activity);
+        check(h.thread(app).exits == 0 && !app.exiting(), "Last activity cleanup violated DONT_KILL_APP");
     }
 
     /** Recording native boundary used only by the host runner; never controls an OS PID. */
@@ -509,13 +709,17 @@ public final class PackageEnabledLifecycleFixture {
     private static void startingProcess() throws Exception {
         Harness h = new Harness(); CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
         fakeChild = nextPid++; childKilled = false;
-        set(h.atm, "mStarter", (ActivityTaskManagerService.ProcessStarter)(name, sequence, sdk) -> {
-            entered.countDown(); check(release.await(3, TimeUnit.SECONDS), "Blocked fake start was not released"); return fakeChild;
-        });
+        Class<?> starter = type("ActivityTaskManagerService$ProcessStarter");
+        set(h.atm, "mStarter", Proxy.newProxyInstance(starter.getClassLoader(), new Class<?>[]{starter},
+                (proxy, method, args) -> {
+                    if (!method.getName().equals("start")) throw new AssertionError("Unexpected starter method " + method);
+                    entered.countDown(); check(release.await(3, TimeUnit.SECONDS), "Blocked fake start was not released");
+                    return fakeChild;
+                }));
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread start = new Thread(() -> { try { h.start("ServiceA"); } catch (Throwable error) { failure.set(error); } });
         start.setDaemon(true); start.start(); check(entered.await(3, TimeUnit.SECONDS), "Fake native start was not entered");
-        h.application(2, KEEP); h.drain();
+        h.application(2, 0); h.drain();
         check(((Map<?, ?>)get(h.atm, "mStarting")).isEmpty() && h.pending.isEmpty(),
                 "Disabled application retained an unauthenticated process reservation");
         release.countDown(); start.join(3000);
@@ -524,6 +728,64 @@ public final class PackageEnabledLifecycleFixture {
         set(h.atm, "mStarter", null); h.start("ServiceB");
         Thread.sleep(30); // Let the canceled generation's exit observer run.
         check(h.pending.size() == 1, "Old canceled process watcher cleared a newly enabled generation's work");
+
+        Harness kept = new Harness(); CountDownLatch keepEntered = new CountDownLatch(1), keepRelease = new CountDownLatch(1);
+        fakeChild = nextPid++; childKilled = false;
+        set(kept.atm, "mStarter", Proxy.newProxyInstance(starter.getClassLoader(), new Class<?>[]{starter},
+                (proxy, method, args) -> {
+                    keepEntered.countDown(); check(keepRelease.await(3, TimeUnit.SECONDS), "KEEP child was not released");
+                    return fakeChild;
+                }));
+        AtomicReference<Throwable> keepFailure = new AtomicReference<>();
+        Thread keepStart = new Thread(() -> {
+            try { kept.start("ServiceA"); } catch (Throwable error) { keepFailure.set(error); }
+        }, "enabled-keep-start");
+        keepStart.setDaemon(true); keepStart.start(); check(keepEntered.await(3, TimeUnit.SECONDS), "KEEP child never started");
+        kept.application(2, KEEP); kept.drain();
+        check(((Map<?, ?>)get(kept.atm, "mStarting")).size() == 1 && kept.pending.isEmpty(),
+                "KEEP cleanup removed the admitted child instead of its disabled component work");
+        keepRelease.countDown(); keepStart.join(3000);
+        check(!keepStart.isAlive() && keepFailure.get() == null && !childKilled,
+                "KEEP killed an admitted process when its delayed native start completed: " + keepFailure.get());
+        kept.application(1, KEEP); kept.drain(); kept.start("ServiceB");
+        check(kept.pending.size() == 1 && ((Map<?, ?>)get(kept.atm, "mStarting")).size() == 1,
+                "Re-enable lost the retained child or resurrected canceled ServiceA work");
+        childKilled = true; // Complete the recording-only child so its daemon observer can retire.
+    }
+
+    private static void activityGenerationRace() throws Exception {
+        Harness h = new Harness(); CountDownLatch oldEntered = new CountDownLatch(1), oldRelease = new CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        fakeChild = nextPid++; childKilled = false;
+        Class<?> starter = type("ActivityTaskManagerService$ProcessStarter");
+        set(h.atm, "mStarter", Proxy.newProxyInstance(starter.getClassLoader(), new Class<?>[]{starter},
+                (proxy, method, args) -> {
+                    if (calls.getAndIncrement() == 0) {
+                        oldEntered.countDown(); check(oldRelease.await(3, TimeUnit.SECONDS), "Old process start was not released");
+                        return -1;
+                    }
+                    return fakeChild;
+                }));
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread oldStart = new Thread(() -> {
+            try { h.start("ServiceA"); } catch (Throwable error) { failure.set(error); }
+        }, "enabled-old-process-start");
+        oldStart.setDaemon(true); oldStart.start(); check(oldEntered.await(3, TimeUnit.SECONDS), "Old start never entered");
+        h.component("ServiceA", 2, 0); // Commit restart; deliberately delay its event cleanup.
+        check(h.atm.startActivity(null, "android", null, intent("ActivityB").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                null, null, null, -1, 0, null, null) == android.app.ActivityManager.START_SUCCESS,
+                "Fresh enabled activity was not accepted during process restart");
+        List<?> activities = (List<?>)get(h.atm, "mActivities");
+        check(activities.size() == 1 && calls.get() == 2, "Fresh activity did not obtain a replacement process start");
+        Object activity = activities.get(0);
+        oldRelease.countDown(); oldStart.join(3000);
+        check(!oldStart.isAlive() && failure.get() == null && activities.contains(activity)
+                && !(Boolean)get(activity, "launchFailed") && get(activity, "state").toString().equals("INITIALIZING"),
+                "Old failed process start removed the newly accepted activity: " + failure.get());
+        h.drain();
+        check(activities.contains(activity) && !childKilled,
+                "Delayed old restart cleanup retired the fresh activity's process");
+        childKilled = true;
     }
 
     public static int run(boolean useBinder, String group) throws Exception {
@@ -533,8 +795,10 @@ public final class PackageEnabledLifecycleFixture {
         if (group.equals("all") || group.equals("events")) events();
         if (group.equals("all") || group.equals("broadcasts")) broadcasts();
         if (group.equals("all") || group.equals("providers")) providers();
+        if (group.equals("provider-install")) providerInstallRace();
         if (group.equals("all") || group.equals("activities")) activities();
         if (!useBinder && (group.equals("all") || group.equals("starting"))) startingProcess();
+        if (!useBinder && (group.equals("all") || group.equals("activity-start"))) activityGenerationRace();
         return checks;
     }
 }

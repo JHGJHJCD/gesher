@@ -438,13 +438,20 @@ public final class PackageEnabledStateContractTest {
         @Override public int compareTo(Delayed other) { return 0; }
     }
 
+    private static Object processRecord(Object atm, Class<?> processType) throws Exception {
+        var constructor = processType.getDeclaredConstructor(atm.getClass(), int.class, IApplicationThread.class);
+        constructor.setAccessible(true);
+        return constructor.newInstance(atm, 0, new IApplicationThread.Default());
+    }
+
     @SuppressWarnings("unchecked")
     private static void lifecycle() throws Exception {
         String a = "fixture.enabled.lifecycle";
         ApkPackage owner = record(a, true); Harness h = new Harness(owner);
         Class<?> atmType = Class.forName("com.gesher.server.ActivityTaskManagerService");
         Class<?> processType = Class.forName("com.gesher.server.ActivityTaskManagerService$ProcessRecord");
-        Object atm = UNSAFE.allocateInstance(atmType), process = UNSAFE.allocateInstance(processType);
+        var atmCtor = atmType.getDeclaredConstructor(PackageManagerService.class); atmCtor.setAccessible(true);
+        Object atm = atmCtor.newInstance(h.service), process = processRecord(atm, processType);
         AtomicInteger exits = new AtomicInteger();
         set(process, "pid", 817251); set(process, "packageName", a);
         set(process, "thread", new IApplicationThread.Default() {
@@ -511,8 +518,9 @@ public final class PackageEnabledStateContractTest {
         ApkPackage owner = record(a, true); Harness h = new Harness(owner);
         Class<?> atmType = Class.forName("com.gesher.server.ActivityTaskManagerService");
         Class<?> processType = Class.forName("com.gesher.server.ActivityTaskManagerService$ProcessRecord");
-        Object atm = UNSAFE.allocateInstance(atmType), first = UNSAFE.allocateInstance(processType);
-        Object stale = UNSAFE.allocateInstance(processType), replacement = UNSAFE.allocateInstance(processType);
+        var atmCtor = atmType.getDeclaredConstructor(PackageManagerService.class); atmCtor.setAccessible(true);
+        Object atm = atmCtor.newInstance(h.service), first = processRecord(atm, processType);
+        Object stale = processRecord(atm, processType), replacement = processRecord(atm, processType);
         // Invalid OS PIDs make this regression safe even if run on Windows with the
         // old implementation. The superseded record's recovery flag still exposes it.
         for (Object process : new Object[]{first, stale, replacement}) set(process, "packageName", a);
@@ -542,7 +550,7 @@ public final class PackageEnabledStateContractTest {
                 "An earlier exit callback let retirement act on a superseded process");
 
         if (!art) {
-            Object child = UNSAFE.allocateInstance(processType);
+            Object child = processRecord(atm, processType);
             set(child, "pid", 817253); set(child, "packageName", a); set(child, "spawned", true);
             set(child, "nativeStartTime", 0x123456789L);
             AtomicInteger exits = new AtomicInteger();

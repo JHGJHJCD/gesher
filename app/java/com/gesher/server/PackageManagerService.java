@@ -645,9 +645,6 @@ public final class PackageManagerService extends IPackageManager.Default {
             changed.put(pkg.packageName, new PackageEnabledStore.Entry(pkg.enabledStateOwner(), after));
             EnabledChange event = events.computeIfAbsent(pkg.packageName, ignored -> new EnabledChange(pkg));
             event.components.add(setting.isComponent() ? setting.getClassName() : pkg.packageName);
-            if ((setting.getEnabledFlags() & PackageManager.DONT_KILL_APP) == 0) {
-                event.restartComponents.add(setting.isComponent() ? setting.getClassName() : pkg.packageName);
-            }
             event.dontKill &= (setting.getEnabledFlags() & PackageManager.DONT_KILL_APP) != 0;
         }
         if (changed.isEmpty()) return;
@@ -655,7 +652,7 @@ public final class PackageManagerService extends IPackageManager.Default {
         // returns early, and a failed write publishes neither state nor side effects.
         store.commit(changed);
         for (EnabledChange event : events.values()) {
-            event.state = changed.get(event.pkg.packageName).state();
+            if (!event.dontKill) event.pkg.retireEnabledProcesses();
         }
         PackageManager.invalidatePackageInfoCache();
         mPackageEventExecutor.execute(() -> {
@@ -690,8 +687,6 @@ public final class PackageManagerService extends IPackageManager.Default {
     static final class EnabledChange {
         final ApkPackage pkg;
         final List<String> components = new ArrayList<>();
-        final List<String> restartComponents = new ArrayList<>();
-        PackageEnabledStore.State state;
         boolean dontKill = true;
         EnabledChange(ApkPackage pkg) { this.pkg = pkg; }
 
@@ -699,23 +694,23 @@ public final class PackageManagerService extends IPackageManager.Default {
             return pm.get(pkg.packageName) == pkg && !pm.isRemovalPending(pkg.packageName);
         }
         boolean disablesApplication(PackageManagerService pm) {
-            return current(pm) && !pkg.matchesEnabledApplication(0);
+            if (!current(pm) || !components.contains(pkg.packageName)) return false;
+            int enabled = pkg.enabledState().application();
+            return enabled != PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                    && enabled != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
         }
         boolean disables(PackageManagerService pm, ApkPackage owner, String component, ApkPackage.ComponentKind kind) {
-            return owner == pkg && current(pm) && (!pkg.matchesEnabledApplication(0)
-                    || components.contains(component) && !pkg.componentEnabled(component, kind));
+            if (owner != pkg || !current(pm)) return false;
+            if (disablesApplication(pm)) return true;
+            int enabled = pkg.enabledState().component(component);
+            return components.contains(component) && enabled != PackageManager.COMPONENT_ENABLED_STATE_ENABLED
+                    && enabled != PackageManager.COMPONENT_ENABLED_STATE_DEFAULT;
         }
         boolean restartCurrent(PackageManagerService pm) {
-            if (!current(pm)) return false;
-            PackageEnabledStore.State now = pkg.enabledState();
-            // An unrelated component change must not cancel a requested restart.
-            // A change to the same setting makes this delayed action obsolete.
-            for (String component : restartComponents) {
-                if (component.equals(pkg.packageName)
-                        ? now.application() == state.application()
-                        : now.component(component) == state.component(component)) return true;
-            }
-            return false;
+            // Android's immediate non-KEEP package-change dispatch does not retract
+            // its restart when a later KEEP call changes the setting. ATM captures
+            // the affected process generation so this event cannot kill a new one.
+            return current(pm);
         }
     }
 

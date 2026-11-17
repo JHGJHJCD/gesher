@@ -2,7 +2,15 @@
 /* Recording native process boundary only: never invoke OS process control. */
 #include "../pending-intent/framework_host.c"
 static jclass fixture(JNIEnv* env) {
-    return (*env)->FindClass(env, "com/gesher/server/PackageEnabledLifecycleFixture");
+    jclass thread = (*env)->FindClass(env, "java/lang/Thread");
+    jobject current = (*env)->CallStaticObjectMethod(env, thread,
+            (*env)->GetStaticMethodID(env, thread, "currentThread", "()Ljava/lang/Thread;"));
+    jobject loader = (*env)->CallObjectMethod(env, current,
+            (*env)->GetMethodID(env, thread, "getContextClassLoader", "()Ljava/lang/ClassLoader;"));
+    jclass loader_type = (*env)->FindClass(env, "java/lang/ClassLoader");
+    jstring name = (*env)->NewStringUTF(env, "com.gesher.server.PackageEnabledLifecycleFixture");
+    return (jclass)(*env)->CallObjectMethod(env, loader,
+            (*env)->GetMethodID(env, loader_type, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;"), name);
 }
 JNIEXPORT jlong JNICALL Java_com_gesher_server_Zygote_nativeChildStartTime(JNIEnv* env, jclass type, jint pid) {
     jclass target = fixture(env);

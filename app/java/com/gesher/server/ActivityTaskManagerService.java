@@ -138,6 +138,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         final IApplicationThread thread;
         String packageName;  // null until a start binds it to a package
         String processName;  // the manifest component process, within this package UID
+        ApkPackage packageCode;
+        java.util.function.BooleanSupplier enabledProcessLifetime;
         /** Actual mode captured for this server-spawned process, never an Intent extra. */
         String windowMode;
         boolean windowModeExplicit;
@@ -369,8 +371,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         int pid;
         long nativeStartTime;
         ProcessExitStatus.Generation exitGeneration;
-        boolean cancelled;
+        volatile boolean cancelled;
         ApkPackage owner;
+        java.util.function.BooleanSupplier enabledLifetime;
 
         PendingProcess(String packageName, String processName, String reason) {
             this(packageName, processName, reason, null);
@@ -396,6 +399,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         final ApkPackage.ComponentKind kind;
         final Consumer<ProcessRecord> work;
         final Runnable canceled;
+        ProcessExitStatus.Generation launchGeneration;
 
         PendingWork(ApkPackage owner, String component, ApkPackage.ComponentKind kind,
                 String processName, Consumer<ProcessRecord> work, Runnable canceled) {
@@ -1262,7 +1266,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 } else {
                     needProcess = true;
                     for (PendingProcess pending : mStarting.values()) {
-                        if (pending.packageName.equals(info.packageName)
+                        if (pendingCurrent(pending) && pending.packageName.equals(info.packageName)
                                 && pending.processName.equals(componentProcess(info.packageName, info.processName))) {
                             r.launchGeneration = pending.exitGeneration; break;
                         }
@@ -1469,7 +1473,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
     private ProcessRecord processFor(String packageName, String processName) {
         for (ProcessRecord p : mProcesses) {
-            if (packageName.equals(p.packageName) && !p.exiting
+            if (packageName.equals(p.packageName) && !p.exiting && !p.dead && !p.pidSuperseded
+                    && (p.packageCode == null || p.packageCode == mPm.get(packageName))
+                    && (p.enabledProcessLifetime == null || p.enabledProcessLifetime.getAsBoolean())
                     && processName.equals(componentProcess(p.packageName, p.processName))) return p;
         }
         return null;
@@ -1509,6 +1515,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     private void assignPackage(ProcessRecord app, String packageName, String processName) {
         app.packageName = packageName;
         app.processName = processName;
+        if (app.packageCode == null) app.packageCode = mPm.get(packageName);
+        if (app.enabledProcessLifetime == null && app.packageCode != null) {
+            app.enabledProcessLifetime = app.packageCode.enabledProcessLifetime();
+        }
         if (app.startSeq == 0) {
             app.startSeq = mNextStartSeq++;
             mExitStatus.started(processKey(packageName, processName), app.startSeq);
@@ -1540,9 +1550,17 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
     private boolean starting(String packageName, String processName) {
         for (PendingProcess p : mStarting.values()) {
-            if (p.packageName.equals(packageName) && p.processName.equals(processName)) return true;
+            if (pendingCurrent(p) && p.packageName.equals(packageName)
+                    && p.processName.equals(processName)) return true;
         }
         return false;
+    }
+
+    private boolean pendingCurrent(PendingProcess pending) {
+        return !pending.cancelled && pending.owner != null
+                && mPm.get(pending.packageName) == pending.owner
+                && !mPm.isRemovalPending(pending.packageName)
+                && pending.enabledLifetime != null && pending.enabledLifetime.getAsBoolean();
     }
 
     /**
@@ -1562,11 +1580,20 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     private void startProcess(String packageName, String processName, String reason, String sourceMode) {
         ProcessStarter starter = mStarter;
         if (starter == null) return;
+        final ApkPackage owner;
+        final ApplicationInfo ai;
+        final java.util.function.BooleanSupplier enabledLifetime;
+        synchronized (mPm) {
+            owner = mPm.get(packageName);
+            if (owner == null || !owner.matchesEnabledApplication(0) || mPm.isRemovalPending(packageName)) return;
+            ai = owner.applicationInfo(0);
+            enabledLifetime = owner.enabledProcessLifetime();
+        }
         long seq;
         PendingProcess pending;
         synchronized (this) {
-            ApkPackage owner = mPm.get(packageName);
-            if (owner == null || !owner.matchesEnabledApplication(0) || mPm.isRemovalPending(packageName)) return;
+            if (mPm.get(packageName) != owner || !owner.matchesEnabledApplication(0)
+                    || mPm.isRemovalPending(packageName) || !enabledLifetime.getAsBoolean()) return;
             if (processFor(packageName, processName) != null || starting(packageName, processName)) return;
             seq = mNextStartSeq++;
             mExitStatus.started(processKey(packageName, processName), seq);
@@ -1574,6 +1601,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     WindowManagerService.resolveWindowPolicy(packageName, sourceMode);
             pending = new PendingProcess(packageName, processName, reason, policy.mode, policy.explicit);
             pending.owner = owner;
+            pending.enabledLifetime = enabledLifetime;
             pending.exitGeneration = mExitStatus.capture(processKey(packageName, processName), seq);
             for (ActivityRecord record : mActivities) {
                 if (record.app == null && record.launchGeneration == null
@@ -1581,6 +1609,12 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                         && record.info.packageName.equals(packageName)
                         && componentProcess(packageName, record.info.processName).equals(processName)) {
                     record.launchGeneration = pending.exitGeneration;
+                }
+            }
+            for (PendingWork work : mPendingWork) {
+                if (work.launchGeneration == null && work.current(mPm)
+                        && work.packageName.equals(packageName) && work.processName.equals(processName)) {
+                    work.launchGeneration = pending.exitGeneration;
                 }
             }
             if ("1".equals(System.getenv("GESHER_TRACE_ACTIVITY_MODE"))) {
@@ -1592,7 +1626,6 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             mStarting.put(seq, pending);
             updateIdle();
         }
-        ApplicationInfo ai = mPm.getApplicationInfo(packageName, 0, 0);
         int pid;
         try {
             pid = starter.start(packageName, processName, seq, ai != null ? ai.targetSdkVersion : 0,
@@ -1615,7 +1648,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             pending.nativeStartTime = Zygote.childStartTime(pid);
             pending.pid = pid;
             mExitStatus.bind(pending.exitGeneration, pid);
-            if (pending.cancelled) Zygote.killChild(pid, pending.nativeStartTime);
+            if (!pendingCurrent(pending)) {
+                pending.cancelled = true;
+                Zygote.killChild(pid, pending.nativeStartTime);
+            }
             notifyAll();
         }
         SystemServer.log("starting a process for " + packageName + " (" + reason + "): pid "
@@ -1661,16 +1697,14 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             mStarting.remove(seq);
             for (int i = mActivities.size() - 1; i >= 0; i--) {
                 ActivityRecord r = mActivities.get(i);
-                if (r.app == null && r.info.packageName.equals(pending.packageName)
-                        && componentProcess(r.info.packageName, r.info.processName).equals(pending.processName)) {
+                if (r.app == null && r.launchGeneration == pending.exitGeneration) {
                     r.launchFailed = true;
                     r.state = State.DESTROYED;
                     accountActivityFinished(r);
                     mActivities.remove(i);
                 }
             }
-            mPendingWork.removeIf(w -> w.packageName.equals(pending.packageName)
-                    && w.processName.equals(pending.processName));
+            mPendingWork.removeIf(w -> w.launchGeneration == pending.exitGeneration);
             updateIdle();
             notifyAll();
         }
@@ -1896,16 +1930,35 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
     void restartForEnabledState(ApkPackage expected, java.util.function.BooleanSupplier currentChange) {
         List<ProcessRecord> processes = new ArrayList<>();
+        java.util.Set<String> restart = new java.util.LinkedHashSet<>();
         synchronized (this) {
             // An event queued before update/uninstall cannot stop its replacement.
             if (mPm.get(expected.packageName) != expected || mPm.isRemovalPending(expected.packageName)
                     || !currentChange.getAsBoolean()) return;
             for (ProcessRecord app : mProcesses) {
                 if (expected.packageName.equals(app.packageName) && !app.exiting
-                        && !app.dead && !app.pidSuperseded) {
+                        && !app.dead && !app.pidSuperseded
+                        && (app.enabledProcessLifetime == null || !app.enabledProcessLifetime.getAsBoolean())) {
                     processes.add(app);
                 }
             }
+            for (Map.Entry<Long, PendingProcess> entry : new ArrayList<>(mStarting.entrySet())) {
+                PendingProcess pending = entry.getValue();
+                if (pending.owner != expected || pending.enabledLifetime == null
+                        || pending.enabledLifetime.getAsBoolean()) continue;
+                pending.cancelled = true;
+                mStarting.remove(entry.getKey());
+                mExitStatus.unavailable(pending.exitGeneration);
+                if (pending.pid > 0) Zygote.killChild(pending.pid, pending.nativeStartTime);
+                for (ActivityRecord activity : mActivities) {
+                    if (activity.app == null && activity.launchGeneration == pending.exitGeneration
+                            && activityEnabled(activity)) activity.launchGeneration = null;
+                }
+                for (PendingWork work : mPendingWork) {
+                    if (work.launchGeneration == pending.exitGeneration) work.launchGeneration = null;
+                }
+            }
+            notifyAll();
         }
         for (ProcessRecord app : processes) {
             synchronized (this) {
@@ -1914,11 +1967,19 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 if (mPm.get(expected.packageName) != expected || mPm.isRemovalPending(expected.packageName)
                         || !currentChange.getAsBoolean()) return;
                 if (!mProcesses.contains(app) || app.exiting || app.dead || app.pidSuperseded
-                        || attachedProcessByPid(app.pid) != app) continue;
+                        || attachedProcessByPid(app.pid) != app
+                        || app.enabledProcessLifetime != null && app.enabledProcessLifetime.getAsBoolean()) continue;
                 // As cached retirement, keep recovery for still-enabled services.
                 app.reaped = true;
                 app.recoverAfterPidSupersession = false;
                 app.exiting = true;
+                for (ActivityRecord activity : new ArrayList<>(app.activities)) {
+                    if (activity.state == State.INITIALIZING && !activity.finishing && activityEnabled(activity)) {
+                        app.activities.remove(activity);
+                        activity.app = null;
+                        activity.launchGeneration = null;
+                    }
+                }
                 // Native code checks and terminates the same retained child handle
                 // under its registry lock. No PID reopen can hit a new OS process;
                 // holding ATM here also excludes logical attachment supersession.
@@ -1929,6 +1990,17 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             try { app.thread.scheduleExit(); }
             catch (RemoteException ignored) { }
         }
+        synchronized (this) {
+            if (mPm.get(expected.packageName) != expected || mPm.isRemovalPending(expected.packageName)) return;
+            for (PendingWork work : mPendingWork) {
+                if (expected.packageName.equals(work.packageName) && work.current(mPm)) restart.add(work.processName);
+            }
+            for (ActivityRecord activity : mActivities) {
+                if (activity.targetCode == expected && activity.app == null && !activity.finishing
+                        && activityEnabled(activity)) restart.add(componentProcess(expected.packageName, activity.info.processName));
+            }
+        }
+        for (String process : restart) startProcess(expected.packageName, process, "enabled-state change");
     }
 
     /** Cancel disabled admission and finish only the affected activities, even with KEEP. */
@@ -1947,18 +2019,6 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             for (ActivityRecord activity : mActivities) {
                 if (change.disables(mPm, activity.targetCode, activity.info.name, ApkPackage.ComponentKind.ACTIVITY)) finish.add(activity);
             }
-            if (change.disablesApplication(mPm)) {
-                for (Map.Entry<Long, PendingProcess> entry : new ArrayList<>(mStarting.entrySet())) {
-                    PendingProcess pending = entry.getValue();
-                    if (pending.owner != change.pkg) continue;
-                    // Removing this reservation prevents attach and frees a future enable
-                    // to start its own generation. Its watcher cannot clear newer work.
-                    mStarting.remove(entry.getKey());
-                    pending.cancelled = true;
-                    mExitStatus.unavailable(pending.exitGeneration);
-                    if (pending.pid > 0) Zygote.killChild(pending.pid, pending.nativeStartTime);
-                }
-            }
             updateIdle();
             notifyAll();
         }
@@ -1976,6 +2036,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
     /** Stable provider dependencies cannot continue using a retired provider capability. */
     void providerDependencyDied(ProcessRecord client, ApkPackage expected) {
+        boolean terminated;
         synchronized (this) {
             if (expected == null || mPm.get(expected.packageName) != expected
                     || !mProcesses.contains(client) || client.exiting || client.dead
@@ -1985,9 +2046,15 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             client.reaped = true;
             client.recoverAfterPidSupersession = false;
             client.exiting = true;
+            terminated = client.spawned && Zygote.killChild(client.pid, client.nativeStartTime);
         }
-        try { client.thread.scheduleExit(); }
-        catch (RemoteException ignored) { }
+        try { processDied(client); }
+        finally {
+            if (!terminated) {
+                try { client.thread.scheduleExit(); }
+                catch (RemoteException ignored) { }
+            }
+        }
     }
 
     /** Ends every app process (the device shuts down), waiting up to {@code waitMs}. */
@@ -2094,6 +2161,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (startSeq > 0) {
                 long deadline = SystemClock.uptimeMillis() + 5000;
                 while (started != null && started.pid == 0
+                        && pendingCurrent(started)
                         && SystemClock.uptimeMillis() < deadline) {
                     try { wait(Math.max(1, deadline - SystemClock.uptimeMillis())); }
                     catch (InterruptedException interrupted) {
@@ -2101,12 +2169,13 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                         throw new SecurityException("Interrupted process authentication");
                     }
                 }
-                if (started == null || started.cancelled || started.pid != pid || mStarting.get(startSeq) != started) {
+                if (started == null || !pendingCurrent(started) || started.pid != pid
+                        || mStarting.get(startSeq) != started) {
                     throw new SecurityException("App process does not match its start sequence");
                 }
                 ApkPackage expected = mPm.get(started.packageName);
-                if (expected == null || started.owner != expected || !expected.matchesEnabledApplication(0)) {
-                    throw new SecurityException("App process belongs to a retired or disabled package");
+                if (expected == null || started.owner != expected || mPm.isRemovalPending(started.packageName)) {
+                    throw new SecurityException("App process belongs to a retired package");
                 }
                 if (GmsSignatureSpoofing.isEnabled()
                         && (expected == null || expected.uid() != app.uid)) {
@@ -2125,6 +2194,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 app.nativeStartTime = started.nativeStartTime;
                 app.startSeq = startSeq;
                 app.exitGeneration = started.exitGeneration;
+                app.packageCode = started.owner;
+                app.enabledProcessLifetime = started.enabledLifetime;
                 app.windowMode = started.windowMode;
                 app.windowModeExplicit = started.windowModeExplicit;
                 waiting = started.packageName;
@@ -2191,11 +2262,15 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             app.markActive(SystemClock.uptimeMillis());
             app.ready = true;
             for (ActivityRecord r : app.activities) {
-                if (r.state == State.INITIALIZING && r.waitingFor == null) launch.add(r);
+                if (r.state == State.INITIALIZING && r.waitingFor == null
+                        && (app.enabledProcessLifetime == null || app.enabledProcessLifetime.getAsBoolean())) launch.add(r);
             }
             for (int i = 0; i < mPendingWork.size(); i++) {
                 PendingWork w = mPendingWork.get(i);
-                if (w.packageName.equals(app.packageName) && w.processName.equals(app.processName)) {
+                if (w.packageName.equals(app.packageName) && w.processName.equals(app.processName)
+                        && (!w.current(mPm) || (app.enabledProcessLifetime == null
+                            || app.enabledProcessLifetime.getAsBoolean())
+                            && (w.launchGeneration == null || w.launchGeneration == app.exitGeneration))) {
                     work.add(w);
                     mPendingWork.remove(i--);
                 }
@@ -2205,7 +2280,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         SystemServer.log("finishAttachApplication: " + app);
         for (ActivityRecord r : launch) realStartActivity(r);
         for (PendingWork w : work) {
-            if (!app.exiting && !app.dead && w.current(mPm)) w.work.accept(app);
+            if (!app.exiting && !app.dead && w.current(mPm)
+                    && (app.enabledProcessLifetime == null || app.enabledProcessLifetime.getAsBoolean())) w.work.accept(app);
             else w.canceled.run();
         }
     }
@@ -2249,6 +2325,13 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 app = processFor(packageName, processName);
                 dispatchNow = app != null && app.ready;
                 if (!dispatchNow) {
+                    for (PendingProcess started : mStarting.values()) {
+                        if (pendingCurrent(started) && started.packageName.equals(packageName)
+                                && started.processName.equals(processName)) {
+                            pending.launchGeneration = started.exitGeneration;
+                            break;
+                        }
+                    }
                     mPendingWork.add(pending);
                     updateIdle();
                     SystemServer.log("waiting for a process of " + packageName);
@@ -2262,7 +2345,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         } else if (app == null) {
             startProcess(packageName, processName, reason);
         } else if (dispatchNow) {
-            if (!app.exiting && !app.dead && pending.current(mPm)) work.accept(app);
+            if (!app.exiting && !app.dead && pending.current(mPm)
+                    && (app.enabledProcessLifetime == null || app.enabledProcessLifetime.getAsBoolean())) work.accept(app);
             else canceled.run();
         }
     }
@@ -2275,9 +2359,14 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     private void bindApplication(ProcessRecord app) {
+        // DONT_KILL_APP also retains an already admitted child which has not yet
+        // attached. Bind that child normally; current provider/component queries
+        // exclude disabled work without leaving its application thread unbound.
         ApplicationInfo ai = mPm.getApplicationInfo(app.packageName,
-                PackageManager.GET_META_DATA | PackageManager.GET_SHARED_LIBRARY_FILES, 0);
-        if (ai == null || !ai.enabled) return;
+                PackageManager.GET_META_DATA | PackageManager.GET_SHARED_LIBRARY_FILES
+                        | PackageManager.MATCH_DISABLED_COMPONENTS, 0);
+        if (ai == null || app.packageCode != mPm.get(app.packageName) || mPm.isRemovalPending(app.packageName)
+                || app.enabledProcessLifetime != null && !app.enabledProcessLifetime.getAsBoolean()) return;
         ai = new ApplicationInfo(ai);
         ai.processName = app.processName;
         Configuration config = LocaleManagerService.configurationFor(app.packageName);
@@ -2285,7 +2374,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             app.config = config;
         }
         try {
-            mAm.bindApplication(app.thread, ai, config);
+            mAm.bindApplication(app, ai, config);
             SystemServer.log("bindApplication: " + app);
         } catch (Throwable e) {
             // Reported to the caller (an exception crosses binder), not fatal to the server.
@@ -2417,7 +2506,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
         boolean current;
         synchronized (this) {
-            current = mActivities.contains(r) && r.state != State.DESTROYED && activityCodeCurrent(r)
+            if (!mActivities.contains(r) || r.finishing || r.state != State.INITIALIZING) return;
+            if (r.app == null || r.app.exiting || r.app.dead
+                    || r.app.enabledProcessLifetime != null && !r.app.enabledProcessLifetime.getAsBoolean()) return;
+            current = activityCodeCurrent(r)
                     && (r.sourceLifetime == null || r.sourceLifetime.getAsBoolean());
         }
         if (!current) {
@@ -2700,6 +2792,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
      */
     private void resume(ActivityRecord r) {
         if (!activityEnabled(r)) { finishDisabledActivity(r); return; }
+        synchronized (this) {
+            if (!mActivities.contains(r) || r.finishing || r.app == null || r.app.exiting || r.app.dead
+                    || r.app.enabledProcessLifetime != null && !r.app.enabledProcessLifetime.getAsBoolean()) return;
+        }
         List<ResultInfo> results = takeResults(r);
         ClientTransaction t = new ClientTransaction(r.app.thread);
         // The configuration changed while it was not in front (ActivityRecord's

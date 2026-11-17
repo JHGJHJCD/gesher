@@ -63,6 +63,30 @@ final class ContentProviders {
     private final Map<String, ActivityTaskManagerService.ProcessRecord> mPublishedBy =
             new HashMap<>();
     private final Map<String, ApkPackage> mPublishedCode = new HashMap<>();
+    /** Actual bindApplication/scheduleInstallProvider admissions, by process incarnation. */
+    private final Map<ActivityTaskManagerService.ProcessRecord, Map<String, ProviderInstall>> mInstalling = new HashMap<>();
+    private final Set<ProviderRequest> mRequests = new HashSet<>();
+
+    private static final class ProviderInstall {
+        final ApkPackage owner;
+        final ProviderInfo info;
+        volatile boolean retired;
+        ProviderInstall(ApkPackage owner, ProviderInfo info) { this.owner = owner; this.info = info; }
+    }
+
+    private static final class ProviderRequest {
+        final ApkPackage owner;
+        final ProviderInfo info;
+        volatile boolean canceled;
+        ProviderInstall installation;
+        ProviderRequest(ApkPackage owner, ProviderInfo info) { this.owner = owner; this.info = info; }
+    }
+
+    private boolean current(ProviderInstall install) {
+        return install != null && !install.retired && mPm.get(install.owner.packageName) == install.owner
+                && !mPm.isRemovalPending(install.owner.packageName)
+                && install.owner.componentEnabled(install.info.name, ApkPackage.ComponentKind.PROVIDER);
+    }
     /** Keep acquisition ownership per authority, so removing one provider preserves peers. */
     private final Map<String, Set<ActivityTaskManagerService.ProcessRecord>> mClients = new HashMap<>();
     /** The reference-counted connections, by their Binder (ContentProviderHolder.connection). */
@@ -176,6 +200,10 @@ final class ContentProviders {
 
     /** The providers a process of {@code ai}'s package installs at bindApplication. */
     List<ProviderInfo> providersFor(ApplicationInfo ai) {
+        return providersFor(null, ai);
+    }
+
+    List<ProviderInfo> providersFor(ActivityTaskManagerService.ProcessRecord app, ApplicationInfo ai) {
         ApkPackage p = mPm.get(ai.packageName);
         if (p == null) return List.of();
         List<ProviderInfo> result = new ArrayList<>();
@@ -184,6 +212,21 @@ final class ContentProviders {
                 | PackageManager.GET_SHARED_LIBRARY_FILES)) {
             if (processName.equals(mAtm.componentProcess(info.packageName, info.processName))) {
                 result.add(info);
+            }
+        }
+        if (app != null) synchronized (this) {
+            if (app.exiting || app.dead || app.packageCode != p
+                    || mPm.get(p.packageName) != p || mPm.isRemovalPending(p.packageName)) return List.of();
+            Map<String, ProviderInstall> installing = mInstalling.computeIfAbsent(app, ignored -> new HashMap<>());
+            result.removeIf(info -> !p.componentEnabled(info.name, ApkPackage.ComponentKind.PROVIDER));
+            for (ProviderInfo info : result) {
+                ProviderInstall install = new ProviderInstall(p, info);
+                installing.put(info.name, install);
+                for (ProviderRequest request : mRequests) {
+                    if (!request.canceled && request.owner == p && request.info.name.equals(info.name)) {
+                        request.installation = install;
+                    }
+                }
             }
         }
         return result;
@@ -210,19 +253,29 @@ final class ContentProviders {
         if (SettingsProvider.AUTHORITY.equals(name)) {
             return mSettings.holder();
         }
-        ProviderInfo declared = null;
-        long deadline = 0;
-        java.util.concurrent.atomic.AtomicBoolean canceled = new java.util.concurrent.atomic.AtomicBoolean();
-        while (true) {
-            if (canceled.get()) return null;
+        final ProviderInfo declared;
+        final ApkPackage declaredCode;
+        synchronized (mPm) {
             declared = declaredProvider(mPm, name);
             if (declared == null) return null;
-            ApkPackage declaredCode = mPm.get(declared.packageName);
+            declaredCode = mPm.get(declared.packageName);
+        }
+        if (declaredCode == null) return null;
+        ProviderRequest request = new ProviderRequest(declaredCode, declared);
+        long deadline = 0;
+        synchronized (this) { mRequests.add(request); }
+        try {
+        while (true) {
+            if (request.canceled || mPm.get(declared.packageName) != declaredCode
+                    || mPm.isRemovalPending(declared.packageName)) return null;
+            ProviderInfo current = declaredProvider(mPm, name);
+            if (current == null || !declared.packageName.equals(current.packageName)
+                    || !declared.name.equals(current.name)) return null;
             enforceAccess(actualPackage, declared);
             Set<ActivityTaskManagerService.ProcessRecord> live = new HashSet<>(mAtm.processes());
             synchronized (this) {
-                if (declaredCode == null || mPm.get(declared.packageName) != declaredCode
-                        || !declaredCode.componentEnabled(declared.name, ApkPackage.ComponentKind.PROVIDER)) continue;
+                if (request.canceled || mPm.get(declared.packageName) != declaredCode
+                        || !declaredCode.componentEnabled(declared.name, ApkPackage.ComponentKind.PROVIDER)) return null;
                 if (caller != null && (caller.exiting || caller.dead)) {
                     throw new SecurityException("Content provider caller retired before acquisition");
                 }
@@ -259,6 +312,15 @@ final class ContentProviders {
                     }
                     return h;
                 }
+                if (request.installation == null) {
+                    for (ActivityTaskManagerService.ProcessRecord owner : live) {
+                        ProviderInstall install = mInstalling.getOrDefault(owner, Map.of()).get(declared.name);
+                        if (install != null && install.owner == declaredCode && current(install)) {
+                            request.installation = install;
+                            break;
+                        }
+                    }
+                }
                 if (deadline != 0) {
                     long left = deadline - SystemClock.uptimeMillis();
                     if (left <= 0) {
@@ -282,19 +344,64 @@ final class ContentProviders {
             if (caller != null && declared.packageName.equals(caller.packageName)
                     && mAtm.componentProcess(declared.packageName, declared.processName)
                             .equals(mAtm.componentProcess(caller.packageName, caller.processName))) {
-                ContentProviderHolder local = new ContentProviderHolder(declared);
-                local.mLocal = true;
-                local.noReleaseNeeded = true;
-                return local;
+                synchronized (this) {
+                    if (request.canceled || caller.exiting || caller.dead
+                            || mPm.get(declared.packageName) != declaredCode
+                            || !declaredCode.componentEnabled(declared.name, ApkPackage.ComponentKind.PROVIDER)) return null;
+                    mInstalling.computeIfAbsent(caller, ignored -> new HashMap<>())
+                            .computeIfAbsent(declared.name, ignored -> new ProviderInstall(declaredCode, declared));
+                    ContentProviderHolder local = new ContentProviderHolder(declared);
+                    local.mLocal = true;
+                    local.noReleaseNeeded = true;
+                    return local;
+                }
             }
             // Its process publishes it once it is bound (bindApplication installs it).
             SystemServer.log("getContentProvider " + name + " from " + callingPackage
                     + ": declared by " + declared.packageName + ", waiting for its process");
             deadline = SystemClock.uptimeMillis() + PUBLISH_TIMEOUT_MS;
             mAtm.withProcess(declaredCode, declared.name, ApkPackage.ComponentKind.PROVIDER,
-                    declared.processName, "provider " + name, app -> { }, () -> {
-                        synchronized (ContentProviders.this) { canceled.set(true); notifyAll(); }
+                    declared.processName, "provider " + name, app -> installProvider(app, request), () -> {
+                        synchronized (ContentProviders.this) { request.canceled = true; notifyAll(); }
                     });
+        }
+        } finally {
+            synchronized (this) { mRequests.remove(request); }
+        }
+    }
+
+    /** A provider can be enabled after its process has already bound its application. */
+    private void installProvider(ActivityTaskManagerService.ProcessRecord app, ProviderRequest request) {
+        ProviderInstall install;
+        synchronized (this) {
+            if (request.canceled || app.exiting || app.dead || app.packageCode != request.owner
+                    || mPm.get(request.owner.packageName) != request.owner
+                    || mPm.isRemovalPending(request.owner.packageName)
+                    || !request.owner.componentEnabled(request.info.name, ApkPackage.ComponentKind.PROVIDER)) {
+                request.canceled = true; notifyAll(); return;
+            }
+            Map<String, ProviderInstall> installing = mInstalling.computeIfAbsent(app, ignored -> new HashMap<>());
+            ProviderInstall existing = installing.get(request.info.name);
+            if (current(existing)) { request.installation = existing; return; }
+            install = new ProviderInstall(request.owner, request.info);
+            installing.put(request.info.name, install);
+            request.installation = install;
+        }
+        try {
+            if (current(install) && !app.exiting && !app.dead) app.thread.scheduleInstallProvider(request.info);
+        } catch (RemoteException | RuntimeException failure) {
+            synchronized (this) {
+                install.retired = true;
+                Map<String, ProviderInstall> installing = mInstalling.get(app);
+                if (installing != null) {
+                    installing.remove(request.info.name, install);
+                    if (installing.isEmpty()) mInstalling.remove(app);
+                }
+                for (ProviderRequest waiting : mRequests) {
+                    if (waiting.installation == install) waiting.canceled = true;
+                }
+                notifyAll();
+            }
         }
     }
 
@@ -310,18 +417,25 @@ final class ContentProviders {
             throw new SecurityException("Provider publisher identity mismatch");
         }
         ApkPackage pkg = mPm.get(app.packageName);
-        if (pkg == null) throw new SecurityException("Uninstalled provider publisher");
+        if (pkg == null || app.packageCode != pkg) return;
+        Map<String, ProviderInstall> installing;
+        synchronized (this) { installing = new HashMap<>(mInstalling.getOrDefault(app, Map.of())); }
         List<ContentProviderHolder> checked = new ArrayList<>();
+        List<ProviderInstall> admissions = new ArrayList<>();
         Set<String> batch = new HashSet<>();
-        for (ContentProviderHolder supplied : providers) {
+        publication: for (ContentProviderHolder supplied : providers) {
             if (supplied == null || supplied.info == null || supplied.provider == null
                     || supplied.provider.asBinder() == null) {
-                throw new SecurityException("Incomplete provider publication");
+                continue;
             }
             ProviderInfo info = supplied.info;
+            ProviderInstall admission = installing.get(info.name);
+            // The process no longer owns a pending provider record after cleanup.
+            // A late publish cannot recreate it or turn an ordinary race into a crash.
+            if (!current(admission) || admission.owner != pkg) continue;
             ProviderInfo declared = null;
             for (ProviderInfo candidate : pkg.providers(PackageManager.GET_META_DATA
-                    | PackageManager.GET_SHARED_LIBRARY_FILES)) {
+                    | PackageManager.GET_SHARED_LIBRARY_FILES | PackageManager.MATCH_DISABLED_COMPONENTS)) {
                 if (candidate.name.equals(info.name)) { declared = candidate; break; }
             }
             if (declared == null || !pkg.packageName.equals(info.packageName)
@@ -339,6 +453,7 @@ final class ContentProviders {
                 ProviderInfo canonical = declaredProvider(mPm, authority);
                 if (canonical == null || !pkg.packageName.equals(canonical.packageName)
                         || !declared.name.equals(canonical.name)) {
+                    if (!current(admission)) continue publication;
                     throw new SecurityException("Provider authority belongs to another component");
                 }
             }
@@ -346,16 +461,17 @@ final class ContentProviders {
             trusted.provider = supplied.provider;
             trusted.noReleaseNeeded = true;
             checked.add(trusted);
+            admissions.add(admission);
         }
         Set<ActivityTaskManagerService.ProcessRecord> live = new HashSet<>(mAtm.processes());
+        List<ContentProviderHolder> published = new ArrayList<>();
         synchronized (this) {
-            if (app.exiting || app.dead) throw new SecurityException("Provider publisher retired before publication");
+            if (app.exiting || app.dead) return;
             // Validate the entire batch before mutating any authority mapping.
-            for (ContentProviderHolder h : checked) {
-                if (mPm.get(pkg.packageName) != pkg || mPm.isRemovalPending(pkg.packageName)
-                        || !pkg.componentEnabled(h.info.name, ApkPackage.ComponentKind.PROVIDER)) {
-                    throw new SecurityException("Provider disabled or replaced before publication");
-                }
+            for (int i = 0; i < checked.size(); i++) {
+                ContentProviderHolder h = checked.get(i);
+                if (!current(admissions.get(i))
+                        || mInstalling.getOrDefault(app, Map.of()).get(h.info.name) != admissions.get(i)) continue;
                 for (String authority : h.info.authority.split(";")) {
                     ActivityTaskManagerService.ProcessRecord owner = mPublishedBy.get(authority);
                     if (owner != null && owner != app && !owner.exiting
@@ -364,16 +480,20 @@ final class ContentProviders {
                     }
                 }
             }
-            for (ContentProviderHolder h : checked) {
+            for (int i = 0; i < checked.size(); i++) {
+                ContentProviderHolder h = checked.get(i);
+                if (!current(admissions.get(i))
+                        || mInstalling.getOrDefault(app, Map.of()).get(h.info.name) != admissions.get(i)) continue;
                 for (String authority : h.info.authority.split(";")) {
                     mPublished.put(authority, h);
                     mPublishedBy.put(authority, app);
                     mPublishedCode.put(authority, pkg);
                 }
+                published.add(h);
             }
             notifyAll();
         }
-        for (ContentProviderHolder h : checked) {
+        for (ContentProviderHolder h : published) {
             SystemServer.log("publishContentProviders: " + h.info.authority + " ("
                     + h.info.name + ") in " + app);
         }
@@ -485,6 +605,13 @@ final class ContentProviders {
 
     /** The process is exiting: its providers are not handed out any more. */
     synchronized void unpublish(ActivityTaskManagerService.ProcessRecord app) {
+        Map<String, ProviderInstall> installing = mInstalling.remove(app);
+        if (installing != null) for (ProviderInstall install : installing.values()) {
+            install.retired = true;
+            for (ProviderRequest request : mRequests) {
+                if (request.installation == install) request.canceled = true;
+            }
+        }
         mPublishedBy.entrySet().removeIf(e -> {
             if (e.getValue() != app) return false;
             mPublished.remove(e.getKey());
@@ -492,11 +619,23 @@ final class ContentProviders {
             mClients.remove(e.getKey());
             return true;
         });
+        notifyAll();
     }
 
     void cleanupDisabledPackageComponents(PackageManagerService.EnabledChange change) {
         List<Connection> lost = new ArrayList<>();
         synchronized (this) {
+            for (ProviderRequest request : mRequests) {
+                if (change.disables(mPm, request.owner, request.info.name, ApkPackage.ComponentKind.PROVIDER)) request.canceled = true;
+            }
+            for (Map<String, ProviderInstall> installing : mInstalling.values()) {
+                installing.values().removeIf(install -> {
+                    if (!change.disables(mPm, install.owner, install.info.name, ApkPackage.ComponentKind.PROVIDER)) return false;
+                    install.retired = true;
+                    return true;
+                });
+            }
+            mInstalling.values().removeIf(Map::isEmpty);
             for (String authority : new ArrayList<>(mPublished.keySet())) {
                 ContentProviderHolder holder = mPublished.get(authority);
                 if (!change.disables(mPm, mPublishedCode.get(authority), holder.info.name, ApkPackage.ComponentKind.PROVIDER)) continue;
@@ -516,7 +655,7 @@ final class ContentProviders {
         for (Connection connection : lost) {
             if (connection.stable > 0) {
                 mAtm.providerDependencyDied(connection.client, connection.clientCode);
-            } else if (!connection.client.exiting && !connection.client.dead
+            } else if (connection.unstable > 0 && !connection.client.exiting && !connection.client.dead
                     && connection.clientCode != null
                     && mPm.get(connection.client.packageName) == connection.clientCode
                     && mAtm.callerProcess(connection.client.pid) == connection.client) {

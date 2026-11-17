@@ -178,6 +178,7 @@ public final class IdentitySecurityTest {
         require(processes.isEmpty(), "Rejected unknown start registered a process");
         Object expected = construct(pendingClass, new Class<?>[] {String.class, String.class, String.class}, pkg, pkg, "identity test");
         field(pendingClass, "owner").set(expected, apk);
+        field(pendingClass, "enabledLifetime").set(expected, method(apkClass, "enabledProcessLifetime").invoke(apk));
         field(pendingClass, "pid").setInt(expected, 888882);
         pending.put(914L, expected);
         denied(() -> attach.invoke(atm, thread, 888883, 914L), "start sequence");
