@@ -771,11 +771,33 @@ public final class TaskStackContractTest {
         }
     }
 
+    private static void forceStopTransientUris() throws Exception {
+        Harness h = new Harness();
+        Method service = h.tasks.getClass().getDeclaredMethod("uriGrants"); service.setAccessible(true);
+        Object grants = service.invoke(h.tasks);
+        Method grant = grants.getClass().getDeclaredMethod("grant", String.class, android.net.Uri.class, int.class, int.class);
+        grant.setAccessible(true);
+        String second = PKG + ".second", third = PKG + ".third";
+        grant.invoke(grants, PKG, android.net.Uri.parse("content://" + second + ".grants/incoming"),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION, 0);
+        grant.invoke(grants, second, android.net.Uri.parse("content://" + PKG + ".grants/outgoing"),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION, 0);
+        grant.invoke(grants, third, android.net.Uri.parse("content://" + second + ".grants/unrelated"),
+                Intent.FLAG_GRANT_READ_URI_PERMISSION, 0);
+        List<?> owned = (List<?>)get(grants, "mGrants");
+        check(owned.size() == 3, "Transient force-stop fixture did not publish three real grants");
+        ((List<?>)get(h.tasks, "mProcesses")).clear(); // Already dead package still needs URI cleanup.
+        Method stop = h.tasks.getClass().getDeclaredMethod("forceStopPackage", String.class);
+        stop.setAccessible(true); stop.invoke(h.tasks, PKG);
+        check(owned.size() == 1 && get(owned.get(0), "ownerToken") == null,
+                "Force stop leaked incoming/outgoing ownerless URI grants or removed unrelated grants");
+    }
+
     public static int run(boolean binder, String selected) throws Exception {
         realBinder = binder; checks = 0;
         if (selected.equals("all") || selected.equals("history")) { fullStack(); acceptedHistoryLifetimes(); disabledDeferredHistory(); }
         if (selected.equals("all") || selected.equals("validation")) invalidBatch();
-        if (selected.equals("all") || selected.equals("tasks")) { taskFlags(); reorderedUriOwner(); abandonedUriOwners(); processDeathUriOwners(); }
+        if (selected.equals("all") || selected.equals("tasks")) { taskFlags(); reorderedUriOwner(); abandonedUriOwners(); processDeathUriOwners(); forceStopTransientUris(); }
         if (selected.equals("all") || selected.equals("attach")) attachAndReentry();
         if (selected.equals("all") || selected.equals("visibility")) visibilityAndRemoval();
         if (selected.equals("all") || selected.equals("permissions")) permissions();

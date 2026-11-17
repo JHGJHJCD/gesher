@@ -2167,6 +2167,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     void forceStopPackage(String packageName) {
         List<ProcessRecord> stop = new ArrayList<>();
         synchronized (this) {
+            // Force stop removes transient grants both from and to the package,
+            // including ownerless grants and packages with no live process.
+            // Do this before teardown callbacks can admit a replacement.
+            if (mAm != null && mAm.uriGrants() != null) mAm.uriGrants().clear(packageName);
             mPendingWork.removeIf(work -> packageName.equals(work.packageName));
             // Service teardown can synchronously report process death. Retire
             // captured activities first so saved state cannot turn an explicit
