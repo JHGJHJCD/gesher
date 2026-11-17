@@ -568,6 +568,16 @@ public final class ActivityManagerService extends IActivityManager.Default {
         return mAtm.startActivityForVerifiedCreator(packageName, intent, resolvedType, lifetime, shareIdentity);
     }
 
+    int startActivitiesFor(String packageName, Intent[] intents, String[] resolvedTypes,
+            java.util.function.BooleanSupplier lifetime, boolean shareIdentity, Bundle options) {
+        if (!lifetime.getAsBoolean()) return ActivityManager.START_CANCELED;
+        intents[0].addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        android.app.ActivityOptions launch = options == null ? android.app.ActivityOptions.makeBasic()
+                : android.app.ActivityOptions.fromBundle(options);
+        return mAtm.startActivitiesForVerifiedCreator(packageName, intents, resolvedTypes, lifetime,
+                launch.setShareIdentityEnabled(shareIdentity).toBundle());
+    }
+
     void startServiceFor(String packageName, Intent intent, String resolvedType,
             boolean foreground) {
         startServiceFor(packageName, intent, resolvedType, foreground, () -> true);

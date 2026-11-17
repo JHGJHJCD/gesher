@@ -227,6 +227,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         boolean stopWhenIdle;
         /** Results for it (ActivityResultItem), sent when it is resumed. */
         final List<ResultInfo> pendingResults = new ArrayList<>();
+        /** Intents delivered to a history record before its first client launch. */
+        final List<ReferrerIntent> pendingNewIntents = new ArrayList<>();
         /** The state it saved when it was last stopped. */
         Bundle savedState;
         /**
@@ -237,6 +239,12 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         boolean translucent;
         /** Resumed once the activity in front ({@link #waitingFor}) is paused. */
         boolean resumeAfterPause;
+        /** Identity of the launch batch that created this record; never reused for another batch. */
+        Object batchOwner;
+        /** Published task history; no app instance/process is needed until it is visible. */
+        boolean deferredHistory;
+        boolean historyEntry;
+        boolean launchScheduled;
         /**
          * The configuration it was launched or relaunched with, or told of last: its
          * package's (locale track: LocaleManagerService.configurationFor) with its task's size
@@ -570,15 +578,20 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             }
         };
         return mAm.pendingIntents().sendActivity(target, fillIn, resolvedType, options,
-                (creator, intent, type, creatorLive, shareIdentity) -> {
+                (creator, intents, types, creatorLive, shareIdentity, mergedOptions) -> {
             // URI grant authority cannot be added through flagsMask, including for
             // an otherwise immutable capability. The ordinary fill-in policy stays
             // in PendingIntents alongside one-shot and creator-generation checks.
             int mask = flagsMask & ~Intent.IMMUTABLE_FLAGS;
+            Intent intent = intents[intents.length - 1];
             intent.setFlags((intent.getFlags() & ~mask) | (flagsValues & mask));
-            return startActivityForVerifiedCreator(creator, intent, type,
-                    creatorLive, resultTo, resultWho, requestCode,
-                    activityOptions(options, shareIdentity), callerLive);
+            Bundle launchOptions = activityOptions(mergedOptions, shareIdentity);
+            if (intents.length > 1) {
+                return withVerifiedCreator(creator, creatorLive, callerLive,
+                        () -> startActivities(null, creator, null, intents, types, resultTo, launchOptions, 0));
+            }
+            return startActivityForVerifiedCreator(creator, intent, types[0],
+                    creatorLive, resultTo, resultWho, requestCode, launchOptions, callerLive);
         });
     }
 
@@ -606,6 +619,17 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         return options != null && android.app.ActivityOptions.fromBundle(options).isShareIdentityEnabled();
     }
 
+    /** SafeActivityOptions checks task-placement authority for each options supplier. */
+    static void checkLaunchTaskOptions(Bundle options, PackageManagerService packages,
+            String packageName, boolean system) {
+        if (options == null || android.app.ActivityOptions.fromBundle(options).getLaunchTaskId()
+                == ActivityTaskManager.INVALID_TASK_ID || system) return;
+        if (packageName == null || packages.permissions().checkPermission(packageName,
+                "android.permission.START_TASKS_FROM_RECENTS") != PackageManager.PERMISSION_GRANTED) {
+            throw new SecurityException("launchTaskId requires START_TASKS_FROM_RECENTS");
+        }
+    }
+
     private static Bundle activityOptions(Bundle options, boolean shareIdentity) {
         android.app.ActivityOptions parsed = options == null
                 ? android.app.ActivityOptions.makeBasic() : android.app.ActivityOptions.fromBundle(options);
@@ -613,29 +637,111 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     /**
-     * A stack of activities (TaskStackBuilder, PendingIntent.getActivities), lite: the
-     * last one, the one in front, is started, in a task of its own when the first intent
-     * asks for a new task. ActivityStarter records the ones below it and creates them when
-     * the user goes back; here they are left out, so going back leaves the app
-     * (docs/e2e.md).
+     * ActivityStartController.startActivities: publish history before realizing the
+     * visible activities. In an opaque stack only the final activity is created;
+     * Back realizes each preceding record when it first becomes visible.
      */
     @Override
     public int startActivities(IApplicationThread caller, String callingPackage,
             String callingFeatureId, Intent[] intents, String[] resolvedTypes, IBinder resultTo,
             Bundle options, int userId) {
-        if (intents == null || intents.length == 0) return ActivityManager.START_SUCCESS;
-        int last = intents.length - 1;
-        Intent intent = new Intent(intents[last]);
-        intent.addFlags(intents[0].getFlags() & Intent.FLAG_ACTIVITY_NEW_TASK);
-        if (last > 0) {
-            SystemServer.log("startActivities: " + intents.length + " activities; starting the"
-                    + " last, " + intent.toShortString(false, true, true, false)
-                    + " (the ones below are not recorded)");
+        java.util.Objects.requireNonNull(intents, "intents is null");
+        java.util.Objects.requireNonNull(resolvedTypes, "resolvedTypes is null");
+        if (resolvedTypes.length != intents.length) {
+            throw new IllegalArgumentException("intents are length different than resolvedTypes");
         }
-        ActivityRecord[] started = new ActivityRecord[1];
-        return start(caller, intent, resolvedTypes != null ? resolvedTypes[last] : null,
-                callingPackage, resultTo, null, -1, launchTaskId(options), shareIdentity(options), started);
+        if (userId != 0) throw new SecurityException("Only user 0 is available");
+        // Validate descriptors before publishing any activity, as AOSP does.
+        List<Intent> members = new ArrayList<>(intents.length);
+        for (Intent intent : intents) {
+            if (intent == null) continue;
+            if (intent.hasFileDescriptors()) {
+                throw new IllegalArgumentException("File descriptors passed in Intent");
+            }
+            members.add(new Intent(intent));
+        }
+        // PendingIntents separately checks the original creator and sender option
+        // suppliers before dispatch clears Binder identity. Direct calls check here.
+        if (mVerifiedCreator.get() == null) {
+            boolean system = mAm != null && mAm.callers().isSystem();
+            checkLaunchTaskOptions(options, mPm,
+                    system ? callingPackage : mAm.callers().requirePackage(callingPackage), system);
+        }
+        Object batchOwner = new Object();
+        java.util.LinkedHashSet<Integer> tasks = new java.util.LinkedHashSet<>();
+        IBinder nextSource = resultTo;
+        String creator = mVerifiedCreator.get();
+        ApkPackage creatorCode = creator == null ? null : mPm.get(creator);
+        int sourceUid = creatorCode != null ? creatorCode.uid()
+                : creator != null ? android.os.Process.SYSTEM_UID : Binder.getCallingUid();
+        final boolean sharedIdentity = shareIdentity(options);
+        ActivityRecord[] created = new ActivityRecord[1];
+        synchronized (this) { mStackPublications++; }
+        try {
+            // Serialize publication with ordinary starts, without holding the
+            // lifecycle monitor while package resolution/URI checks take locks.
+            synchronized (mLaunchLock) {
+                for (int i = 0; i < members.size(); i++) {
+                    Intent member = members.get(i);
+                    created[0] = null;
+                    StackLaunch previous = mStackLaunch.get();
+                    mStackLaunch.set(new StackLaunch(member, batchOwner));
+                    int result;
+                    try {
+                        result = start(caller, member, resolvedTypes[i], callingPackage,
+                                nextSource, null, -1, i == members.size() - 1 ? launchTaskId(options) : -1,
+                                i == members.size() - 1 && sharedIdentity, created);
+                    } finally {
+                        if (previous == null) mStackLaunch.remove(); else mStackLaunch.set(previous);
+                    }
+                    if (created[0] != null) tasks.add(created[0].taskId);
+                    if (result < ActivityManager.START_SUCCESS) return result;
+                    ActivityRecord activity = created[0];
+                    if (activity != null && activity.info.applicationInfo.uid == sourceUid) {
+                        nextSource = activity.token;
+                    } else {
+                        nextSource = resultTo;
+                        if (i + 1 < members.size()) members.get(i + 1).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    }
+                }
+            }
+            return ActivityManager.START_SUCCESS;
+        } finally {
+            synchronized (this) {
+                mStackPublications--;
+                for (ActivityRecord record : mActivities) {
+                    if (record.batchOwner == batchOwner) {
+                        record.batchOwner = null;
+                        // Each member already passed creator/capability admission.
+                        // Accepted task history belongs to its target; a later
+                        // creator update must not erase its uninstantiated parents.
+                        // Target generation checks still run when history is realized.
+                        record.sourceLifetime = null;
+                        tasks.add(record.taskId);
+                    }
+                    if (mStackPublications == 0 && record.deferredHistory) tasks.add(record.taskId);
+                }
+            }
+            // Android may leave a successfully published prefix after a failed
+            // member. Do not destroy old tasks or pretend the batch is atomic.
+            for (int task : tasks) realizeTaskHistory(task);
+        }
     }
+
+    /** Scoped only to this exact member Intent: reentrant starts cannot inherit the batch. */
+    private static final class StackLaunch {
+        final Intent intent;
+        final Object owner;
+        StackLaunch(Intent intent, Object owner) {
+            this.intent = intent;
+            this.owner = owner;
+        }
+    }
+    private final ThreadLocal<StackLaunch> mStackLaunch = new ThreadLocal<>();
+    private final Object mLaunchLock = new Object();
+    private int mStackPublications; // Guarded by this; callbacks cannot realize a half-published stack.
+    private final java.util.LinkedHashSet<Integer> mHistoryToRealize = new java.util.LinkedHashSet<>();
+    private boolean mRealizingHistory; // Drain reentrant lifecycle work without recursive launches.
 
     @Override
     public WaitResult startActivityAndWait(IApplicationThread caller, String callingPackage,
@@ -777,10 +883,11 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
         if (toFinish.isEmpty()) return false;
         SystemServer.log("removing task " + taskId);
-        // Top first, as the task's activities are finished.
-        for (int i = toFinish.size() - 1; i >= 0; i--) {
-            finish(toFinish.get(i), "remove-task", android.app.Activity.RESULT_CANCELED, null);
-        }
+        java.util.Collections.reverse(toFinish);
+        // Retire the complete history before a fast pause callback can expose
+        // and instantiate a parent from the task being removed.
+        finishTogether(toFinish.get(0), toFinish, "remove-task",
+                android.app.Activity.RESULT_CANCELED, null);
         return true;
     }
 
@@ -871,6 +978,21 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     private int startActivityForVerifiedCreator(String packageName, Intent intent, String resolvedType,
             java.util.function.BooleanSupplier lifetime, IBinder resultTo, String resultWho,
             int requestCode, Bundle options, java.util.function.BooleanSupplier publication) {
+        return withVerifiedCreator(packageName, lifetime, publication,
+                () -> start(null, intent, resolvedType, packageName, resultTo, resultWho, requestCode,
+                        launchTaskId(options), shareIdentity(options), new ActivityRecord[1]));
+    }
+
+    int startActivitiesForVerifiedCreator(String packageName, Intent[] intents, String[] resolvedTypes,
+            java.util.function.BooleanSupplier lifetime, Bundle options) {
+        return withVerifiedCreator(packageName, lifetime, null, () -> intents.length == 1
+                ? start(null, intents[0], resolvedTypes[0], packageName, null, null, -1,
+                        launchTaskId(options), shareIdentity(options), new ActivityRecord[1])
+                : startActivities(null, packageName, null, intents, resolvedTypes, null, options, 0));
+    }
+
+    private int withVerifiedCreator(String packageName, java.util.function.BooleanSupplier lifetime,
+            java.util.function.BooleanSupplier publication, java.util.function.IntSupplier launch) {
         if (Binder.getCallingPid() != android.os.Process.myPid()
                 || mPm.get(packageName) == null && !"android".equals(packageName)) {
             throw new SecurityException("Only a validated local capability may supply a creator");
@@ -886,8 +1008,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         mVerifiedLifetime.set(lifetime);
         mVerifiedPublication.set(publication);
         try {
-            return start(null, intent, resolvedType, packageName, resultTo, resultWho, requestCode,
-                    launchTaskId(options), shareIdentity(options), new ActivityRecord[1]);
+            return launch.getAsInt();
         } finally {
             if (previous == null) mVerifiedCreator.remove(); else mVerifiedCreator.set(previous);
             if (oldLifetime == null) mVerifiedLifetime.remove(); else mVerifiedLifetime.set(oldLifetime);
@@ -948,6 +1069,15 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     private int start(IApplicationThread caller, Intent intent, String resolvedType,
+            String callingPackage, IBinder resultToToken, String resultWho, int requestCode,
+            int launchTaskId, boolean shareIdentity, ActivityRecord[] started) {
+        synchronized (mLaunchLock) {
+            return startSerialized(caller, intent, resolvedType, callingPackage, resultToToken,
+                    resultWho, requestCode, launchTaskId, shareIdentity, started);
+        }
+    }
+
+    private int startSerialized(IApplicationThread caller, Intent intent, String resolvedType,
             String callingPackage, IBinder resultToToken, String resultWho, int requestCode,
             int launchTaskId, boolean shareIdentity, ActivityRecord[] started) {
         final int originalPid = Binder.getCallingPid();
@@ -1159,12 +1289,16 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             callerSnapshot = ActivityCallerState.capture(origin, launch, mAm.uriGrants());
         }
         int callingPid = Binder.getCallingPid();
-        int launchFlags = intent.getFlags();
         ActivityRecord source = resultToToken != null ? forToken(resultToToken) : null;
+        StackLaunch stack = mStackLaunch.get();
+        boolean publishHistory = stack != null && stack.intent == intent;
+        int launchFlags = publishHistory ? historyLaunchFlags(info, intent, source) : intent.getFlags();
+        launch.setFlags(launchFlags);
         // Whether it leaves the activity below it visible (its theme), read before the lock.
         boolean translucent = ActivityTheme.isTranslucentOrFloating(info);
         ActivityRecord r = null;
         ActivityRecord deliverTo = null;
+        ActivityRecord reusedTaskTop = null;
         List<ActivityRecord> clearTop = new ArrayList<>();
         ActivityRecord pause = null;
         ProcessRecord bind = null;
@@ -1192,30 +1326,54 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             // startActivityIntentSender authenticated this result activity before
             // clearing Binder identity. Creator authority still controls the target;
             // window visibility follows the live recipient that requested its UI.
-            boolean delegatedResult = internalCreator && source != null;
-            sourceWindowMode = sourceWindowMode(delegatedResult ? source.app.thread : caller,
+            boolean delegatedResult = internalCreator && source != null && source.app != null;
+            sourceWindowMode = publishHistory && source != null && source.batchOwner == stack.owner
+                    ? source.inheritedWindowMode : sourceWindowMode(delegatedResult ? source.app.thread : caller,
                     delegatedResult ? source.info.packageName : callingPackage, source,
                     delegatedResult ? source.app.pid : callingPid,
                     resultToToken == null, info.packageName,
                     componentProcess(info.packageName, info.processName));
-            int taskId = launchTaskId >= 0 && topOf(launchTaskId) != null ? launchTaskId
+            int taskId = publishHistory ? historyTaskId(info, launch, source, launchTaskId)
+                    : launchTaskId >= 0 && topOf(launchTaskId) != null ? launchTaskId
                     : source != null && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0
                     ? source.taskId : mNextTaskId++;
             ActivityRecord top = topOf(taskId);
+            boolean clearTask = publishHistory && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+                    && (launchFlags & Intent.FLAG_ACTIVITY_CLEAR_TASK) != 0;
+            if (clearTask) {
+                for (int i = mActivities.size() - 1; i >= 0; i--) {
+                    ActivityRecord activity = mActivities.get(i);
+                    if (activity.taskId == taskId && !activity.finishing) clearTop.add(activity);
+                }
+                top = null;
+            }
+            boolean documentIntoExisting = publishHistory
+                    && (launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0
+                    && (launchFlags & Intent.FLAG_ACTIVITY_MULTIPLE_TASK) == 0;
             boolean singleTop = mAccountCompletion.get() == null
                     && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TOP
+                    || publishHistory && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
+                            || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
+                            || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK)
+                    || documentIntoExisting
                     || (launchFlags & Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0);
-            ActivityRecord below = (launchFlags & Intent.FLAG_ACTIVITY_CLEAR_TOP) != 0
-                    && singleTop ? belowInTask(taskId, launch.getComponent()) : null;
-            if (top != null && top.app != null && top.component().equals(launch.getComponent())
+            boolean clearToInstance = (launchFlags & Intent.FLAG_ACTIVITY_CLEAR_TOP) != 0
+                    || documentIntoExisting
+                    || publishHistory && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
+                            || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
+                            || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK);
+            ActivityRecord below = !clearTask && clearToInstance
+                    && (singleTop || publishHistory) ? belowInTask(taskId, launch.getComponent()) : null;
+            ActivityRecord reordered = publishHistory && !clearTask && !clearToInstance
+                    && (launchFlags & Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) != 0
+                    ? belowInTask(taskId, launch.getComponent()) : null;
+            ActivityRecord taskRoot = rootOf(taskId);
+            if (top != null && activityCodeCurrent(top) && top.component().equals(launch.getComponent())
                     && singleTop) {
                 deliverTo = top;
-            } else if (below != null) {
-                // FLAG_ACTIVITY_CLEAR_TOP with singleTop (Task.performClearTop): the
-                // activities above it in the task finish and it gets the intent (AppAuth's
-                // RedirectUriReceiverActivity hands the redirect to the
-                // AuthorizationManagementActivity below it this way). Without singleTop,
-                // Android would recreate it: that start stays a plain one here.
+            } else if (below != null && singleTop) {
+                // Task.performClearTop retains a singleTop/singleTask/document
+                // destination, including one whose client has not been created.
                 deliverTo = below;
                 for (int i = mActivities.size() - 1; i >= 0; i--) {
                     ActivityRecord a = mActivities.get(i);
@@ -1224,7 +1382,28 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                         clearTop.add(a);
                     }
                 }
+            } else if (reordered != null) {
+                mActivities.remove(reordered);
+                mActivities.add(reordered);
+                deliverTo = reordered;
+            } else if (publishHistory && top != null && !clearTask && !clearToInstance
+                    && (launchFlags & Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) == 0
+                    && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+                    && launchTaskId < 0 && taskRoot != null
+                    && taskRoot.intent.filterEquals(launch)) {
+                // ActivityStarter.complyActivityFlags: a matching NEW_TASK root
+                // brings its existing task forward; it does not duplicate the root.
+                reusedTaskTop = top;
             } else {
+                if (below != null) {
+                    // Standard-mode CLEAR_TOP recreates the matching instance as
+                    // well as removing the records above it.
+                    for (int i = mActivities.size() - 1; i >= 0; i--) {
+                        ActivityRecord activity = mActivities.get(i);
+                        if (activity.taskId == taskId && !activity.finishing) clearTop.add(activity);
+                        if (activity == below) break;
+                    }
+                }
                 ActivityRecord resultRecord = requestCode >= 0 ? source : null;
                 r = new ActivityRecord(info, launch, taskId, callingPid, callingPackage,
                         resultRecord, resultWho, requestCode, targetCode);
@@ -1233,52 +1412,59 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 r.accountCompletion = mAccountCompletion.get();
                 r.inheritedWindowMode = sourceWindowMode;
                 r.translucent = translucent;
+                r.batchOwner = publishHistory ? stack.owner : null;
+                r.deferredHistory = publishHistory;
+                r.historyEntry = publishHistory;
                 // A start in a task moved to the back brings it to the front.
                 mHiddenTasks.remove(taskId);
                 // The activity in front in its task is paused first; other tasks' stay
                 // resumed (multi-resume: each visible task's top activity is resumed).
-                ActivityRecord front = front(r);
+                ActivityRecord front = publishHistory ? null : front(r);
                 mActivities.add(r);
                 updateIdle();
                 focusTaskLocked(taskId);
                 // Its orientation may turn the task's display (windows3 track).
-                if (updateRotationLocked(taskId)) {
+                if (!publishHistory && updateRotationLocked(taskId)) {
                     for (ActivityRecord a : mActivities) {
                         if (a != r && a.taskId == taskId && !a.finishing && a.app != null) {
                             reconfigure.add(a);
                         }
                     }
                 }
-                ProcessRecord app = legacyBootstrap ? originalProcess
-                        : processFor(info.packageName, componentProcess(info.packageName, info.processName));
-                if (legacyBootstrap) {
-                    assignPackage(app, info.packageName, componentProcess(info.packageName, info.processName));
-                    bind = app;
-                } else if (app == null) {
-                    app = unassignedProcess(callingPid);
-                    if (app != null) {
+                if (!publishHistory) {
+                    ProcessRecord app = legacyBootstrap ? originalProcess
+                            : processFor(info.packageName, componentProcess(info.packageName, info.processName));
+                    if (legacyBootstrap) {
                         assignPackage(app, info.packageName, componentProcess(info.packageName, info.processName));
                         bind = app;
                     }
-                }
-                if (app != null) {
-                    attach(r, app);
-                } else {
-                    needProcess = true;
-                    for (PendingProcess pending : mStarting.values()) {
-                        if (pendingCurrent(pending) && pending.packageName.equals(info.packageName)
-                                && pending.processName.equals(componentProcess(info.packageName, info.processName))) {
-                            r.launchGeneration = pending.exitGeneration; break;
+                    if (app != null) {
+                        attach(r, app);
+                    } else {
+                        needProcess = true;
+                        for (PendingProcess pending : mStarting.values()) {
+                            if (pendingCurrent(pending) && pending.packageName.equals(info.packageName)
+                                    && pending.processName.equals(componentProcess(info.packageName, info.processName))) {
+                                r.launchGeneration = pending.exitGeneration; break;
+                            }
                         }
                     }
-                }
-                if (front != null) {
-                    r.waitingFor = front;
-                    if (front.state != State.PAUSING) pause = front;
-                } else {
-                    launchNow = app != null && app.ready;
+                    if (front != null) {
+                        r.waitingFor = front;
+                        if (front.state != State.PAUSING) pause = front;
+                    } else {
+                        launchNow = r.waitingFor == null && app != null && app.ready;
+                    }
                 }
             }
+            if (deliverTo != null || reusedTaskTop != null) {
+                mHiddenTasks.remove(taskId);
+                focusTaskLocked(taskId);
+            }
+        }
+        if (reusedTaskTop != null) {
+            started[0] = reusedTaskTop;
+            return ActivityManager.START_TASK_TO_FRONT;
         }
         if (deliverTo != null) {
             started[0] = deliverTo;
@@ -1287,10 +1473,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     + (clearTop.isEmpty() ? ": delivered to the top activity " + deliverTo.name()
                             + " (singleTop)" : ": delivered to " + deliverTo.name()
                             + " (clear top: the " + clearTop.size() + " above it finish)"));
-            // Top first, as the task's activities are finished.
-            for (ActivityRecord a : clearTop) {
-                finish(a, "clear-top", android.app.Activity.RESULT_CANCELED, null);
-            }
+            if (!clearTop.isEmpty()) finishTogether(clearTop.get(0), clearTop,
+                    "clear-top", android.app.Activity.RESULT_CANCELED, null);
             // The authenticated request was accepted above. CLEAR_TOP may itself
             // finish the sender/IntentSender holder; that must not erase this
             // delivery. Creator code/capability and target generations remain live.
@@ -1306,18 +1490,88 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                         + " visible)" : "")
                 + (r.resultTo != null ? ", result to " + r.resultTo.name() + " (request "
                         + r.requestCode + ")" : ""));
+        if (!clearTop.isEmpty()) finishTogether(clearTop.get(0), clearTop, "clear-task-history",
+                android.app.Activity.RESULT_CANCELED, null);
         if (bind != null) bindApplication(bind);
         if (needProcess) startProcess(info.packageName, componentProcess(info.packageName, info.processName),
                 "activity " + r.name(), sourceWindowMode);
         if (pause != null) pause(pause, false);
         if (launchNow) realStartActivity(r);
         for (ActivityRecord a : reconfigure) ensureConfiguration(a);
-        updateTopResumed();
+        if (!r.deferredHistory) updateTopResumed();
         return ActivityManager.START_SUCCESS;
     }
 
     private static String callerName(String callingPackage, int callingPid) {
         return callingPackage != null ? callingPackage : "pid " + callingPid;
+    }
+
+    /** ActivityStarter's manifest/document flags, before selecting a history member's task. */
+    private static int historyLaunchFlags(ActivityInfo info, Intent intent, ActivityRecord source) {
+        int flags = intent.getFlags();
+        boolean single = info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
+                || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE;
+        if (single && (flags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0) {
+            flags &= ~(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+        } else if (info.documentLaunchMode == ActivityInfo.DOCUMENT_LAUNCH_INTO_EXISTING
+                || info.documentLaunchMode == ActivityInfo.DOCUMENT_LAUNCH_ALWAYS) {
+            flags |= Intent.FLAG_ACTIVITY_NEW_DOCUMENT;
+        } else if (info.documentLaunchMode == ActivityInfo.DOCUMENT_LAUNCH_NEVER
+                && (info.launchMode != ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK
+                    || (flags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0)) {
+            flags &= ~(Intent.FLAG_ACTIVITY_NEW_DOCUMENT | Intent.FLAG_ACTIVITY_MULTIPLE_TASK);
+        }
+        if (source == null || source.info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
+                || single || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK
+                || (flags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0) {
+            flags |= Intent.FLAG_ACTIVITY_NEW_TASK;
+        }
+        if ((flags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+                && info.documentLaunchMode == ActivityInfo.DOCUMENT_LAUNCH_ALWAYS) {
+            flags |= Intent.FLAG_ACTIVITY_MULTIPLE_TASK;
+        }
+        return flags;
+    }
+
+    /** Batch members use ActivityStarter's source/NEW_TASK choice, never a forced first task. */
+    private int historyTaskId(ActivityInfo info, Intent intent, ActivityRecord source, int requestedTask) {
+        if (requestedTask >= 0 && topOf(requestedTask) != null) return requestedTask;
+        int flags = intent.getFlags();
+        boolean singleTask = info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
+                || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE;
+        if ((flags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0 && source != null
+                && !source.finishing && mActivities.contains(source)) return source.taskId;
+        if ((flags & Intent.FLAG_ACTIVITY_MULTIPLE_TASK) == 0 || singleTask) {
+            int affinityTask = -1;
+            for (int i = mTaskOrder.size() - 1; i >= 0; i--) {
+                int task = mTaskOrder.get(i);
+                if (info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE) {
+                    if (belowInTask(task, intent.getComponent()) != null) return task;
+                    continue;
+                }
+                ActivityRecord root = rootOf(task);
+                if (root == null) continue;
+                boolean component = root.component().equals(intent.getComponent());
+                if (info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK && !component) continue;
+                if ((flags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0) {
+                    if ((root.intent.getFlags() & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0
+                            && component && java.util.Objects.equals(root.intent.getData(), intent.getData())) return task;
+                } else if ((root.intent.getFlags() & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) == 0) {
+                    if (component) return task;
+                    if (affinityTask < 0 && info.taskAffinity != null
+                            && info.taskAffinity.equals(root.info.taskAffinity)) affinityTask = task;
+                }
+            }
+            if (affinityTask >= 0) return affinityTask;
+        }
+        return mNextTaskId++;
+    }
+
+    private ActivityRecord rootOf(int taskId) {
+        for (ActivityRecord activity : mActivities) {
+            if (activity.taskId == taskId && !activity.finishing && activity.state != State.DESTROYED) return activity;
+        }
+        return null;
     }
 
     /** Caller activity authority for mode inheritance only. Guarded by this. */
@@ -1405,17 +1659,16 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     /**
-     * The topmost activity of {@code component} in the task below its top activity, not
-     * finishing and in a process; or null. Guarded by this.
+     * The topmost live history record of {@code component}, including a record
+     * whose client has not been created yet; or null. Guarded by this.
      */
     private ActivityRecord belowInTask(int taskId, ComponentName component) {
-        ActivityRecord top = topOf(taskId);
         for (int i = mActivities.size() - 1; i >= 0; i--) {
             ActivityRecord a = mActivities.get(i);
-            if (a == top || a.taskId != taskId || a.finishing || a.state == State.DESTROYED) {
+            if (a.taskId != taskId || a.finishing || a.state == State.DESTROYED) {
                 continue;
             }
-            if (a.app != null && a.component().equals(component)) return a;
+            if (a.component().equals(component)) return a;
         }
         return null;
     }
@@ -1605,7 +1858,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             pending.exitGeneration = mExitStatus.capture(processKey(packageName, processName), seq);
             for (ActivityRecord record : mActivities) {
                 if (record.app == null && record.launchGeneration == null
-                        && record.state == State.INITIALIZING && !record.finishing
+                        && record.state == State.INITIALIZING && !record.finishing && !record.deferredHistory
                         && record.info.packageName.equals(packageName)
                         && componentProcess(packageName, record.info.processName).equals(processName)) {
                     record.launchGeneration = pending.exitGeneration;
@@ -1691,16 +1944,18 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     private void startFailed(long seq, PendingProcess pending) {
+        java.util.Set<Integer> affectedTasks = new java.util.LinkedHashSet<>();
         synchronized (this) {
             if (mStarting.get(seq) != pending) return;
             mExitStatus.unavailable(pending.exitGeneration);
             mStarting.remove(seq);
             for (int i = mActivities.size() - 1; i >= 0; i--) {
                 ActivityRecord r = mActivities.get(i);
-                if (r.app == null && r.launchGeneration == pending.exitGeneration) {
+                if (r.app == null && !r.deferredHistory && r.launchGeneration == pending.exitGeneration) {
                     r.launchFailed = true;
                     r.state = State.DESTROYED;
                     accountActivityFinished(r);
+                    affectedTasks.add(r.taskId);
                     mActivities.remove(i);
                 }
             }
@@ -1708,6 +1963,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             updateIdle();
             notifyAll();
         }
+        for (int taskId : affectedTasks) realizeTaskHistory(taskId);
     }
 
     /** Whether some activity exists (launching, shown or stopped). Guarded by this. */
@@ -2204,7 +2460,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 // A start waiting for a process (none being started for its package): the
                 // one asked by this process, else the first.
                 for (ActivityRecord r : mActivities) {
-                    if (r.app != null || r.state != State.INITIALIZING
+                    if (r.app != null || r.deferredHistory || r.state != State.INITIALIZING
                             || !activityEnabled(r)
                             || starting(r.info.packageName, componentProcess(r.info.packageName, r.info.processName))) {
                         continue;
@@ -2231,7 +2487,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (waiting != null && processFor(waiting, waitingProcess) == null) {
                 assignPackage(app, waiting, waitingProcess);
                 for (ActivityRecord r : mActivities) {
-                    if (r.app == null && r.state == State.INITIALIZING
+                    if (r.app == null && !r.deferredHistory && r.state == State.INITIALIZING
                             && app.packageName.equals(r.info.packageName)
                             && app.processName.equals(componentProcess(r.info.packageName, r.info.processName))) {
                         attach(r, app);
@@ -2262,7 +2518,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             app.markActive(SystemClock.uptimeMillis());
             app.ready = true;
             for (ActivityRecord r : app.activities) {
-                if (r.state == State.INITIALIZING && r.waitingFor == null
+                if (r.state == State.INITIALIZING && !r.deferredHistory && r.waitingFor == null
                         && (app.enabledProcessLifetime == null || app.enabledProcessLifetime.getAsBoolean())) launch.add(r);
             }
             for (int i = 0; i < mPendingWork.size(); i++) {
@@ -2386,6 +2642,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     private void processDied(ProcessRecord app) {
+        java.util.Set<Integer> affectedTasks = new java.util.LinkedHashSet<>();
+        List<ActivityRecord> released = new ArrayList<>();
         synchronized (this) {
             if (!mProcesses.remove(app)) return;
             app.dead = true;
@@ -2393,13 +2651,23 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 if (!r.finishing && !r.idle) r.launchFailed = true;
                 r.state = State.DESTROYED;
                 accountActivityFinished(r);
+                affectedTasks.add(r.taskId);
                 mActivities.remove(r);
+            }
+            for (ActivityRecord activity : mActivities) {
+                if (activity.waitingFor != null && activity.waitingFor.app == app) {
+                    activity.waitingFor = null;
+                    if (!activity.finishing && activity.state == State.INITIALIZING
+                            && activity.app != null && activity.app.ready) released.add(activity);
+                }
             }
             updateIdle();
             notifyAll();
         }
         SystemServer.log(app + " died");
         mAm.processDied(app);
+        for (ActivityRecord activity : released) realStartActivity(activity);
+        for (int taskId : affectedTasks) realizeTaskHistory(taskId);
         if (!app.spawned) mExitStatus.unavailable(app.exitGeneration);
         if (app.spawned && app.packageName != null) {
             // Its exit code, once Windows has it (binder may tell first).
@@ -2499,18 +2767,160 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
     }
 
-    /** ActivityTaskSupervisor.realStartActivityLocked: launch and resume. */
+    /** Realize only visible history, retaining the opaque parents without starting their processes. */
+    private void realizeTaskHistory(int taskId) {
+        synchronized (this) {
+            mHistoryToRealize.add(taskId);
+            if (mRealizingHistory || mStackPublications != 0) return;
+            mRealizingHistory = true;
+        }
+        try {
+            while (true) {
+                int next;
+                synchronized (this) {
+                    if (mHistoryToRealize.isEmpty() || mStackPublications != 0) {
+                        mRealizingHistory = false;
+                        return;
+                    }
+                    next = mHistoryToRealize.iterator().next();
+                    mHistoryToRealize.remove(next);
+                }
+                realizeTaskHistoryOnce(next);
+            }
+        } catch (RuntimeException | Error failure) {
+            synchronized (this) { mRealizingHistory = false; }
+            throw failure;
+        }
+    }
+
+    private void realizeTaskHistoryOnce(int taskId) {
+        List<ActivityRecord> visible = new ArrayList<>();
+        List<ActivityRecord> reconfigure = new ArrayList<>();
+        synchronized (this) {
+            if (mStackPublications != 0) { mHistoryToRealize.add(taskId); return; }
+            if (topOf(taskId) == null) {
+                mTaskOrder.remove(Integer.valueOf(taskId));
+                mHiddenTasks.remove(taskId);
+                mTaskBounds.remove(taskId);
+                mTaskRotation.delete(taskId);
+            }
+            if (mHiddenTasks.contains(taskId)) return;
+            if (updateRotationLocked(taskId)) {
+                for (ActivityRecord activity : mActivities) {
+                    if (activity.taskId == taskId && !activity.finishing && activity.app != null
+                            && activity.state != State.INITIALIZING) reconfigure.add(activity);
+                }
+            }
+            for (int i = mActivities.size() - 1; i >= 0; i--) {
+                ActivityRecord activity = mActivities.get(i);
+                if (activity.taskId != taskId || activity.finishing || activity.state == State.DESTROYED) continue;
+                if (activity.deferredHistory && activity.batchOwner == null) visible.add(activity);
+                if (!activity.translucent) break;
+            }
+        }
+        java.util.Collections.reverse(visible);
+        for (ActivityRecord activity : visible) realizeHistory(activity);
+        for (ActivityRecord activity : reconfigure) ensureConfiguration(activity);
+        resumeHistoryTop(taskId);
+        updateTopResumed();
+    }
+
+    /** A reused/reordered live top follows the same pause handoff as a new instance. */
+    private void resumeHistoryTop(int taskId) {
+        ActivityRecord resume = null, pause = null;
+        synchronized (this) {
+            if (mStackPublications != 0 || mHiddenTasks.contains(taskId)) return;
+            ActivityRecord top = topOf(taskId);
+            if (top == null || top.app == null || !top.app.ready || !activityCodeCurrent(top)) return;
+            if (top.state != State.PAUSED && top.state != State.STARTED
+                    && top.state != State.STOPPED && top.state != State.STOPPING) return;
+            ActivityRecord previous = front(top);
+            if (previous == null) resume = top;
+            else {
+                top.waitingFor = previous;
+                top.resumeAfterPause = true;
+                if (previous.state != State.PAUSING) pause = previous;
+            }
+        }
+        if (pause != null) pause(pause, false);
+        if (resume != null) resume(resume);
+    }
+
+    private void realizeHistory(ActivityRecord r) {
+        boolean current;
+        synchronized (this) {
+            current = activityCodeCurrent(r)
+                    && (r.sourceLifetime == null || r.sourceLifetime.getAsBoolean());
+        }
+        if (!current) {
+            finish(r, "history-target-unavailable", android.app.Activity.RESULT_CANCELED, null);
+            return;
+        }
+        ProcessRecord bind = null;
+        ActivityRecord pause = null;
+        boolean needProcess = false, launchNow = false;
+        synchronized (this) {
+            if (!mActivities.contains(r) || r.finishing || r.state != State.INITIALIZING
+                    || !r.deferredHistory || r.batchOwner != null || mStackPublications != 0 || !isVisible(r)) return;
+            r.deferredHistory = false;
+            ProcessRecord app = r.app;
+            if (app == null) app = processFor(r.info.packageName,
+                    componentProcess(r.info.packageName, r.info.processName));
+            if (app == null) {
+                app = unassignedProcess(r.launchedFromPid);
+                if (app != null) {
+                    assignPackage(app, r.info.packageName,
+                            componentProcess(r.info.packageName, r.info.processName));
+                    bind = app;
+                }
+            }
+            if (app != null) {
+                if (r.app == null) attach(r, app);
+            } else {
+                needProcess = true;
+                for (PendingProcess pending : mStarting.values()) {
+                    if (pending.packageName.equals(r.info.packageName)
+                            && pending.processName.equals(componentProcess(r.info.packageName, r.info.processName))) {
+                        r.launchGeneration = pending.exitGeneration;
+                        break;
+                    }
+                }
+            }
+            // A previously running foreground activity must acknowledge its pause.
+            // Uninstantiated parent history has no lifecycle to wait for.
+            ActivityRecord front = topOf(r.taskId) == r ? front(r) : null;
+            if (front != null) {
+                r.waitingFor = front;
+                if (front.state != State.PAUSING) pause = front;
+            }
+            launchNow = r.waitingFor == null && app != null && app.ready;
+        }
+        if (bind != null) bindApplication(bind);
+        if (needProcess) startProcess(r.info.packageName,
+                componentProcess(r.info.packageName, r.info.processName), "activity " + r.name(),
+                r.inheritedWindowMode);
+        if (pause != null) pause(pause, false);
+        if (launchNow) realStartActivity(r);
+    }
+
+    /** ActivityTaskSupervisor.realStartActivityLocked: create in the required visible state. */
     private void realStartActivity(ActivityRecord r) {
         if (activityCodeCurrent(r) && !r.targetCode.componentEnabled(r.info.name, ApkPackage.ComponentKind.ACTIVITY)) {
             finishDisabledActivity(r); return;
         }
         boolean current;
         synchronized (this) {
-            if (!mActivities.contains(r) || r.finishing || r.state != State.INITIALIZING) return;
-            if (r.app == null || r.app.exiting || r.app.dead
+            if (r.state != State.INITIALIZING || r.launchScheduled || r.finishing || r.deferredHistory
+                    || r.waitingFor != null || r.app == null || !r.app.ready) return;
+            if (r.app.exiting || r.app.dead
                     || r.app.enabledProcessLifetime != null && !r.app.enabledProcessLifetime.getAsBoolean()) return;
-            current = activityCodeCurrent(r)
+            if (r.historyEntry && !isVisible(r)) {
+                r.deferredHistory = true;
+                return;
+            }
+            current = mActivities.contains(r) && r.state != State.DESTROYED && activityCodeCurrent(r)
                     && (r.sourceLifetime == null || r.sourceLifetime.getAsBoolean());
+            if (current) r.launchScheduled = true;
         }
         if (!current) {
             mExitStatus.unavailable(r.launchGeneration); r.finishing = true; remove(r); return;
@@ -2534,6 +2944,13 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
         ActivityWindowInfo windowInfo = windowInfo(task);
         List<ResultInfo> results = takeResults(r);
+        List<ReferrerIntent> newIntents;
+        boolean andResume;
+        synchronized (this) {
+            newIntents = r.pendingNewIntents.isEmpty() ? null : new ArrayList<>(r.pendingNewIntents);
+            r.pendingNewIntents.clear();
+            andResume = !r.historyEntry || topOf(r.taskId) == r;
+        }
         ClientTransaction t = new ClientTransaction(r.app.thread);
         IBinder windowGrant = createActivityWindowGrant(r);
         if (windowGrant != null) {
@@ -2543,16 +2960,21 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 System.identityHashCode(r), r.info, config, override,
                 Context.DEVICE_ID_DEFAULT, r.launchedFromPackage, null /* voiceInteractor */,
                 ActivityManager.PROCESS_STATE_TOP, null /* state */, null /* persistentState */,
-                results /* pendingResults */, null /* pendingNewIntents */,
+                results /* pendingResults */, newIntents,
                 null /* sceneTransitionInfo */, true /* isForward */, null /* profilerInfo */,
                 new Binder() /* assistToken */, mClient.asInterface(),
                 new Binder() /* shareableActivityToken */, false /* launchedFromBubble */,
                 null /* taskFragmentToken */, r.initialCallerInfoAccessToken,
                 windowInfo, Display.DEFAULT_DISPLAY));
-        t.addTransactionItem(new ResumeActivityItem(r.token, true /* isForward */,
-                false /* shouldSendCompatFakeFocus */));
+        if (andResume) {
+            t.addTransactionItem(new ResumeActivityItem(r.token, true /* isForward */,
+                    false /* shouldSendCompatFakeFocus */));
+        } else {
+            t.addTransactionItem(new PauseActivityItem(r.token, false, false, false, false));
+        }
         setState(r, State.LAUNCHING);
-        schedule(r, t, "LaunchActivityItem, ResumeActivityItem");
+        schedule(r, t, andResume ? "LaunchActivityItem, ResumeActivityItem"
+                : "LaunchActivityItem, PauseActivityItem");
     }
 
     /** The ActivityWindowInfo of an activity in a task of {@code task} bounds (null: display). */
@@ -2793,8 +3215,16 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     private void resume(ActivityRecord r) {
         if (!activityEnabled(r)) { finishDisabledActivity(r); return; }
         synchronized (this) {
-            if (!mActivities.contains(r) || r.finishing || r.app == null || r.app.exiting || r.app.dead
-                    || r.app.enabledProcessLifetime != null && !r.app.enabledProcessLifetime.getAsBoolean()) return;
+            if (!mActivities.contains(r) || r.finishing || r.app == null || !r.app.ready
+                    || r.app.exiting || r.app.dead
+                    || r.app.enabledProcessLifetime != null && !r.app.enabledProcessLifetime.getAsBoolean()
+                    || !activityCodeCurrent(r) || r.waitingFor != null
+                    || (r.state != State.PAUSED && r.state != State.STARTED
+                        && r.state != State.STOPPING && r.state != State.STOPPED)) return;
+            r.state = State.RESUMING;
+            r.stopWhenIdle = false;
+            r.idle = false;
+            notifyAll();
         }
         List<ResultInfo> results = takeResults(r);
         ClientTransaction t = new ClientTransaction(r.app.thread);
@@ -2808,11 +3238,6 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
         t.addTransactionItem(new ResumeActivityItem(r.token, false /* isForward */,
                 false /* shouldSendCompatFakeFocus */));
-        synchronized (this) {
-            r.stopWhenIdle = false;
-            r.idle = false;
-        }
-        setState(r, State.RESUMING);
         schedule(r, t, (config != null ? config + ", " : "")
                 + (results != null && !relaunch ? "ActivityResultItem, " : "")
                 + "ResumeActivityItem");
@@ -2836,6 +3261,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (!mActivities.contains(r) || r.finishing || r.state == State.DESTROYED
                     || !activityEnabled(r) || !sourceCurrent.getAsBoolean()) return;
             r.callerState.add(callerToken, snapshot);
+            if (r.state == State.INITIALIZING && !r.launchScheduled) {
+                r.pendingNewIntents.add(new ReferrerIntent(new Intent(intent), referrer, callerToken));
+                return;
+            }
             resumed = r.state == State.RESUMED || r.state == State.LAUNCHING
                     || r.state == State.RESUMING;
         }
@@ -3153,7 +3582,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     /**
      * ActivityRecord.navigateUpTo, lite (NavUtils.navigateUpFromSameTask): the activities
      * of the caller's task above the up destination finish. When the destination is not in
-     * the task (startActivities records only the top activity), it is started in the task
+     * the task, it is started in the task
      * first, as if it had been below, and the caller finishes (exec track, docs/exec.md:
      * Simon Tatham's Puzzles goes up to its chooser on a first launch).
      */
@@ -3204,11 +3633,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (result != ActivityManager.START_SUCCESS) return false;
         }
         if (isActivityRetired(r)) return false;
-        for (ActivityRecord a : above) {
-            finish(a, "navigateUpTo", a == r ? resultCode : 0 /* RESULT_CANCELED */,
-                    a == r ? resultData : null, a == r);
-        }
-        return true;
+        return finishTogether(r, above, "navigateUpTo", resultCode, resultData);
     }
 
     private void stop(ActivityRecord r) {
@@ -3250,12 +3675,17 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
     private void remove(ActivityRecord r) {
         ProcessRecord check = null;
+        List<ActivityRecord> released = new ArrayList<>();
         synchronized (this) {
             r.state = State.DESTROYED;
             accountActivityFinished(r);
             mActivities.remove(r);
             for (ActivityRecord a : mActivities) {
-                if (a.waitingFor == r) a.waitingFor = null;
+                if (a.waitingFor == r) {
+                    a.waitingFor = null;
+                    if (a.state == State.INITIALIZING && !a.finishing
+                            && a.app != null && a.app.ready) released.add(a);
+                }
             }
             if (r.app != null) {
                 r.app.activities.remove(r);
@@ -3272,6 +3702,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             notifyAll();
         }
         updateTopResumed();
+        for (ActivityRecord child : released) realStartActivity(child);
+        realizeTaskHistory(r.taskId);
         maybeExit(check);
     }
 
@@ -3547,6 +3979,13 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     @Override
     public void moveTaskToFront(IApplicationThread app, String callingPackage, int taskId,
             int flags, Bundle options) {
+        boolean history;
+        synchronized (this) {
+            ActivityRecord activity = topOf(taskId);
+            history = activity != null && activity.deferredHistory;
+            if (history) { mHiddenTasks.remove(taskId); focusTaskLocked(taskId); }
+        }
+        if (history) { realizeTaskHistory(taskId); return; }
         ActivityRecord top;
         boolean resumeNow = false;
         List<ActivityRecord> toStart;
@@ -3604,6 +4043,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 : " converted from translucent"));
         for (ActivityRecord a : toStop) stop(a);
         for (ActivityRecord a : toStart) makeVisible(a);
+        realizeTaskHistory(r.taskId);
         return true;
     }
 
@@ -3657,6 +4097,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         }
         SystemServer.log("activityPaused: " + r.name());
         for (ActivityRecord a : launch) realStartActivity(a);
+        if (finishing) realizeTaskHistory(r.taskId);
         for (ActivityRecord a : resumeAfter) resume(a);
         if (resume != null) resume(resume);
         if (finishing || stopNow) stop(r);
