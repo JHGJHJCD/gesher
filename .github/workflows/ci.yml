@@ -331,6 +331,9 @@ jobs:
       - name: Fetch AOSP sources
         run: tools/fetch-aosp.sh
 
+      - name: libcore System.nanoTime shares Android awake-time domain
+        run: python3 tools/test_system_nanotime.py --source third_party/aosp/libcore/ojluni/src/main/native/System.c
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -740,6 +743,9 @@ jobs:
 
       - name: Fetch AOSP sources
         run: tools/fetch-aosp.sh
+
+      - name: libcore System.nanoTime shares Android awake-time domain
+        run: python3 tools/test_system_nanotime.py --source third_party/aosp/libcore/ojluni/src/main/native/System.c
 
       - name: Report
         run: |

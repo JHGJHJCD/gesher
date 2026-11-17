@@ -245,3 +245,10 @@ with a pinned Android oracle. Device audio timestamps and media behavior across
 physical resume also remain runtime qualification gates. Simulated suspension
 proves routing/arithmetic and regression sensitivity; it cannot establish
 Windows power-management or device behavior.
+
+## Java System.nanoTime production-domain correction
+
+Windows CI at e2648526 found that libcore's System_nanoTime C entrypoint still used the host winpthreads CLOCK_MONOTONIC/QPC epoch, even after ART's separate NanoTime helper had been corrected. The strict enclosed SystemClock.uptimeNanos assertion exposed this production mismatch. A shared C-compatible awake_clock.h now supplies the unbiased source to both the C libcore entrypoint and C++ Android clocks; the host pthread clock stays unchanged. The fetched libcore source is patched in place, preserving its upstream notices; no OpenJDK source is copied into this repository.
+
+The new source-driven C regression compiles the actual fetched System_nanoTime body: three checks pass after the patch, and the same three fail on the original body. Actual Windows clock-domain brackets pass five checks; x64 runs and ARM64 compiles/links were checked. CI also retains the unchanged strict Java/ART bracket assertion. Physical sleep/hibernate remains unverified here.
+

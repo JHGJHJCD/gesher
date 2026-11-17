@@ -111,6 +111,7 @@ def main() -> int:
         (work / "windows.h").write_text("// Win32 boundary types are supplied by host.cc.\n")
         (work / "gesher").mkdir()
         (work / "gesher/clocks.h").write_text((ROOT / "compat/posix/include/gesher/clocks.h").read_text())
+        (work / "gesher/awake_clock.h").write_text((ROOT / "compat/posix/include/gesher/awake_clock.h").read_text())
         binary = work / "clock-domains"
         command = shlex.split(args.cxx) + ["-std=c++20", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
             "-Wno-unused-function", "-Wno-sign-compare", "-fno-exceptions", "-DGESHER", "-I", str(work),

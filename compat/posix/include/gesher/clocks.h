@@ -7,6 +7,7 @@
 #include <stdint.h>
 #include <time.h>
 #include <windows.h>
+#include <gesher/awake_clock.h>
 
 namespace gesher {
 
@@ -18,9 +19,7 @@ inline int64_t InterruptTicksToNanos(ULONGLONG ticks) {
 
 // Linux CLOCK_MONOTONIC / Android uptime: time spent asleep is excluded.
 inline int64_t MonotonicNanos() {
-  ULONGLONG ticks;
-  QueryUnbiasedInterruptTimePrecise(&ticks);
-  return InterruptTicksToNanos(ticks);
+  return gesher_monotonic_nanos();
 }
 
 // Linux CLOCK_BOOTTIME / Android elapsedRealtime: sleep/hibernate is included.
