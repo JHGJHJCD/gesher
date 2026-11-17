@@ -58,6 +58,7 @@ public final class PackageEnabledLifecycleFixture {
     private static boolean binder;
     private static volatile int fakeChild;
     private static volatile boolean childKilled;
+    private static long expectedKillTime = 7001;
     static {
         try { Field f = Unsafe.class.getDeclaredField("theUnsafe"); f.setAccessible(true); UNSAFE = (Unsafe)f.get(null); }
         catch (ReflectiveOperationException failure) { throw new ExceptionInInitializerError(failure); }
@@ -701,10 +702,50 @@ public final class PackageEnabledLifecycleFixture {
     /** Recording native boundary used only by the host runner; never controls an OS PID. */
     public static long childStartTime(int pid) { return pid == fakeChild ? 7001 : 0; }
     public static boolean killChild(int pid, long time) {
-        check(pid == fakeChild && time == 7001, "Pending process retirement lost its retained generation");
+        check(pid == fakeChild && time == expectedKillTime, "Process retirement lost its retained generation");
+        if (time != 7001) return false; // A reused PID belongs to a different native generation.
         childKilled = true; return true;
     }
     public static int exitCode(int pid) { return pid == fakeChild && !childKilled ? 259 : -1; }
+
+    /** Only the host's recording native boundary may exercise synthetic PID identities. */
+    @SuppressWarnings("unchecked")
+    private static void terminationGeneration() throws Exception {
+        try {
+            for (long generation : new long[]{7001, 6001, 0}) {
+                expectedKillTime = generation;
+                Harness pending = new Harness(); fakeChild = nextPid++; childKilled = false;
+                Object start = construct(type("ActivityTaskManagerService$PendingProcess"),
+                        new Class<?>[]{String.class, String.class, String.class}, OWNER, OWNER, "fixture");
+                set(start, "pid", fakeChild); set(start, "nativeStartTime", generation);
+                ((Map<Long, Object>)get(pending.atm, "mStarting")).put(1L, start);
+                invoke(pending.atm, "forceStopPackage", new Class<?>[]{String.class}, OWNER);
+                check((Boolean)get(start, "cancelled") && childKilled == (generation == 7001),
+                        "Force-stop killed a replacement PID or missed its admitted child");
+                Harness running = new Harness(); TestProcess app = running.process(OWNER, true);
+                fakeChild = app.pid; childKilled = false;
+                set(app.record, "spawned", true); set(app.record, "nativeStartTime", generation);
+                invoke(running.atm, "endProcesses", new Class<?>[]{List.class, long.class}, List.of(app.record), 0L);
+                check(app.exiting() && childKilled == (generation == 7001),
+                        "Process teardown killed a replacement PID or missed its admitted child");
+                Harness shutdown = new Harness(); fakeChild = nextPid++; childKilled = false;
+                Object stopping = construct(type("ActivityTaskManagerService$PendingProcess"),
+                        new Class<?>[]{String.class, String.class, String.class}, OWNER, OWNER, "fixture");
+                set(stopping, "pid", fakeChild); set(stopping, "nativeStartTime", generation);
+                ((Map<Long, Object>)get(shutdown.atm, "mStarting")).put(1L, stopping);
+                invoke(shutdown.atm, "endAllProcesses", new Class<?>[]{long.class}, 0L);
+                check((Boolean)get(stopping, "cancelled") && childKilled == (generation == 7001),
+                        "Shutdown killed a replacement PID or missed its admitted child");
+                Harness timeout = new Harness(); TestProcess receiver = timeout.process(OWNER, true);
+                fakeChild = receiver.pid; childKilled = false;
+                set(receiver.record, "spawned", true); set(receiver.record, "nativeStartTime", generation);
+                invoke(timeout.atm, "receiverTimedOut", new Class<?>[]{type("ActivityTaskManagerService$ProcessRecord")},
+                        receiver.record);
+                check(!timeout.processes.contains(receiver.record) && childKilled == (generation == 7001),
+                        "Receiver timeout killed a replacement PID or missed its admitted child");
+            }
+        } finally { expectedKillTime = 7001; }
+    }
 
     private static void startingProcess() throws Exception {
         Harness h = new Harness(); CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
@@ -799,6 +840,7 @@ public final class PackageEnabledLifecycleFixture {
         if (group.equals("all") || group.equals("activities")) activities();
         if (!useBinder && (group.equals("all") || group.equals("starting"))) startingProcess();
         if (!useBinder && (group.equals("all") || group.equals("activity-start"))) activityGenerationRace();
+        if (!useBinder && (group.equals("all") || group.equals("termination"))) terminationGeneration();
         return checks;
     }
 }
