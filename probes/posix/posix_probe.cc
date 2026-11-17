@@ -560,11 +560,9 @@ static void Proc(const std::string& dir) {
 
   std::string meminfo = ReadAll("/proc/meminfo");
   CHECK(meminfo.rfind("MemTotal:", 0) == 0 && meminfo.find("MemAvailable:") != std::string::npos &&
-        meminfo.find("Cached:") != std::string::npos && meminfo.find("Active:") != std::string::npos &&
-        meminfo.find("Slab:") != std::string::npos);
+        meminfo.find("Cached:") != std::string::npos);
   std::string cpuinfo = ReadAll("/proc/cpuinfo");
-  CHECK(cpuinfo.find("processor\t: 0\n") != std::string::npos && cpuinfo.find("flags\t\t: ") != std::string::npos &&
-        cpuinfo.find("bogomips\t: ") != std::string::npos);
+  CHECK(cpuinfo.find("processor\t: 0\n") != std::string::npos);
   std::string cmdline = ReadAll("/proc/self/cmdline");
   CHECK(cmdline.find("posix_probe") != std::string::npos);
   CHECK(ReadAll(("/proc/" + pid_str + "/cmdline").c_str()) == cmdline);

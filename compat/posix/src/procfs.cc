@@ -363,7 +363,11 @@ extern "C" uint64_t gesher_auxv_hwcap(void) {
   __cpuid(regs, 1);
   return static_cast<uint32_t>(regs[3]);
 #elif defined(__aarch64__)
-  return 0xFB;  // FP | ASIMD | AES | PMULL | SHA1 | SHA2 | CRC32
+  // Windows ARM64 guarantees FP/ASIMD; optional instructions require OS evidence.
+  uint64_t caps = 3;  // HWCAP_FP | HWCAP_ASIMD
+  if (IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE)) caps |= 0x78;
+  if (IsProcessorFeaturePresent(PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE)) caps |= 0x80;
+  return caps;
 #else
   return 0;
 #endif
@@ -371,11 +375,8 @@ extern "C" uint64_t gesher_auxv_hwcap(void) {
 
 extern "C" uint64_t gesher_auxv_hwcap2(void) {
 #if defined(__x86_64__)
-  int regs[4];
-  __cpuid(regs, 7);
-  uint64_t cap2 = 0;
-  if ((regs[1] >> 0) & 1) cap2 |= (1 << 1);  // HWCAP2_FSGSBASE
-  return cap2;
+  // Linux HWCAP2_FSGSBASE means the OS enables the instructions, not merely CPUID.
+  return IsProcessorFeaturePresent(PF_RDWRFSGSBASE_AVAILABLE) ? 2 : 0;
 #else
   return 0;
 #endif
@@ -537,11 +538,6 @@ std::string Meminfo() {
   unsigned long long swap_free =
       status.ullAvailPageFile > status.ullAvailPhys ? status.ullAvailPageFile - status.ullAvailPhys : 0;
   if (swap_free > swap_total) swap_free = swap_total;
-  unsigned long long kernel_total = static_cast<unsigned long long>(perf.KernelTotal) * perf.PageSize;
-  unsigned long long kernel_paged = static_cast<unsigned long long>(perf.KernelPaged) * perf.PageSize;
-  unsigned long long kernel_nonpaged = static_cast<unsigned long long>(perf.KernelNonpaged) * perf.PageSize;
-  unsigned long long active =
-      status.ullTotalPhys > status.ullAvailPhys ? status.ullTotalPhys - status.ullAvailPhys : 0;
   auto line = [](const char* name, unsigned long long bytes) {
     return Format("%-16s%8llu kB\n", name, bytes / 1024);
   };
@@ -552,32 +548,12 @@ std::string Meminfo() {
   s += line("Buffers:", 0);
   s += line("Cached:", cached);
   s += line("SwapCached:", 0);
-  s += line("Active:", active);
-  s += line("Inactive:", cached);
-  s += line("Active(anon):", active);
-  s += line("Inactive(anon):", 0);
-  s += line("Active(file):", 0);
-  s += line("Inactive(file):", cached);
-  s += line("Unevictable:", 0);
-  s += line("Mlocked:", 0);
   s += line("SwapTotal:", swap_total);
   s += line("SwapFree:", swap_free);
-  s += line("Dirty:", 0);
-  s += line("Writeback:", 0);
-  s += line("AnonPages:", active);
-  s += line("Mapped:", cached);
-  s += line("Shmem:", 0);
-  s += line("KReclaimable:", kernel_paged);
-  s += line("Slab:", kernel_total);
-  s += line("SReclaimable:", kernel_paged);
-  s += line("SUnreclaim:", kernel_nonpaged);
-  s += line("KernelStack:", 0);
-  s += line("PageTables:", 0);
   s += line("CommitLimit:", status.ullTotalPageFile);
   s += line("Committed_AS:", status.ullTotalPageFile - status.ullAvailPageFile);
-  s += line("VmallocTotal:", 34359738367ULL * 1024);
-  s += line("VmallocUsed:", 0);
-  s += line("VmallocChunk:", 0);
+  // Linux LRU, slab and vmalloc counters have no faithful public Windows
+  // equivalent here. Omit unavailable metrics rather than invent measurements.
   return s;
 }
 
@@ -648,9 +624,7 @@ std::string Cpuinfo() {
                 static_cast<unsigned long>(cpus), static_cast<unsigned long>(i));
     s += Format("cpuid level\t: %d\nwp\t\t: yes\n", max_cpuid);
     s += "flags\t\t: " + flags + "\n";
-    s += "bugs\t\t: \n";
-    s += "bogomips\t: 4800.00\n";
-    s += "clflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management:\n\n";
+    s += "\n";
   }
   return s;
 #elif defined(__aarch64__)
@@ -658,13 +632,14 @@ std::string Cpuinfo() {
   std::string s;
   for (DWORD i = 0; i < cpus; ++i) {
     s += Format("processor\t: %lu\n", static_cast<unsigned long>(i));
-    s += "BogoMIPS\t: 38.40\n";
-    s += "Features\t: fp asimd evtstrm aes pmull sha1 sha2 crc32 atomics fphp asimdhp\n";
-    s += "CPU implementer\t: 0x51\n";
-    s += "CPU architecture: 8\n";
-    s += "CPU variant\t: 0x0\n";
-    s += "CPU part\t: 0x805\n";
-    s += "CPU revision\t: 1\n\n";
+    const uint64_t caps = gesher_auxv_hwcap();
+    std::string features = "fp asimd";
+    if (caps & (1 << 3)) features += " aes";
+    if (caps & (1 << 4)) features += " pmull";
+    if (caps & (1 << 5)) features += " sha1";
+    if (caps & (1 << 6)) features += " sha2";
+    if (caps & (1 << 7)) features += " crc32";
+    s += "Features\t: " + features + "\nCPU architecture: 8\n\n";
   }
   return s;
 #else

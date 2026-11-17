@@ -1,5 +1,8 @@
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
 #include <windows.h>
 #include <bcrypt.h>
 #if defined(__x86_64__)
@@ -78,7 +81,9 @@
 
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;
+#if !defined(__MINGW32__)
 typedef int pid_t;
+#endif
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -182,6 +187,13 @@ int main() {
   uint64_t hwcap = gesher_auxv_hwcap();
 #if defined(__x86_64__)
   Check(hwcap != 0, "x86_64 CPUID.1 EDX feature flags reported in AT_HWCAP");
+  Check(gesher_auxv_hwcap2() == (IsProcessorFeaturePresent(PF_RDWRFSGSBASE_AVAILABLE) ? 2u : 0u),
+        "FSGSBASE auxiliary capability follows OS availability");
+#elif defined(__aarch64__)
+  Check((hwcap & 0x78) == (IsProcessorFeaturePresent(PF_ARM_V8_CRYPTO_INSTRUCTIONS_AVAILABLE) ? 0x78u : 0u),
+        "ARM crypto auxiliary capabilities follow OS availability");
+  Check((hwcap & 0x80) == (IsProcessorFeaturePresent(PF_ARM_V8_CRC32_INSTRUCTIONS_AVAILABLE) ? 0x80u : 0u),
+        "ARM CRC auxiliary capability follows OS availability");
 #endif
   const unsigned char* rand_bytes = gesher_auxv_random();
   Check(rand_bytes != nullptr, "gesher_auxv_random returns non-null pointer");
@@ -262,12 +274,15 @@ int main() {
   cpu_node.file = "cpuinfo";
   std::string cpuinfo = Content(cpu_node);
   Check(cpuinfo.find("processor\t: 0\n") != std::string::npos, "cpuinfo has processor 0");
+  Check(cpuinfo.find("bogomips") == std::string::npos && cpuinfo.find("BogoMIPS") == std::string::npos,
+        "unmeasured BogoMIPS calibration is omitted");
+  Check(cpuinfo.find("address sizes") == std::string::npos,
+        "unmeasured fixed CPU address widths are omitted");
 #if defined(__x86_64__)
   Check(cpuinfo.find("vendor_id\t: ") != std::string::npos, "cpuinfo has vendor_id");
   Check(cpuinfo.find("cpu family\t: ") != std::string::npos, "cpuinfo has cpu family");
   Check(cpuinfo.find("model\t\t: ") != std::string::npos, "cpuinfo has model");
   Check(cpuinfo.find("flags\t\t: ") != std::string::npos, "cpuinfo has flags");
-  Check(cpuinfo.find("bogomips\t: ") != std::string::npos, "cpuinfo has bogomips");
   Check(cpuinfo.find("fpu\t\t: yes\n") != std::string::npos, "cpuinfo has fpu");
 #endif
 
@@ -280,14 +295,13 @@ int main() {
   Check(meminfo.find("MemFree:") != std::string::npos, "meminfo has MemFree:");
   Check(meminfo.find("MemAvailable:") != std::string::npos, "meminfo has MemAvailable:");
   Check(meminfo.find("Cached:") != std::string::npos, "meminfo has Cached:");
-  Check(meminfo.find("Active:") != std::string::npos, "meminfo has Active:");
-  Check(meminfo.find("Inactive:") != std::string::npos, "meminfo has Inactive:");
   Check(meminfo.find("SwapTotal:") != std::string::npos, "meminfo has SwapTotal:");
   Check(meminfo.find("SwapFree:") != std::string::npos, "meminfo has SwapFree:");
-  Check(meminfo.find("Slab:") != std::string::npos, "meminfo has Slab:");
   Check(meminfo.find("CommitLimit:") != std::string::npos, "meminfo has CommitLimit:");
   Check(meminfo.find("Committed_AS:") != std::string::npos, "meminfo has Committed_AS:");
-  Check(meminfo.find("VmallocTotal:") != std::string::npos, "meminfo has VmallocTotal:");
+  Check(meminfo.find("Slab:") == std::string::npos && meminfo.find("Active:") == std::string::npos &&
+        meminfo.find("VmallocTotal:") == std::string::npos,
+        "unsupported Linux allocator/LRU counters are omitted, not fabricated");
 
   // 7. Sysfs CPU lists
   Node sys_cpu;
