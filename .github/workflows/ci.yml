@@ -136,6 +136,7 @@ jobs:
 
       - name: Native allocation, directory, semaphore, file-lock and socket-control contracts
         run: |
+          python3 tools/test_hwui_renderer_policy.py --sanitize
           python3 tools/test_egl_readback_layout.py --sanitize
           python3 tools/test_bionic_allocations.py --sanitize
           python3 tools/test_bionic_system_contracts.py --sanitize
@@ -249,6 +250,7 @@ jobs:
         run: |
           python3 tools/test_file_timestamp_contracts.py --sanitize
           python3 tools/test_directory_rename_contracts.py --sanitize
+          python3 tools/test_sqlite_paths.py --fetch --sanitize --negative-control
           python3 tools/test_media_source_contracts.py --sanitize
           python3 tools/test_media_callback_state.py --sanitize
           python3 tools/test_media_http_contracts.py --sanitize
@@ -1658,6 +1660,14 @@ jobs:
           & ./dist/layered_bitmap_cache_test.exe gate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           & ./dist/native_poll_allocations_test.exe gate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Real Windows SQLite guest paths, URI metadata and journal IO
+        if: matrix.shard == 'native'
+        timeout-minutes: 2
+        shell: pwsh
+        run: |
+          & ./dist/sqlite_path_test.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Verify and assemble framework artifact
