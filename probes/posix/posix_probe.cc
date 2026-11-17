@@ -532,11 +532,39 @@ static void Proc(const std::string& dir) {
   int fields = 0;
   for (char c : stat_line) fields += c == ' ';
   CHECK(fields == 51);
+  void* mapping = VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+  CHECK(mapping != nullptr);
   std::string maps = ReadAll("/proc/self/maps");
   CHECK(maps.find("posix_probe.exe") != std::string::npos && maps.find(" r-xp ") != std::string::npos);
   CHECK(maps.find("[stack]") != std::string::npos);
   std::string pid_str = std::to_string(GetCurrentProcessId());
-  CHECK(ReadAll(("/proc/" + pid_str + "/maps").c_str()) == maps);
+  // Separate opens take independent snapshots; reading one can grow the heap.
+  // Check both aliases against a live allocation and a real protection change.
+  auto describesMapping = [mapping](const std::string& snapshot, const char* expected) {
+    size_t at = 0;
+    while (at < snapshot.size()) {
+      unsigned long long lo = 0, hi = 0;
+      char permissions[5] = {};
+      if (sscanf(snapshot.c_str() + at, "%llx-%llx %4s", &lo, &hi, permissions) == 3 &&
+          lo <= reinterpret_cast<uintptr_t>(mapping) &&
+          reinterpret_cast<uintptr_t>(mapping) < hi && strcmp(permissions, expected) == 0) {
+        return true;
+      }
+      size_t next = snapshot.find('\n', at);
+      if (next == std::string::npos) break;
+      at = next + 1;
+    }
+    return false;
+  };
+  if (mapping) {
+    CHECK(describesMapping(maps, "rw-p"));
+    CHECK(describesMapping(ReadAll(("/proc/" + pid_str + "/maps").c_str()), "rw-p"));
+    DWORD previousProtection = 0;
+    CHECK(VirtualProtect(mapping, 4096, PAGE_READONLY, &previousProtection));
+    CHECK(describesMapping(ReadAll("/proc/self/maps"), "r--p"));
+    CHECK(describesMapping(ReadAll(("/proc/" + pid_str + "/maps").c_str()), "r--p"));
+    CHECK(VirtualFree(mapping, 0, MEM_RELEASE));
+  }
 
   // /proc/self/auxv and /proc/<pid>/auxv: ELF auxiliary vectors.
   std::string auxv = ReadAll("/proc/self/auxv");
