@@ -146,10 +146,12 @@ public final class ActivityRestoreFixture {
         final ArrayDeque<Event> pending = new ArrayDeque<>();
         IActivityClientController controller;
         boolean autoAck = true;
+        boolean failNextTransaction;
 
         @Override public IBinder asBinder() { return binder; }
 
-        @Override public void scheduleTransaction(ClientTransaction transaction) {
+        @Override public void scheduleTransaction(ClientTransaction transaction) throws RemoteException {
+            if (failNextTransaction) { failNextTransaction = false; throw new RemoteException("isolated failed restore IPC"); }
             try {
                 for (ClientTransactionItem item : transaction.getTransactionItems()) {
                     IBinder token = null;
@@ -338,6 +340,10 @@ public final class ActivityRestoreFixture {
         h.activityStopped(r1, saved, persist);
         check(get(r1, "savedState") == saved, "activityStopped did not retain savedState on record");
         check(get(r1, "persistentState") == persist, "activityStopped did not retain persistentState on record");
+        h.activityStopped(r1, null, null);
+        check(get(r1, "savedState") == saved, "Stop timeout discarded saved state");
+        check(get(r1, "persistentState") == persist, "Null stop discarded persistent state");
+
 
         // Simulate process death
         h.processDied(h.process);
@@ -571,10 +577,32 @@ public final class ActivityRestoreFixture {
         System.out.println("Activity state restore: finishing child relaunches underlying dead activity with state passed");
     }
 
+    private static void testFailedRestoreDelivery() throws Exception {
+        Harness h = new Harness();
+        Object record = h.record("MainAct", 10, "a", "STOPPED");
+        Bundle saved = new Bundle(); saved.putString("retry", "snapshot");
+        h.activityStopped(record, saved, null);
+        h.processDied(h.process);
+        AppThread failing = new AppThread(); failing.failNextTransaction = true;
+        Object failedProcess = h.newProcess(PID + 20, failing);
+        h.attach(record, failedProcess); h.realStartActivity(record);
+        check(failing.findLaunchItem(record) == null, "Failed IPC delivered a launch");
+        check(get(record, "savedState") == saved, "Failed IPC consumed snapshot");
+        h.processDied(failedProcess);
+        check(!(boolean)get(record, "launchScheduled"), "Failed launch stranded scheduled flag");
+        AppThread retry = new AppThread(); h.newProcess(PID + 21, retry);
+        h.moveTaskToFront(10);
+        LaunchActivityItem delivered = retry.findLaunchItem(record);
+        check(delivered != null, "Failed launch could not be relaunched after process death");
+        check("snapshot".equals(((Bundle)field(LaunchActivityItem.class, "mState").get(delivered)).getString("retry")),
+                "Retry lost original snapshot");
+        check(get(record, "savedState") == null, "Successful resumed acknowledgment did not release snapshot");
+    }
+
     public static int run(boolean realBinder, String group) throws Exception {
         binder = realBinder;
         checks = 0;
-        if (group.equals("all") || group.equals("saved")) testSavedStatePreservedAcrossProcessDeath();
+        if (group.equals("all") || group.equals("saved")) { testSavedStatePreservedAcrossProcessDeath(); testFailedRestoreDelivery(); }
         if (group.equals("all") || group.equals("cleanup")) testFinishingActivitiesCleanedUpWhileNonFinishingPreserved();
         if (group.equals("all") || group.equals("results")) testPendingResultsPreservedAcrossProcessDeath();
         if (group.equals("all") || group.equals("movetask")) testMoveTaskToFrontRelaunch();

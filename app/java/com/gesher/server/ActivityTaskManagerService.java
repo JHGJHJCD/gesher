@@ -4202,8 +4202,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     void activityStopped(ActivityRecord r, Bundle savedState, PersistableBundle persistentState) {
         boolean destroy;
         synchronized (this) {
-            r.savedState = savedState;
-            r.persistentState = persistentState;
+            // Null reports include stop timeouts, not a newly committed snapshot.
+            if (savedState != null) r.savedState = savedState;
+            if (persistentState != null) r.persistentState = persistentState;
             // A resume may have been scheduled after the stop (the activity in front
             // finished first): it stays on its way to the front.
             if (r.state == State.STOPPING) r.state = State.STOPPED;
