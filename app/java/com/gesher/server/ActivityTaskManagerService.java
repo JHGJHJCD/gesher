@@ -2169,7 +2169,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 PendingProcess p = entry.getValue();
                 if (!p.packageName.equals(packageName)) continue;
                 p.cancelled = true;
-                if (p.pid > 0) Zygote.kill(p.pid);
+                if (p.pid > 0) Zygote.killChild(p.pid, p.nativeStartTime);
                 else startFailed(entry.getKey(), p);
             }
             notifyAll();
@@ -2355,7 +2355,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 p.exiting = true;
             }
             if (p.spawned) {
-                Zygote.kill(p.pid);
+                Zygote.killChild(p.pid, p.nativeStartTime);
             } else {
                 try {
                     p.thread.scheduleExit();
