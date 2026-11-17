@@ -39,6 +39,7 @@ def main():
             (d / 'windows.h').write_text('#include "futex_windows_host.h"\n')
             (d / 'gesher').mkdir()
             (d / 'gesher/clocks.h').write_text((ROOT / 'compat/posix/include/gesher/clocks.h').read_text())
+            (d / 'gesher/awake_clock.h').write_text((ROOT / 'compat/posix/include/gesher/awake_clock.h').read_text())
             owner = 'reinterpret_cast<FARPROC>(&gesher_futex_owner_v1)' if 'gesher_futex_owner_v1(' in source else 'nullptr'
             generated = '''#define _GNU_SOURCE 1
 #include <time.h>
