@@ -348,6 +348,49 @@ extern "C" const unsigned char* gesher_auxv_random(void) {
   return bytes;
 }
 
+extern "C" const char* gesher_auxv_platform(void) {
+#if defined(__aarch64__)
+  static const char kPlatform[] = "aarch64";
+#else
+  static const char kPlatform[] = "x86_64";
+#endif
+  return kPlatform;
+}
+
+extern "C" uint64_t gesher_auxv_hwcap(void) {
+#if defined(__x86_64__)
+  int regs[4];
+  __cpuid(regs, 1);
+  return static_cast<uint32_t>(regs[3]);
+#elif defined(__aarch64__)
+  return 0xFB;  // FP | ASIMD | AES | PMULL | SHA1 | SHA2 | CRC32
+#else
+  return 0;
+#endif
+}
+
+extern "C" uint64_t gesher_auxv_hwcap2(void) {
+#if defined(__x86_64__)
+  int regs[4];
+  __cpuid(regs, 7);
+  uint64_t cap2 = 0;
+  if ((regs[1] >> 0) & 1) cap2 |= (1 << 1);  // HWCAP2_FSGSBASE
+  return cap2;
+#else
+  return 0;
+#endif
+}
+
+extern "C" const char* gesher_auxv_execfn(void) {
+  static const std::string kExecfn = [] {
+    wchar_t buf[MAX_PATH * 4];
+    DWORD length = GetModuleFileNameW(nullptr, buf, MAX_PATH * 4);
+    if (length == 0 || length >= MAX_PATH * 4) return std::string();
+    return gesher::LinuxPath(buf);
+  }();
+  return kExecfn.c_str();
+}
+
 namespace gesher {
 namespace procfs {
 namespace {
@@ -359,20 +402,22 @@ namespace {
 // on an int3 if it cannot be opened.
 std::string Auxv() {
   const unsigned char* random_bytes = gesher_auxv_random();
-  static const char kPlatform[] = "x86_64";
+  const char* platform = gesher_auxv_platform();
+  const char* execfn = gesher_auxv_execfn();
   const uint64_t pairs[][2] = {
-      {6, 4096},                                         // AT_PAGESZ
-      {17, 100},                                         // AT_CLKTCK
-      {16, 0},                                           // AT_HWCAP
-      {11, static_cast<uint64_t>(getuid())},             // AT_UID
-      {12, static_cast<uint64_t>(getuid())},             // AT_EUID
-      {13, static_cast<uint64_t>(getgid())},             // AT_GID
-      {14, static_cast<uint64_t>(getgid())},             // AT_EGID
-      {23, 0},                                           // AT_SECURE
-      {25, reinterpret_cast<uint64_t>(random_bytes)},    // AT_RANDOM
-      {26, 0},                                           // AT_HWCAP2
-      {15, reinterpret_cast<uint64_t>(kPlatform)},       // AT_PLATFORM
-      {0, 0},                                            // AT_NULL
+      {6, 4096},                                              // AT_PAGESZ
+      {17, 100},                                              // AT_CLKTCK
+      {16, gesher_auxv_hwcap()},                              // AT_HWCAP
+      {11, static_cast<uint64_t>(getuid())},                  // AT_UID
+      {12, static_cast<uint64_t>(getuid())},                  // AT_EUID
+      {13, static_cast<uint64_t>(getgid())},                  // AT_GID
+      {14, static_cast<uint64_t>(getgid())},                  // AT_EGID
+      {23, 0},                                                // AT_SECURE
+      {25, reinterpret_cast<uint64_t>(random_bytes)},         // AT_RANDOM
+      {26, gesher_auxv_hwcap2()},                             // AT_HWCAP2
+      {15, reinterpret_cast<uint64_t>(platform)},             // AT_PLATFORM
+      {31, reinterpret_cast<uint64_t>(execfn)},               // AT_EXECFN
+      {0, 0},                                                 // AT_NULL
   };
   return std::string(reinterpret_cast<const char*>(pairs), sizeof(pairs));
 }
@@ -389,15 +434,26 @@ std::string MappedFile(void* address) {
   if (n == 0) return "";
   std::wstring path(device_path, n);
   // \Device\HarddiskVolumeN\... to a drive letter.
-  wchar_t drives[512];
-  DWORD length = GetLogicalDriveStringsW(512, drives);
-  for (const wchar_t* d = drives; length != 0 && *d != L'\0'; d += wcslen(d) + 1) {
-    wchar_t drive[3] = {d[0], L':', L'\0'};
-    wchar_t target[MAX_PATH];
-    if (QueryDosDeviceW(drive, target, MAX_PATH) == 0) continue;
-    size_t t = wcslen(target);
-    if (path.size() > t && _wcsnicmp(path.c_str(), target, t) == 0 && path[t] == L'\\') {
-      return LinuxPath((std::wstring(drive) + path.substr(t)).c_str());
+  struct DriveMapping {
+    std::wstring target;
+    std::wstring drive;
+  };
+  static const std::vector<DriveMapping> drives = [] {
+    std::vector<DriveMapping> result;
+    wchar_t drive_strings[512];
+    DWORD length = GetLogicalDriveStringsW(512, drive_strings);
+    for (const wchar_t* d = drive_strings; length != 0 && *d != L'\0'; d += wcslen(d) + 1) {
+      wchar_t drive[3] = {d[0], L':', L'\0'};
+      wchar_t target[MAX_PATH];
+      if (QueryDosDeviceW(drive, target, MAX_PATH) == 0) continue;
+      result.push_back({target, drive});
+    }
+    return result;
+  }();
+  for (const auto& dm : drives) {
+    size_t t = dm.target.size();
+    if (path.size() > t && _wcsnicmp(path.c_str(), dm.target.c_str(), t) == 0 && path[t] == L'\\') {
+      return LinuxPath((dm.drive + path.substr(t)).c_str());
     }
   }
   return Narrow(path.c_str());
@@ -414,6 +470,11 @@ std::string Maps() {
   MEMORY_BASIC_INFORMATION info;
   ULONG_PTR stack_low = 0, stack_high = 0;
   GetCurrentThreadStackLimits(&stack_low, &stack_high);
+  HANDLE default_heap = GetProcessHeap();
+  MEMORY_BASIC_INFORMATION heap_info = {};
+  if (default_heap != nullptr) {
+    VirtualQuery(default_heap, &heap_info, sizeof(heap_info));
+  }
   while (address < si.lpMaximumApplicationAddress &&
          VirtualQuery(address, &info, sizeof(info)) == sizeof(info)) {
     char* base = static_cast<char*>(info.BaseAddress);
@@ -435,15 +496,28 @@ std::string Maps() {
     if (info.Type == MEM_MAPPED && (info.Protect & 0xff) != PAGE_WRITECOPY) perms[3] = 's';
     std::string name;
     unsigned long long offset = 0;
+    unsigned major = 0, minor = 0;
+    unsigned long long inode = 0;
     if (info.Type == MEM_IMAGE || info.Type == MEM_MAPPED) {
       name = MappedFile(base);
       offset = static_cast<unsigned long long>(base - static_cast<char*>(info.AllocationBase));
+      if (!name.empty() && name[0] == '/') {
+        struct stat st;
+        if (stat(name.c_str(), &st) == 0) {
+          major = static_cast<unsigned>((st.st_dev >> 8) & 0xff);
+          minor = static_cast<unsigned>(st.st_dev & 0xff);
+          inode = static_cast<unsigned long long>(st.st_ino);
+        }
+      }
     } else if (reinterpret_cast<ULONG_PTR>(base) >= stack_low &&
                reinterpret_cast<ULONG_PTR>(base) < stack_high) {
       name = "[stack]";
+    } else if (heap_info.AllocationBase != nullptr &&
+               info.AllocationBase == heap_info.AllocationBase) {
+      name = "[heap]";
     }
-    s += Format("%08llx-%08llx %s %08llx 00:00 0", reinterpret_cast<unsigned long long>(base),
-                reinterpret_cast<unsigned long long>(address), perms, offset);
+    s += Format("%08llx-%08llx %s %08llx %02x:%02x %llu", reinterpret_cast<unsigned long long>(base),
+                reinterpret_cast<unsigned long long>(address), perms, offset, major, minor, inode);
     if (!name.empty()) s += "                          " + name;
     s += '\n';
   }
@@ -463,6 +537,11 @@ std::string Meminfo() {
   unsigned long long swap_free =
       status.ullAvailPageFile > status.ullAvailPhys ? status.ullAvailPageFile - status.ullAvailPhys : 0;
   if (swap_free > swap_total) swap_free = swap_total;
+  unsigned long long kernel_total = static_cast<unsigned long long>(perf.KernelTotal) * perf.PageSize;
+  unsigned long long kernel_paged = static_cast<unsigned long long>(perf.KernelPaged) * perf.PageSize;
+  unsigned long long kernel_nonpaged = static_cast<unsigned long long>(perf.KernelNonpaged) * perf.PageSize;
+  unsigned long long active =
+      status.ullTotalPhys > status.ullAvailPhys ? status.ullTotalPhys - status.ullAvailPhys : 0;
   auto line = [](const char* name, unsigned long long bytes) {
     return Format("%-16s%8llu kB\n", name, bytes / 1024);
   };
@@ -473,11 +552,32 @@ std::string Meminfo() {
   s += line("Buffers:", 0);
   s += line("Cached:", cached);
   s += line("SwapCached:", 0);
+  s += line("Active:", active);
+  s += line("Inactive:", cached);
+  s += line("Active(anon):", active);
+  s += line("Inactive(anon):", 0);
+  s += line("Active(file):", 0);
+  s += line("Inactive(file):", cached);
+  s += line("Unevictable:", 0);
+  s += line("Mlocked:", 0);
   s += line("SwapTotal:", swap_total);
   s += line("SwapFree:", swap_free);
+  s += line("Dirty:", 0);
+  s += line("Writeback:", 0);
+  s += line("AnonPages:", active);
+  s += line("Mapped:", cached);
   s += line("Shmem:", 0);
+  s += line("KReclaimable:", kernel_paged);
+  s += line("Slab:", kernel_total);
+  s += line("SReclaimable:", kernel_paged);
+  s += line("SUnreclaim:", kernel_nonpaged);
+  s += line("KernelStack:", 0);
+  s += line("PageTables:", 0);
   s += line("CommitLimit:", status.ullTotalPageFile);
   s += line("Committed_AS:", status.ullTotalPageFile - status.ullAvailPageFile);
+  s += line("VmallocTotal:", 34359738367ULL * 1024);
+  s += line("VmallocUsed:", 0);
+  s += line("VmallocChunk:", 0);
   return s;
 }
 
@@ -485,6 +585,7 @@ std::string Cpuinfo() {
 #if defined(__x86_64__)
   int regs[4];
   __cpuid(regs, 0);
+  int max_cpuid = regs[0];
   char vendor[13] = {};
   memcpy(vendor, &regs[1], 4);
   memcpy(vendor + 4, &regs[3], 4);
@@ -525,6 +626,16 @@ std::string Cpuinfo() {
     int reg = f.reg == 0 ? edx : f.reg == 1 ? ecx : ebx7;
     if ((reg >> f.bit) & 1) flags += std::string(" ") + f.name;
   }
+  __cpuid(regs, 0x80000000);
+  if (static_cast<unsigned>(regs[0]) >= 0x80000001) {
+    __cpuid(regs, 0x80000001);
+    int ecx_ext = regs[2], edx_ext = regs[3];
+    if ((edx_ext >> 11) & 1) flags += " syscall";
+    if ((edx_ext >> 20) & 1) flags += " nx";
+    if ((edx_ext >> 29) & 1) flags += " lm";
+    if ((ecx_ext >> 0) & 1) flags += " lahf_lm";
+    if ((ecx_ext >> 5) & 1) flags += " abm";
+  }
   DWORD cpus = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
   std::string s;
   for (DWORD i = 0; i < cpus; ++i) {
@@ -533,9 +644,13 @@ std::string Cpuinfo() {
     s += "model name\t: " + model_name + "\n";
     s += Format("stepping\t: %d\nphysical id\t: 0\nsiblings\t: %lu\ncore id\t\t: %lu\n", stepping,
                 static_cast<unsigned long>(cpus), static_cast<unsigned long>(i));
-    s += Format("cpu cores\t: %lu\napicid\t\t: %lu\nfpu\t\t: yes\ncpuid level\t: 13\nwp\t\t: yes\n",
+    s += Format("cpu cores\t: %lu\napicid\t\t: %lu\nfpu\t\t: yes\nfpu_exception\t: yes\n",
                 static_cast<unsigned long>(cpus), static_cast<unsigned long>(i));
-    s += "flags\t\t: " + flags + "\n\n";
+    s += Format("cpuid level\t: %d\nwp\t\t: yes\n", max_cpuid);
+    s += "flags\t\t: " + flags + "\n";
+    s += "bugs\t\t: \n";
+    s += "bogomips\t: 4800.00\n";
+    s += "clflush size\t: 64\ncache_alignment\t: 64\naddress sizes\t: 48 bits physical, 48 bits virtual\npower management:\n\n";
   }
   return s;
 #elif defined(__aarch64__)
@@ -591,7 +706,7 @@ Node Lookup(const std::wstring& name, bool list) {
     return n;
   }
   if (p.size() == 5 && p[0] == "sys" && p[1] == "devices" && p[2] == "system" &&
-      p[3] == "cpu" && (p[4] == "possible" || p[4] == "present")) {
+      p[3] == "cpu" && (p[4] == "possible" || p[4] == "present" || p[4] == "online")) {
     n.type = kFile;
     n.file = "cpu_list";
     return n;
@@ -700,7 +815,7 @@ std::string Content(const Node& n) {
   if (f == "meminfo") return Meminfo();
   if (f == "cpuinfo") return Cpuinfo();
   if (f == "cpu_list") {
-    // /sys/devices/system/cpu/{possible,present}: "0-<n-1>".
+    // /sys/devices/system/cpu/{possible,present,online}: "0-<n-1>".
     const DWORD cpus = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
     return cpus > 1 ? Format("0-%lu\n", cpus - 1) : std::string("0\n");
   }
