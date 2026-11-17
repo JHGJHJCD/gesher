@@ -286,11 +286,13 @@ def inventory(count, start=1, size=None):
 class JobsTest(unittest.TestCase):
     def test_complete_two_page_inventory_preserves_every_job_field(self):
         first, second = inventory(73), inventory(73, 51, 23)
-        with patch('github_jobs.get_json', side_effect=[first, second]) as read:
+        with patch('github_jobs.get_json', side_effect=[first, second]) as read, \
+                patch('github_jobs.time.sleep') as sleep:
             result = get_jobs(JOBS_ENDPOINT)
         self.assertEqual(result, {'total_count': 73, 'jobs': first['jobs'] + second['jobs']})
         self.assertEqual([c.args[0] for c in read.call_args_list],
             [JOBS_ENDPOINT + '?per_page=50&page=1', JOBS_ENDPOINT + '?per_page=50&page=2'])
+        sleep.assert_not_called()
 
     def test_boundaries(self):
         for count in (0, 1, 50, 51, 100):
@@ -308,7 +310,6 @@ class JobsTest(unittest.TestCase):
         cases = [
             [inventory(101)], [inventory(-1)], [{'total_count': True, 'jobs': []}],
             [inventory(73, size=49)], [inventory(73), inventory(73, 51, 22)],
-            [inventory(73), inventory(74, 51, 24)],
             [inventory(73), inventory(73, 50, 23)],
             [inventory(1, size=2)], [malformed], [nonobject], [duplicate],
             [{'total_count': 0}], [None],
@@ -321,6 +322,30 @@ class JobsTest(unittest.TestCase):
     def test_transport_error_never_returns_first_page_as_complete(self):
         with patch('github_jobs.get_json', side_effect=[inventory(73), GitHubReadError('502')]):
             with self.assertRaises(GitHubReadError): get_jobs(JOBS_ENDPOINT)
+
+    def test_expanding_inventory_restarts_with_a_complete_fresh_snapshot(self):
+        old, fresh, second = inventory(73), inventory(74), inventory(74, 51, 24)
+        old['jobs'][0]['name'] = 'old-generation'
+        fresh['jobs'][0]['name'] = 'fresh-generation'
+        pages = [old, second, fresh, second]
+        with patch('github_jobs.get_json', side_effect=pages) as read, \
+                patch('github_jobs.time.sleep') as sleep:
+            result = get_jobs(JOBS_ENDPOINT)
+        self.assertEqual(result['total_count'], 74)
+        self.assertEqual(result['jobs'], fresh['jobs'] + second['jobs'])
+        self.assertEqual([j['id'] for j in result['jobs']], list(range(1, 75)))
+        self.assertEqual([c.args[0] for c in read.call_args_list],
+            [JOBS_ENDPOINT + '?per_page=50&page=1', JOBS_ENDPOINT + '?per_page=50&page=2'] * 2)
+        sleep.assert_called_once_with(1)
+
+    def test_permanently_changing_inventory_has_a_bounded_failure(self):
+        pages = [inventory(73), inventory(74, 51, 24)] * 3
+        with patch('github_jobs.get_json', side_effect=pages) as read, \
+                patch('github_jobs.time.sleep') as sleep:
+            with self.assertRaisesRegex(GitHubReadError, 'changed between pages'):
+                get_jobs(JOBS_ENDPOINT)
+        self.assertEqual(read.call_count, 6)
+        self.assertEqual([c.args for c in sleep.call_args_list], [(1,), (2,)])
 
 
 if __name__ == '__main__':
