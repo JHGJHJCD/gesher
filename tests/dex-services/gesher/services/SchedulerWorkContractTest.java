@@ -180,6 +180,10 @@ public final class SchedulerWorkContractTest {
             set(providers, "mClients", new HashMap<>());
             set(providers, "mPublished", new HashMap<>());
             set(providers, "mPublishedBy", new HashMap<>());
+            set(providers, "mPublishedCode", new HashMap<>());
+            set(providers, "mInstalling", new HashMap<>());
+            set(providers, "mConnections", new HashMap<>());
+            set(providers, "mRequests", new java.util.HashSet<>());
             set(am, "mProviders", providers);
             Object permissions = invoke(pm, "permissions", new Class<?>[0]);
             set(am, "mPermissions", permissions); invoke(permissions, "attach", new Class<?>[]{callersType}, callers);
