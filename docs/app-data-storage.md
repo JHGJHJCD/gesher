@@ -144,6 +144,18 @@ DE-default request, and covers classification before preparation, committed
 migration authority, fallback/default changes, restart, interrupted migration
 and rejection without publication when the committed layout is ambiguous.
 
+Windows CI also exposed two integration expectations missed by the initial host
+suite. Startup retains the documented `system_server: <package> parsed by
+PackageParser2: ...` diagnostic, emitted only after the whole final selection is
+prepared. The host runner observes the real preparation boundary and checks the
+exact summary format/order, completed layouts at log time, and absence of success
+summaries after a later failure or exclusion. The installed split-APK fixture now
+explicitly requires its ordinary manifest's default-DE request to be cleared,
+its default path to remain CE, and its explicit DE path to remain distinct. Its
+other manifest flags, split code/resources and lifecycle checks remain in place;
+the same ordinary metadata-policy assertions also run on the host, alongside the
+existing verified-system positive and unsigned-promotion rejection cases.
+
 ## Contracts consulted
 
 - [Android Context.createDeviceProtectedStorageContext](https://developer.android.com/reference/android/content/Context#createDeviceProtectedStorageContext())

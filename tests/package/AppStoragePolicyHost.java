@@ -3,8 +3,11 @@ package com.gesher.server;
 
 import android.content.pm.ApplicationInfo;
 import com.android.internal.pm.parsing.pkg.PackageImpl;
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.PrintStream;
 import java.lang.reflect.Field;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -214,6 +217,95 @@ public final class AppStoragePolicyHost {
                 "Repeated explicit APK bypassed exclusion of an ambiguous committed layout");
     }
 
+    /** Capture the actual production preparation boundary, including observation at log time. */
+    private static String preparationOutput(List<ApkPackage> committed, List<ApkPackage> selected,
+            boolean expectFailure) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        PrintStream original = System.out;
+        try (PrintStream capture = new PrintStream(output, true, StandardCharsets.UTF_8) {
+            @Override public void println(String line) {
+                if (line.contains(" parsed by PackageParser2: ")) {
+                    for (ApkPackage apk : selected) {
+                        check(Files.isDirectory(ce(apk)) && Files.isDirectory(de(apk)),
+                                "Parser summary preceded preparation of the final selection");
+                        try {
+                            check(Files.readString(journal(apk)).contains("phase=ready"),
+                                    "Parser summary preceded storage journal completion");
+                        } catch (IOException failure) {
+                            throw new AssertionError("Parser summary has no completed layout", failure);
+                        }
+                    }
+                }
+                super.println(line);
+            }
+        }) {
+            System.setOut(capture);
+            try {
+                SystemServer.preparePackageStorage(committed, selected);
+                check(!expectFailure, "Invalid selected storage unexpectedly prepared");
+            } catch (IOException failure) {
+                check(expectFailure, "Valid selected storage could not be prepared: " + failure);
+            }
+        } finally {
+            System.setOut(original);
+        }
+        return output.toString(StandardCharsets.UTF_8);
+    }
+
+    private static void startupDiagnostics(Path root) throws Exception {
+        ApkPackage ordinary = record(root.resolve("diagnostic-ordinary"),
+                "fixture.policy.diagnosticordinary", true, signed);
+        // Signature verification alone is not a system scan or a default-DE grant.
+        check(ordinary.hasVerifiedSigningIdentity() && !ordinary.isSystemAddon(),
+                "Signed ordinary diagnostic input acquired system classification");
+        ApkPackage trusted = system(root.resolve("diagnostic-system"),
+                "fixture.policy.diagnosticsystem", true);
+        List<ApkPackage> selected = new ArrayList<>(List.of(ordinary, trusted));
+        String output = preparationOutput(List.of(), selected, false);
+        check(output.lines().toList().equals(List.of("system_server: " + ordinary.describe(),
+                        "system_server: " + trusted.describe())),
+                "REGRESSION: system_server parser diagnostics lost their documented format or final-selection order");
+        policy(ordinary, false); policy(trusted, true);
+
+        ApkPackage earlier = record(root.resolve("diagnostic-earlier"),
+                "fixture.policy.diagnosticearlier", false, unsigned);
+        ApkPackage blocked = record(root.resolve("diagnostic-blocked"),
+                "fixture.policy.diagnosticblocked", false, unsigned);
+        write(ce(blocked), "blocked directory");
+        output = preparationOutput(List.of(), new ArrayList<>(List.of(earlier, blocked)), true);
+        check(Files.isDirectory(ce(earlier)) && !output.contains(" parsed by PackageParser2: "),
+                "Late preparation failure left a successful parser summary");
+
+        ApkPackage collision = system(root.resolve("diagnostic-collision"),
+                "fixture.policy.diagnosticcollision", true);
+        write(ce(collision).resolve("keep"), "old");
+        write(de(collision).resolve("keep"), "occupied");
+        selected = new ArrayList<>(List.of(collision, ordinary));
+        output = preparationOutput(List.of(collision), selected, false);
+        check(selected.equals(List.of(ordinary))
+                        && output.contains("storage could not be prepared:")
+                        && output.lines().filter(line -> line.contains(" parsed by PackageParser2: "))
+                                .toList().equals(List.of("system_server: " + ordinary.describe())),
+                "Excluded committed package received a successful parser summary");
+    }
+
+    private static void splitFixturePolicy(Path root) throws Exception {
+        ApkPackage apk = record(root.resolve("split-policy"), "fixture.policy.split", true, unsigned);
+        PackageImpl parsed = (PackageImpl) apk.parsed;
+        parsed.setDebuggable(true); parsed.setLargeHeap(true);
+        parsed.setCleartextTrafficAllowed(true); parsed.setHardwareAccelerated(true);
+        parsed.setExtractNativeLibrariesRequested(true); parsed.setRtlSupported(true);
+        parsed.setBackupAllowed(false); parsed.setDeclaredHavingCode(true);
+        parsed.setDirectBootAware(true); parsed.setIsolatedSplitLoading(true);
+        parsed.setResizeableActivity(false); parsed.hideAsFinal();
+        set(apk, "mHasCode", true);
+        // Execute the same policy assertions used after real split install/reload on ART.
+        // Native parsing, split DEX and resources remain the Windows fixture's coverage.
+        gesher.services.SplitPackageContractTest.ordinaryApplicationPolicy(apk, apk.applicationInfo(0));
+        check(!Files.exists(journal(apk)), "Split metadata policy check prepared app storage");
+        System.out.println("SplitPackageContractTest ordinary policy assertions passed on host");
+    }
+
     public static void main(String[] args) throws Exception {
         System.load(args[0]);
         Field singleton = Unsafe.class.getDeclaredField("theUnsafe");
@@ -224,6 +316,7 @@ public final class AppStoragePolicyHost {
             ordinary(root); classifiedBeforePreparation(root);
             committedAuthority(root); recoveryAndFailure(root);
             commandLineSelection(root);
+            startupDiagnostics(root); splitFixturePolicy(root);
             gesher.services.PackageManifestFlagsTest.main(new String[0]);
             System.out.println("AppStoragePolicyHost all passed: " + checks + " checks");
         } finally {

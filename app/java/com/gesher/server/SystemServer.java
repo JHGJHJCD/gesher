@@ -97,6 +97,10 @@ public final class SystemServer {
         for (ApkPackage current : selected) {
             if (!prepared.contains(current)) current.prepareDataDirectories();
         }
+        // Keep the documented parser diagnostic, but emit it only after the
+        // complete final selection is ready to publish. A later preparation
+        // failure must not leave a misleading success summary for this boot.
+        for (ApkPackage current : selected) log(current.describe());
     }
 
     public static void main(String[] args) {
@@ -201,7 +205,6 @@ public final class SystemServer {
             selectCommandLinePackage(packages, p);
         }
         preparePackageStorage(committed, packages);
-        for (ApkPackage p : packages) log("prepared: " + p.describe());
 
         // The services, published with servicemanager.
         Map<String, IBinder> services = Services.create(packages);

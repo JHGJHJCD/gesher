@@ -32,7 +32,8 @@ def main() -> None:
         sources = [ROOT / "tests/package/AppStoragePublicHost.java"]
         if not args.expect_baseline_failure:
             sources += [ROOT / "tests/package/AppStoragePolicyHost.java",
-                        ROOT / "tests/dex-services/gesher/services/PackageManifestFlagsTest.java"]
+                        ROOT / "tests/dex-services/gesher/services/PackageManifestFlagsTest.java",
+                        ROOT / "tests/dex-services/gesher/services/SplitPackageContractTest.java"]
         subprocess.run([str(args.java_home / "bin/javac"), "-encoding", "UTF-8", "-cp", classpath,
                         "-d", str(work), *map(str, sources)], check=True)
         result = subprocess.run([str(args.java_home / "bin/java"), "-cp", str(work) + os.pathsep + classpath,
