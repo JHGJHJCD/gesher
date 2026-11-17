@@ -178,6 +178,8 @@ jobs:
 
       - name: Timer, DNS and media lifetime contracts
         run: |
+          python3 tools/test_clock_domains.py --sanitize
+          python3 tools/test_boottime_resume.py --sanitize
           python3 tools/test_timerfd_contracts.py --sanitize
           python3 tools/test_input_surface_callbacks.py --sanitize
           python3 tools/test_codec_lifecycle_contracts.py --sanitize
@@ -332,6 +334,9 @@ jobs:
       - name: Fetch AOSP sources
         run: tools/fetch-aosp.sh
 
+      - name: libcore System.nanoTime shares Android awake-time domain
+        run: python3 tools/test_system_nanotime.py --source third_party/aosp/libcore/ojluni/src/main/native/System.c
+
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -452,7 +457,7 @@ jobs:
           ninja -C out CMakeFiles/gesher_bionic_unicode.dir/compat/bionic/unicode_bionic.cc.obj
           ninja -C out CMakeFiles/gesher_bionic_unicode.dir/compat/bionic/unicode_width.cc.obj
           ninja -C out native3_unicode_test
-          ninja -C out native3_cpu_clock_test
+          ninja -C out native3_cpu_clock_test clock_domains_windows_test boottime_resume_windows_test
           ninja -C out
           # Native fixtures are CI-only; none is installed by gesher.iss.
           ninja -C out install_pipe_test account_chooser_test window_promotion_test permission_dialog_test
@@ -741,6 +746,9 @@ jobs:
 
       - name: Fetch AOSP sources
         run: tools/fetch-aosp.sh
+
+      - name: libcore System.nanoTime shares Android awake-time domain
+        run: python3 tools/test_system_nanotime.py --source third_party/aosp/libcore/ojluni/src/main/native/System.c
 
       - name: Report
         run: |
