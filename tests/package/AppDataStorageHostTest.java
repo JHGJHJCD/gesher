@@ -287,6 +287,16 @@ public final class AppDataStorageHostTest {
         check(!Files.exists(code), "aliased uninstall retained installed code");
         pending.rollback();
         equal(code.resolve("base.apk"), "installed code", "aliased rollback lost installed code");
+        String aliasedCode = alias.resolve("app/" + PACKAGE + "-1").toString();
+        pending = new PackageRemovalStorage(PACKAGE, aliasedCode);
+        pending.stage();
+        check(PackageRemovalStorage.reserves(Path.of(aliasedCode)), "aliased generation lost its crash reservation");
+        check(PackageRemovalStorage.reserves(code), "canonical generation lost its crash reservation");
+        System.setProperty("gesher.test.data", alias.toString());
+        PackageRemovalStorage.recover(Map.of(PACKAGE, aliasedCode));
+        equal(code.resolve("base.apk"), "installed code", "recovery discarded an aliased retained installation");
+        check(!PackageRemovalStorage.reserves(Path.of(aliasedCode)), "completed recovery retained its generation reservation");
+        System.setProperty("gesher.test.data", data.toString());
 
         Path outside = root.resolve("removal-outside");
         write(outside.resolve("sentinel"), "unrelated");
