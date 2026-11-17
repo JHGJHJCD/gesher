@@ -286,7 +286,12 @@ static void TestMeminfo() {
   CHECK(meminfo.find("SwapFree:") != std::string::npos);
   CHECK(meminfo.find("CommitLimit:") != std::string::npos);
   CHECK(meminfo.find("Committed_AS:") != std::string::npos);
-  CHECK(meminfo.find("VmallocTotal:") != std::string::npos);
+  // Windows has no Linux vmalloc/LRU/slab accounting. Unsupported fields
+  // must stay absent rather than reporting invented Linux kernel counters.
+  for (const char* unsupported : {"VmallocTotal:", "VmallocUsed:", "Active:",
+                                  "Inactive:", "Slab:", "SReclaimable:", "SUnreclaim:"}) {
+    CHECK(meminfo.find(unsupported) == std::string::npos);
+  }
 
   // Parse MemTotal and MemAvailable to verify realistic values
   unsigned long long total = 0, avail = 0;
