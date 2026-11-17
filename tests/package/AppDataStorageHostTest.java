@@ -275,6 +275,37 @@ public final class AppDataStorageHostTest {
         }
     }
 
+    private static void removalAliases(Path root) throws Exception {
+        Path data = root.resolve("removal-alias"), alias = root.resolve("removal-alias-spelling");
+        Path code = data.resolve("app/" + PACKAGE + "-1");
+        write(code.resolve("base.apk"), "installed code");
+        System.setProperty("gesher.test.data", data.toString());
+        Files.createSymbolicLink(alias, data);
+        PackageRemovalStorage pending = new PackageRemovalStorage(PACKAGE,
+                alias.resolve("app/" + PACKAGE + "-1").toString());
+        pending.stage();
+        check(!Files.exists(code), "aliased uninstall retained installed code");
+        pending.rollback();
+        equal(code.resolve("base.apk"), "installed code", "aliased rollback lost installed code");
+
+        Path outside = root.resolve("removal-outside");
+        write(outside.resolve("sentinel"), "unrelated");
+        Path leaf = data.resolve("app/" + PACKAGE + "-2");
+        Files.createSymbolicLink(leaf, outside);
+        pending = new PackageRemovalStorage(PACKAGE, alias.resolve("app/" + PACKAGE + "-2").toString());
+        pending.stage(); pending.discard();
+        check(!Files.exists(leaf, java.nio.file.LinkOption.NOFOLLOW_LINKS), "APK leaf link was not quarantined");
+        equal(outside.resolve("sentinel"), "unrelated", "APK leaf link traversal deleted unrelated data");
+
+        Path escaped = data.resolve("outside-app");
+        Files.createSymbolicLink(escaped, outside);
+        try {
+            new PackageRemovalStorage(PACKAGE, escaped.resolve(PACKAGE + "-3").toString());
+            throw new AssertionError("outside APK parent was admitted");
+        } catch (SecurityException expected) { checks++; }
+        equal(outside.resolve("sentinel"), "unrelated", "parent rejection modified unrelated data");
+    }
+
     private static int probeFromAnotherProcess(Path path) throws Exception {
         Process process = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin/java").toString(),
                 "-cp", System.getProperty("java.class.path"), AppDataStorageHostTest.class.getName(),
@@ -385,6 +416,7 @@ public final class AppDataStorageHostTest {
             interruptedMigration(root);
             concurrentPreparation(root);
             removalRecovery(root);
+            removalAliases(root);
             canceledContenderKeepsOwnerLock(root);
             System.out.println("AppDataStorageHostTest all passed: " + checks + " checks");
         } finally {

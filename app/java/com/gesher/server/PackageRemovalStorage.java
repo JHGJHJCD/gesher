@@ -22,8 +22,17 @@ final class PackageRemovalStorage {
             throw new SecurityException("Invalid removal package");
         }
         this.name = name;
-        root = new File(Device.dataDir()).getCanonicalFile().toPath();
+        Path data = new File(Device.dataDir()).getCanonicalFile().toPath();
+        root = Files.exists(data) ? data.toRealPath() : data;
         Path apk = new File(codePath).getAbsoluteFile().toPath().normalize();
+        // Windows guest aliases (for example /mnt/d) and the canonical device
+        // root must share a namespace. Resolve ancestors only: the APK leaf may
+        // itself be a link, which must be quarantined rather than followed.
+        if (apk.getParent() != null) {
+            Path parent = apk.getParent().toFile().getCanonicalFile().toPath();
+            if (Files.exists(parent)) parent = parent.toRealPath();
+            apk = parent.resolve(apk.getFileName());
+        }
         if (!root.resolve("app").equals(apk.getParent())
                 || !apk.getFileName().toString().matches(java.util.regex.Pattern.quote(name) + "-[0-9]+")) {
             throw new SecurityException("Removal code is outside the installed APK directory");
