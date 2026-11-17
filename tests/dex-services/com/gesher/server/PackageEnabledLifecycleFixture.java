@@ -712,7 +712,7 @@ public final class PackageEnabledLifecycleFixture {
     @SuppressWarnings("unchecked")
     private static void terminationGeneration() throws Exception {
         try {
-            for (long generation : new long[]{7001, 6001}) {
+            for (long generation : new long[]{7001, 6001, 0}) {
                 expectedKillTime = generation;
                 Harness pending = new Harness(); fakeChild = nextPid++; childKilled = false;
                 Object start = construct(type("ActivityTaskManagerService$PendingProcess"),
@@ -728,6 +728,21 @@ public final class PackageEnabledLifecycleFixture {
                 invoke(running.atm, "endProcesses", new Class<?>[]{List.class, long.class}, List.of(app.record), 0L);
                 check(app.exiting() && childKilled == (generation == 7001),
                         "Process teardown killed a replacement PID or missed its admitted child");
+                Harness shutdown = new Harness(); fakeChild = nextPid++; childKilled = false;
+                Object stopping = construct(type("ActivityTaskManagerService$PendingProcess"),
+                        new Class<?>[]{String.class, String.class, String.class}, OWNER, OWNER, "fixture");
+                set(stopping, "pid", fakeChild); set(stopping, "nativeStartTime", generation);
+                ((Map<Long, Object>)get(shutdown.atm, "mStarting")).put(1L, stopping);
+                invoke(shutdown.atm, "endAllProcesses", new Class<?>[]{long.class}, 0L);
+                check((Boolean)get(stopping, "cancelled") && childKilled == (generation == 7001),
+                        "Shutdown killed a replacement PID or missed its admitted child");
+                Harness timeout = new Harness(); TestProcess receiver = timeout.process(OWNER, true);
+                fakeChild = receiver.pid; childKilled = false;
+                set(receiver.record, "spawned", true); set(receiver.record, "nativeStartTime", generation);
+                invoke(timeout.atm, "receiverTimedOut", new Class<?>[]{type("ActivityTaskManagerService$ProcessRecord")},
+                        receiver.record);
+                check(!timeout.processes.contains(receiver.record) && childKilled == (generation == 7001),
+                        "Receiver timeout killed a replacement PID or missed its admitted child");
             }
         } finally { expectedKillTime = 7001; }
     }
