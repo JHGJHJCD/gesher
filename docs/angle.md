@@ -100,6 +100,15 @@ The decision record is [0030](decisions/0030-angle-hwui-skiagl.md).
   `NativeWindow.capture()` and `readBackBuffer()` show the CPU back buffer,
   which GL frames do not update.
 
+## GPU readback for child surfaces and layered popups
+
+When GLES draws into a SurfaceView, SurfaceTexture or ImageReader instead of
+a top-level HWND, ANGLE's reverse-row and BGRA readback extensions can
+write directly into the native consumer buffer without a staging image.
+Other formats and devices retain a clipped fallback. Layered popups reuse
+their conversion buffers. This still performs a synchronous GPU-to-CPU
+transfer; see the [readback audit](research/egl-readback-performance-2026-11-16.md).
+
 ## Java apps: android.opengl and EGL10/GL10
 
 The framework's Java bindings, what GLSurfaceView and apps' renderers call
