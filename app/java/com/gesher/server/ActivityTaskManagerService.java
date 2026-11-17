@@ -2331,7 +2331,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             all = new ArrayList<>(mProcesses);
             for (Map.Entry<Long, PendingProcess> entry : new ArrayList<>(mStarting.entrySet())) {
                 PendingProcess p = entry.getValue(); p.cancelled = true;
-                if (p.pid > 0) Zygote.kill(p.pid);
+                if (p.pid > 0) Zygote.killChild(p.pid, p.nativeStartTime);
                 else startFailed(entry.getKey(), p);
             }
         }
@@ -2351,7 +2351,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             processDied(app);
         } finally {
             if (app.spawned) {
-                Zygote.kill(app.pid);
+                Zygote.killChild(app.pid, app.nativeStartTime);
             } else {
                 try { app.thread.scheduleExit(); }
                 catch (RemoteException ignored) { }
