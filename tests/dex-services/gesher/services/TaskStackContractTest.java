@@ -368,6 +368,31 @@ public final class TaskStackContractTest {
                 "History lease release changed ordinary async launch admission");
     }
 
+    /** Disabled deferred entries must be removed without creating them or disturbing the top. */
+    @SuppressWarnings("unchecked")
+    private static void disabledDeferredHistory() throws Exception {
+        Harness h = new Harness();
+        h.start(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), launch("Middle"), launch("Top"));
+        Object root = h.record("Root"), middle = h.record("Middle"), top = h.record("Top");
+        Method enabled = ApkPackage.class.getDeclaredMethod("setComponentEnabledState", String.class, int.class);
+        enabled.setAccessible(true);
+        enabled.invoke(h.owner, PKG + ".Middle", 2);
+        Class<?> changeType = type("PackageManagerService$EnabledChange");
+        Object change = make(changeType, new Class<?>[]{ApkPackage.class}, h.owner);
+        ((List<String>)get(change, "components")).add(PKG + ".Middle");
+        Method cleanup = h.tasks.getClass().getDeclaredMethod("cleanupDisabledPackageComponents", changeType);
+        cleanup.setAccessible(true); cleanup.invoke(h.tasks, change);
+        check(!h.records().contains(middle) && h.records().contains(root) && h.records().contains(top),
+                "Disabled deferred parent retained or its live siblings were removed");
+        check(h.thread.launches(middle) == 0 && h.thread.launches(root) == 0,
+                "Disabled parent cleanup eagerly instantiated history");
+        enabled.invoke(h.owner, PKG + ".Middle", 1);
+        check(!h.records().contains(middle), "Enabling revived a previously removed history entry");
+        h.acknowledge("activityResumed", top); h.finish(top);
+        check(h.thread.launches(root) == 1 && h.thread.launches(middle) == 0,
+                "Back did not skip the disabled/removed deferred parent");
+    }
+
     private static void invalidBatch() throws Exception {
         Harness h = new Harness();
         Intent root = launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
@@ -721,11 +746,36 @@ public final class TaskStackContractTest {
         }
     }
 
+    private static void processDeathUriOwners() throws Exception {
+        for (boolean restore : new boolean[]{false, true}) {
+            Harness h = new Harness();
+            String creator = PKG + ".second";
+            android.net.Uri uri = android.net.Uri.parse("content://" + creator + ".grants/death");
+            startFromCreator(h, creator, () -> true, launch("Root").setData(uri)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_GRANT_READ_URI_PERMISSION));
+            Object root = h.record("Root");
+            if (restore) set(root, "savedState", new Bundle());
+            Method service = h.tasks.getClass().getDeclaredMethod("uriGrants"); service.setAccessible(true);
+            Object grants = service.invoke(h.tasks);
+            check(((List<?>)get(grants, "mGrants")).size() == 1, "Missing activity grant before process death");
+            Method died = h.tasks.getClass().getDeclaredMethod("processDied", h.process.getClass());
+            died.setAccessible(true); died.invoke(h.tasks, h.process);
+            check(h.records().contains(root) == restore, "Process death retained/discarded wrong activity record");
+            check(((List<?>)get(grants, "mGrants")).isEmpty() != restore,
+                    "URI owner lifetime followed process rather than retained activity record");
+            if (restore) {
+                Method stop = h.tasks.getClass().getDeclaredMethod("forceStopPackage", String.class);
+                stop.setAccessible(true); stop.invoke(h.tasks, PKG);
+                check(((List<?>)get(grants, "mGrants")).isEmpty(), "Force-stopped restorable record leaked grant");
+            }
+        }
+    }
+
     public static int run(boolean binder, String selected) throws Exception {
         realBinder = binder; checks = 0;
-        if (selected.equals("all") || selected.equals("history")) { fullStack(); acceptedHistoryLifetimes(); }
+        if (selected.equals("all") || selected.equals("history")) { fullStack(); acceptedHistoryLifetimes(); disabledDeferredHistory(); }
         if (selected.equals("all") || selected.equals("validation")) invalidBatch();
-        if (selected.equals("all") || selected.equals("tasks")) { taskFlags(); reorderedUriOwner(); abandonedUriOwners(); }
+        if (selected.equals("all") || selected.equals("tasks")) { taskFlags(); reorderedUriOwner(); abandonedUriOwners(); processDeathUriOwners(); }
         if (selected.equals("all") || selected.equals("attach")) attachAndReentry();
         if (selected.equals("all") || selected.equals("visibility")) visibilityAndRemoval();
         if (selected.equals("all") || selected.equals("permissions")) permissions();

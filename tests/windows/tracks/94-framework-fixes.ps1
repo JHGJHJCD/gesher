@@ -103,6 +103,14 @@ Check 'services: queued job completion, stopping work and alarm-clock replacemen
   $schedulerWorkOut
 } @('SchedulerWorkContractTest all passed:')
 
+$activityRestoreOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' +
+  'ActivityRestoreContractTest') 90
+$activityRestoreCode = $LASTEXITCODE
+Check 'services: activity state restoration, process death survival and LaunchActivityItem delivery' {
+  $global:LASTEXITCODE = $activityRestoreCode
+  $activityRestoreOut
+} @('ActivityRestoreContractTest all passed:')
+
 $mediaRequestsOut = FixesRun ($dvmFixes + 'gesher.services.MediaStoreRequestContractTest') 90
 $mediaRequestsCode = $LASTEXITCODE
 Check 'framework: MediaStore request forwarding, provider errors and SDK callback descriptors' {
