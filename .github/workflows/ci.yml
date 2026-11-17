@@ -118,6 +118,7 @@ jobs:
           python3 tools/ci/receipt_identity.py
           python3 -m unittest discover -s tools/ci -p test_source_identity.py
           python3 -m unittest discover -s tools/ci -p test_workflow_actor_metadata.py
+          python3 -m unittest discover -s tools/ci -p test_self_hosted_trial.py
           python3 -m unittest discover -s tools/ci -p test_github_read.py
           python3 tools/toolchain/test_coherent_tcp_context.py
           python3 tools/host-pthread-authority/test_minimum_supplier_entry.py
