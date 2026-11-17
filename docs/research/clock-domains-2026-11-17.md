@@ -15,8 +15,14 @@ for awake time and
 [QueryInterruptTimePrecise](https://learn.microsoft.com/en-us/windows/win32/api/realtimeapiset/nf-realtimeapiset-queryinterrupttimeprecise)
 for elapsed time including sleep/hibernate. Both report 100 ns units; conversion
 to signed nanoseconds saturates instead of overflowing. Windows 10 is already
-the repository's minimum target. Their imports require `mincore`, now a public
-dependency of `gesher_posix`.
+the repository's minimum target. Their imports use `mincore`, a public dependency
+of `gesher_posix`, after the ordinary Win32 libraries including `kernel32`.
+LLVM-MinGW does not ship the standalone realtime API-set import library; putting
+the umbrella `mincore` first would intercept unrelated Win32 imports. Suspend/resume
+registration uses the separate `powrprof` Windows system library. Host PE import
+policies admit only `api-ms-win-core-realtime-l1-1-1.dll` and `powrprof.dll` as
+new system DLLs for this integration; translator
+roles and unknown/private DLL rejection remain unchanged.
 
 | Consumer | Selected domain |
 | --- | --- |

@@ -63,8 +63,11 @@ add_custom_command(
   VERBATIM)
 target_sources(gesher_posix PRIVATE "${_gesher_posix_gen}/windows_zones_table.inc")
 target_include_directories(gesher_posix PRIVATE "${_gesher_posix_gen}")
-target_link_libraries(gesher_posix PUBLIC mincore powrprof synchronization psapi ws2_32 iphlpapi bcrypt shell32 advapi32 ole32 uuid
-  pthread)
+# Resolve ordinary Win32 symbols before mincore, whose umbrella import library
+# also exports them through API sets. Only the precise interrupt clocks need
+# mincore; the pinned LLVM-MinGW does not ship their standalone import library.
+target_link_libraries(gesher_posix PUBLIC powrprof synchronization psapi ws2_32 iphlpapi bcrypt shell32 advapi32 ole32 uuid
+  pthread kernel32 mincore)
 # Pull in the crash reporter (src/crash.cc), which nothing calls.
 target_link_options(gesher_posix INTERFACE -Wl,-u,gesher_crash_reporter_anchor)
 # Every process keeps a signal mailbox for kill() from other processes
