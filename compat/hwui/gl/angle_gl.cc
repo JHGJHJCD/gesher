@@ -108,6 +108,9 @@ struct LayeredSurface {
   EGLConfig config = nullptr;
   ANativeWindow* window = nullptr;
   EGLint width = 0, height = 0;
+  // Keep frame scratch instead of reallocating two full images at every swap.
+  std::vector<uint8_t> rgba;
+  std::vector<uint32_t> argb;
 };
 
 std::mutex g_layered_mutex;
@@ -155,20 +158,26 @@ void PresentLayered(LayeredSurface* s) {
   ANGLE(glGetIntegerv)(GL_READ_FRAMEBUFFER_BINDING, &read_fb);
   ANGLE(glGetIntegerv)(GL_DRAW_FRAMEBUFFER_BINDING, &draw_fb);
   ANGLE(glBindFramebuffer)(GL_FRAMEBUFFER, 0);
-  std::vector<uint8_t> rgba(static_cast<size_t>(w) * h * 4);
-  ANGLE(glReadPixels)(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+  const size_t pixels = static_cast<size_t>(w) * static_cast<size_t>(h);
+  if (pixels > static_cast<size_t>(-1) / 4) {
+    ANGLE(glBindFramebuffer)(GL_READ_FRAMEBUFFER, read_fb);
+    ANGLE(glBindFramebuffer)(GL_DRAW_FRAMEBUFFER, draw_fb);
+    return;
+  }
+  s->rgba.resize(pixels * 4);
+  ANGLE(glReadPixels)(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, s->rgba.data());
   ANGLE(glBindFramebuffer)(GL_READ_FRAMEBUFFER, read_fb);
   ANGLE(glBindFramebuffer)(GL_DRAW_FRAMEBUFFER, draw_fb);
-  std::vector<uint32_t> argb(static_cast<size_t>(w) * h);
+  s->argb.resize(pixels);
   for (EGLint y = 0; y < h; y++) {
-    const uint8_t* row = rgba.data() + static_cast<size_t>(h - 1 - y) * w * 4;  // bottom-up
-    uint32_t* out = argb.data() + static_cast<size_t>(y) * w;
+    const uint8_t* row = s->rgba.data() + static_cast<size_t>(h - 1 - y) * w * 4;  // bottom-up
+    uint32_t* out = s->argb.data() + static_cast<size_t>(y) * w;
     for (EGLint x = 0; x < w; x++) {
       const uint8_t* p = row + x * 4;
       out[x] = (uint32_t{p[3]} << 24) | (uint32_t{p[0]} << 16) | (uint32_t{p[1]} << 8) | p[2];
     }
   }
-  gesher_window_present_pixels(s->window, argb.data(), w, h);
+  gesher_window_present_pixels(s->window, s->argb.data(), w, h);
 }
 
 }  // namespace

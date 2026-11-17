@@ -23,6 +23,7 @@ import android.os.IBinder;
 import android.os.RemoteException;
 import android.os.SystemClock;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -109,6 +110,10 @@ final class ActiveServices {
         ScheduledFuture<?> restart;
         final List<PendingStart> pendingStarts = new ArrayList<>();
         final Map<Intent.FilterComparison, IntentBindRecord> bindings = new LinkedHashMap<>();
+        final ArrayDeque<BindingCall> bindingCalls = new ArrayDeque<>();
+        final ArrayDeque<IntentBindRecord> pendingUnbinds = new ArrayDeque<>();
+        long bindingGeneration;
+        boolean dispatchingBindings;
 
         ServiceRecord(ServiceInfo info, ApkPackage owner) {
             super("ServiceRecord " + info.name);
@@ -139,12 +144,30 @@ final class ActiveServices {
         final List<ConnectionRecord> connections = new ArrayList<>();
         boolean requested;   // scheduleBindService sent
         boolean received;    // publishService came
+        boolean hasBound;    // onBind/onRebind has not yet been paired with onUnbind
+        boolean doRebind;    // the last onUnbind returned true
+        boolean unbindPending;
         IBinder binder;
 
         IntentBindRecord(ServiceRecord service, Intent intent) {
             super("IntentBindRecord " + service.info.name);
             this.service = service;
             this.intent = intent;
+        }
+    }
+
+    /** Ordered application calls, submitted without holding the service monitor. */
+    private static final class BindingCall {
+        final IntentBindRecord binding;
+        final IApplicationThread thread;
+        final long generation;
+        final boolean unbind, rebind;
+        final long sequence;
+
+        BindingCall(IntentBindRecord binding, IApplicationThread thread, long generation,
+                boolean unbind, boolean rebind, long sequence) {
+            this.binding = binding; this.thread = thread; this.generation = generation;
+            this.unbind = unbind; this.rebind = rebind; this.sequence = sequence;
         }
     }
 
@@ -409,6 +432,10 @@ final class ActiveServices {
             // not a pending bind: every later client must receive onNullBinding too.
             if (received) {
                 connected(connectionRecord, published);
+                // The Binder (including a published null) survives ordinary unbinding.
+                // A callback may have unbound again before this point.
+                synchronized (this) { requestBindingLocked(r, b, true); }
+                drainBindingCalls(r);
             } else if ((flags & Context.BIND_AUTO_CREATE) != 0 || r.created) {
                 bringUp(r);
             }
@@ -447,7 +474,6 @@ final class ActiveServices {
 
     boolean unbindService(IServiceConnection connection) {
         List<ConnectionRecord> removed;
-        List<IntentBindRecord> unbind = new ArrayList<>();
         List<ServiceRecord> services = new ArrayList<>();
         synchronized (this) {
             List<ConnectionRecord> existing = mConnections.get(connection.asBinder());
@@ -464,33 +490,31 @@ final class ActiveServices {
             for (ConnectionRecord c : removed) {
                 IntentBindRecord b = c.binding;
                 b.connections.remove(c);
-                if (b.connections.isEmpty() && b.requested) {
-                    b.requested = false;
-                    b.received = false;
-                    b.binder = null;
-                    unbind.add(b);
-                }
+                if (b.connections.isEmpty()) requestUnbindLocked(b);
                 if (!services.contains(b.service)) services.add(b.service);
             }
         }
         for (ServiceRecord r : services) SystemServer.log("unbindService " + r);
-        for (IntentBindRecord b : unbind) {
-            ServiceRecord r = b.service;
-            if (r.app == null || !r.created) continue;
-            SystemServer.log("scheduleUnbindService " + r);
-            try {
-                r.app.thread.scheduleUnbindService(r, b, b.intent);
-            } catch (RemoteException e) {
-                SystemServer.log("scheduleUnbindService " + r + ": " + e);
-            }
-        }
+        for (ServiceRecord r : services) drainBindingCalls(r);
         for (ServiceRecord r : services) maybeBringDown(r);
         return true;
     }
 
     void unbindFinished(IBinder token, IBinder bindToken) {
-        // onUnbind returned true: onRebind on the next bind would follow. Bindings start
-        // over here instead (onBind again).
+        ServiceRecord r;
+        synchronized (this) {
+            r = byToken(token);
+            if (r == null || !(bindToken instanceof IntentBindRecord)) return;
+            requireServiceOwner(r);
+            IntentBindRecord b = (IntentBindRecord) bindToken;
+            if (b.service != r || !b.unbindPending || !r.pendingUnbinds.remove(b)) return;
+            b.unbindPending = false;
+            b.doRebind = true;
+            // A client may already have received the retained Binder while onUnbind
+            // was still executing in the service process.
+            requestBindingLocked(r, b, true);
+        }
+        drainBindingCalls(r);
     }
 
     void serviceDoneExecuting(IBinder token, int type, int startId, int res) {
@@ -500,6 +524,12 @@ final class ActiveServices {
             if (r != null) requireServiceOwner(r);
             if (r != null && type == 1 && startId == r.lastStartId) {
                 r.startResult = res;
+            }
+            if (r != null && type == 4) {
+                // ActivityThread serializes service callbacks on its main Looper.
+                // A false onUnbind reports only the service token, in dispatch order.
+                IntentBindRecord b = r.pendingUnbinds.pollFirst();
+                if (b != null) b.unbindPending = false;
             }
         }
         if (r == null) return;
@@ -586,6 +616,94 @@ final class ActiveServices {
 
     // --- bringing services up and down -------------------------------------------------
 
+    /** Guarded by this. Match AOSP's distinct publication and lifecycle states. */
+    private void requestBindingLocked(ServiceRecord r, IntentBindRecord b, boolean rebind) {
+        if (mServices.get(r.name) != r || r.app == null || !r.created || !serviceCurrent(r)
+                || b.connections.isEmpty() || b.hasBound) return;
+        if (rebind ? !b.doRebind : b.requested) return;
+        if (!rebind) b.requested = true;
+        b.hasBound = true;
+        b.doRebind = false;
+        r.bindingCalls.addLast(new BindingCall(b, r.app.thread, r.bindingGeneration,
+                false, rebind, ++mBindSeq));
+    }
+
+    /** Guarded by this. Do not discard the Binder cached by the initial onBind. */
+    private void requestUnbindLocked(IntentBindRecord b) {
+        ServiceRecord r = b.service;
+        if (!b.hasBound || r.app == null || !r.created) return;
+        b.hasBound = false;
+        b.doRebind = false;
+        r.bindingCalls.addLast(new BindingCall(b, r.app.thread, r.bindingGeneration,
+                true, false, 0));
+    }
+
+    private void drainBindingCalls(ServiceRecord r) {
+        synchronized (this) {
+            if (r.dispatchingBindings) return;
+            r.dispatchingBindings = true;
+        }
+        boolean release = true;
+        RuntimeException dispatchFailure = null;
+        try {
+            for (;;) {
+                BindingCall call;
+                synchronized (this) {
+                    call = r.bindingCalls.pollFirst();
+                    if (call == null) {
+                        r.dispatchingBindings = false;
+                        release = false;
+                        if (dispatchFailure != null) throw dispatchFailure;
+                        return;
+                    }
+                    if (mServices.get(r.name) != r || r.app == null || !r.created
+                            || r.app.thread != call.thread || r.bindingGeneration != call.generation
+                            || !serviceCurrent(r)) continue;
+                    if (call.unbind) {
+                        call.binding.unbindPending = true;
+                        r.pendingUnbinds.addLast(call.binding);
+                    }
+                }
+                long identity = Binder.clearCallingIdentity();
+                try {
+                    if (call.unbind) {
+                        SystemServer.log("scheduleUnbindService " + r);
+                        call.thread.scheduleUnbindService(r, call.binding, call.binding.intent);
+                    } else {
+                        SystemServer.log("scheduleBindService " + r + (call.rebind ? " (rebind)" : ""));
+                        call.thread.scheduleBindService(r, call.binding, call.binding.intent, call.rebind,
+                                ActivityManager.PROCESS_STATE_SERVICE, call.sequence);
+                    }
+                } catch (RemoteException e) {
+                    SystemServer.log("service binding callback " + r + ": " + e);
+                } catch (RuntimeException e) {
+                    // A local application-thread implementation can throw after
+                    // synchronous reentry queued another call. Drain that work
+                    // before returning the original failure to the caller.
+                    if (dispatchFailure == null) dispatchFailure = e;
+                } finally {
+                    Binder.restoreCallingIdentity(identity);
+                }
+            }
+        } finally {
+            if (release) synchronized (this) { r.dispatchingBindings = false; }
+            // A final unbind/stop can arrive while another thread owns this
+            // queue. Teardown must follow all admitted binding submissions.
+            maybeBringDown(r);
+        }
+    }
+
+    /** Guarded by this. An old process's cache/acknowledgements cannot revive a binding. */
+    private void resetBindingsLocked(ServiceRecord r) {
+        r.bindingGeneration++;
+        r.bindingCalls.clear();
+        r.pendingUnbinds.clear();
+        for (IntentBindRecord b : r.bindings.values()) {
+            b.requested = b.received = b.hasBound = b.doRebind = b.unbindPending = false;
+            b.binder = null;
+        }
+    }
+
     private boolean serviceCurrent(ServiceRecord r) {
         return r.owner != null && mPm.get(r.info.packageName) == r.owner
                 && !mPm.isRemovalPending(r.info.packageName);
@@ -640,10 +758,7 @@ final class ActiveServices {
                 starts = new ArrayList<>(r.pendingStarts);
                 r.pendingStarts.clear();
                 for (IntentBindRecord b : r.bindings.values()) {
-                    if (!b.requested && !b.connections.isEmpty()) {
-                        b.requested = true;
-                        binds.add(b);
-                    }
+                    if (!b.requested && !b.connections.isEmpty()) binds.add(b);
                 }
             }
             try {
@@ -666,16 +781,11 @@ final class ActiveServices {
                     app.thread.scheduleServiceArgs(r, new ParceledListSlice<>(currentStarts));
                 }
                 for (IntentBindRecord b : binds) {
-                    long seq;
                     synchronized (this) {
                         pruneRetired(r);
-                        if (!serviceCurrent(r) || b.connections.isEmpty()) { b.requested = false; continue; }
-                        seq = ++mBindSeq;
+                        requestBindingLocked(r, b, false);
                     }
-                    if (!workCurrent(r)) return;
-                    SystemServer.log("scheduleBindService " + r);
-                    app.thread.scheduleBindService(r, b, b.intent, false /* rebind */,
-                            ActivityManager.PROCESS_STATE_SERVICE, seq);
+                    drainBindingCalls(r);
                 }
                 if (!workCurrent(r)) maybeBringDown(r);
             } catch (RemoteException e) {
@@ -690,7 +800,9 @@ final class ActiveServices {
             pruneRetired(r);
             if (r.startRequested || r.hasAutoCreateConnections()) return;
             if (mServices.get(r.name) != r) return;
+            if (r.dispatchingBindings) return;
             mServices.remove(r.name);
+            resetBindingsLocked(r);
             if (r.restart != null) { r.restart.cancel(false); r.restart = null; }
             for (IntentBindRecord b : r.bindings.values()) {
                 for (ConnectionRecord c : b.connections) {
@@ -758,7 +870,11 @@ final class ActiveServices {
         if (!app.exiting || !app.reaped || inUse(app)) {
             throw new IllegalStateException("Cannot retire services of a process still in use");
         }
-        mServices.values().removeIf(r -> r.app == app);
+        mServices.values().removeIf(r -> {
+            if (r.app != app) return false;
+            resetBindingsLocked(r);
+            return true;
+        });
         mConnections.entrySet().removeIf(e -> {
             e.getValue().removeIf(c -> c.binding.service.app == app);
             return e.getValue().isEmpty();
@@ -774,6 +890,9 @@ final class ActiveServices {
                 if (!packageName.equals(r.info.packageName)) continue;
                 r.startRequested = false;
                 r.pendingStarts.clear();
+                // A running binding dispatch may defer the final stop, but a
+                // force-stop must not allow its queued callbacks to run first.
+                resetBindingsLocked(r);
                 if (r.restart != null) { r.restart.cancel(false); r.restart = null; }
                 for (IntentBindRecord b : r.bindings.values()) {
                     for (ConnectionRecord c : b.connections) {
@@ -802,6 +921,9 @@ final class ActiveServices {
                 entry.getValue().removeIf(c -> {
                     if (c.caller == null || !c.caller.equals(app.thread.asBinder())) return false;
                     c.binding.connections.remove(c);
+                    if (c.binding.connections.isEmpty() && c.binding.service.app != app) {
+                        requestUnbindLocked(c.binding);
+                    }
                     if (!reconsider.contains(c.binding.service)) reconsider.add(c.binding.service);
                     return true;
                 });
@@ -819,10 +941,8 @@ final class ActiveServices {
                 r.created = false;
                 for (IntentBindRecord b : r.bindings.values()) {
                     disconnected.addAll(b.connections);
-                    b.requested = false;
-                    b.received = false;
-                    b.binder = null;
                 }
+                resetBindingsLocked(r);
                 boolean started = r.startRequested && (r.startResult != Service.START_NOT_STICKY
                         || !r.pendingStarts.isEmpty());
                 if (!started) r.startRequested = false;
@@ -856,7 +976,10 @@ final class ActiveServices {
             }
         }
         for (ConnectionRecord c : disconnected) connected(c, null);
-        for (ServiceRecord r : reconsider) maybeBringDown(r);
+        for (ServiceRecord r : reconsider) {
+            drainBindingCalls(r);
+            maybeBringDown(r);
+        }
         for (ServiceRecord r : recovered) scheduleRestart(r);
     }
 

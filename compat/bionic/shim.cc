@@ -586,6 +586,7 @@ int BIONIC_SYSV ClockGettime(int clock, LinuxTimespec* ts) {
   switch (clock) {
     case 0:   // CLOCK_REALTIME
     case 5: {  // CLOCK_REALTIME_COARSE
+      if (ts == nullptr) return errno = kEFAULT, -1;
       *ts = RealtimeNow();
       return 0;
     }
@@ -599,21 +600,25 @@ int BIONIC_SYSV ClockGettime(int clock, LinuxTimespec* ts) {
       ns = ThreadCpuNanos();
       break;
     default:
-      if (clock <= -65536 && ts != nullptr) {
+      if (clock <= -65536) {
         int error = ReadPthreadCpuClock(clock, &ns);
         if (error == 0) break;
       }
       errno = kEINVAL;
       return -1;
   }
+  if (ts == nullptr) return errno = kEFAULT, -1;
   ts->tv_sec = ns / 1000000000;
   ts->tv_nsec = ns % 1000000000;
   return 0;
 }
 int BIONIC_SYSV ClockGetres(int clock, LinuxTimespec* ts) {
-  if (clock < 0) {
+  if (clock < 0 || clock > 7) {
     int64_t unused;
-    if (ReadPthreadCpuClock(clock, &unused) != 0) { errno = kEINVAL; return -1; }
+    if (clock > -65536 || ReadPthreadCpuClock(clock, &unused) != 0) {
+      errno = kEINVAL;
+      return -1;
+    }
   }
   if (ts) {
     ts->tv_sec = 0;
@@ -641,31 +646,55 @@ int64_t BIONIC_SYSV Time(int64_t* out) {
 // Sleeps end early, with EINTR, when a signal handler runs on the sleeping
 // thread (signal_bionic.cc), as on Linux.
 int BIONIC_SYSV Nanosleep(const LinuxTimespec* req, LinuxTimespec* rem) {
-  if (req == nullptr || req->tv_nsec < 0 || req->tv_nsec >= 1000000000 || req->tv_sec < 0) {
+  if (req == nullptr) return errno = kEFAULT, -1;
+  const LinuxTimespec request = *req;  // req and rem may be the same object.
+  if (request.tv_nsec < 0 || request.tv_nsec >= 1000000000 || request.tv_sec < 0) {
     errno = kEINVAL;
     return -1;
   }
-  int64_t ms = req->tv_sec * 1000 + (req->tv_nsec + 999999) / 1000000;
-  uint32_t left = 0;
-  if (InterruptibleSleep(static_cast<uint32_t>(ms > 0x7ffffffe ? 0x7ffffffe : ms), &left)) {
-    if (rem) *rem = {left / 1000, static_cast<int64_t>(left % 1000) * 1000000};
-    errno = kEINTR;
-    return -1;
+  const int saved_errno = errno;
+  const __int128 requested = static_cast<__int128>(request.tv_sec) * 1000000000 +
+                             request.tv_nsec;
+  // Linux's relative hrtimer uses a signed nanosecond deadline and saturates
+  // at KTIME_MAX. Large LP64 seconds must neither overflow nor become a short
+  // successful sleep. A Windows wait slice is not the whole timeout.
+  __int128 deadline = static_cast<__int128>(QpcNanos()) + requested;
+  if (deadline > INT64_MAX) deadline = INT64_MAX;
+  for (;;) {
+    __int128 left = deadline - QpcNanos();
+    if (left <= 0) {
+      // Even a zero/expired sleep is a signal-delivery point. In particular,
+      // pthread_kill queues a handler until the target enters such a boundary.
+      DeliverPendingSignals();
+      errno = saved_errno;
+      return 0;  // Linux leaves rem untouched when the wait completes.
+    }
+    __int128 milliseconds = (left + 999999) / 1000000;
+    if (milliseconds > 0x7ffffffe) milliseconds = 0x7ffffffe;
+    int64_t interrupted_at = 0;
+    auto observe = [](void* value) { *static_cast<int64_t*>(value) = QpcNanos(); };
+    if (InterruptibleSleepObserved(static_cast<uint32_t>(milliseconds), observe,
+                                  &interrupted_at)) {
+      if (rem != nullptr) {
+        // The signal handler may run for longer than the remaining timeout.
+        // Its execution is not part of the sleeping interval Linux reports.
+        left = deadline - interrupted_at;
+        if (left < 0) left = 0;
+        *rem = {static_cast<int64_t>(left / 1000000000),
+                static_cast<int64_t>(left % 1000000000)};
+      }
+      return errno = kEINTR, -1;
+    }
   }
-  if (rem) *rem = {0, 0};
-  return 0;
 }
 int BIONIC_SYSV Usleep(uint32_t us) {
-  if (InterruptibleSleep((us + 999) / 1000, nullptr)) {
-    errno = kEINTR;
-    return -1;
-  }
-  return 0;
+  const LinuxTimespec request = {us / 1000000, static_cast<int64_t>(us % 1000000) * 1000};
+  return Nanosleep(&request, nullptr);
 }
 unsigned BIONIC_SYSV SleepSeconds(unsigned s) {
-  uint32_t left = 0;
-  if (InterruptibleSleep(s > 2000000 ? 2000000000u : s * 1000, &left)) return (left + 999) / 1000;
-  return 0;
+  LinuxTimespec request = {s, 0};
+  // Bionic LP64 returns whole remaining seconds, without rounding up.
+  return Nanosleep(&request, &request) == -1 ? static_cast<unsigned>(request.tv_sec) : 0;
 }
 int64_t BIONIC_SYSV Clock() { return ProcessCpuNanos() / 1000; }  // CLOCKS_PER_SEC 1e6
 

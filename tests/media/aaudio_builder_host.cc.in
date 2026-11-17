@@ -54,6 +54,9 @@ struct Track {
   int64_t Position() const { return 0; }
   bool WaitForRoom(size_t, int) { return true; }
   ssize_t Write(void*, size_t bytes, bool) { return static_cast<ssize_t>(bytes); }
+  int Start() { return 0; }
+  void Pause() {}
+  void Flush() {}
   void Stop() {}
   void Release() {}
 };
@@ -66,6 +69,7 @@ struct CaptureStream {
   bool Timestamp(int64_t* frames, int64_t* ns) { ++timestamp_calls; *frames = 84; *ns = 777; return timestamp_ready; }
   bool WaitForData(size_t, int) { return true; }
   ssize_t Read(void*, size_t bytes, bool) { return static_cast<ssize_t>(bytes); }
+  int Start() { return 0; }
   void Stop() {}
   void Release() {}
 };
@@ -79,6 +83,7 @@ std::shared_ptr<CaptureStream> OpenCapture(const CaptureParams& p, std::string*)
   auto capture = std::make_shared<CaptureStream>(); capture->capacity = p.capacity_frames + 16; return capture;
 }
 struct AAudioStream;
+void TraceInput(AAudioStream*, const char*, int32_t, int32_t) {}
 @TYPES@
 @STREAM@
 @CALLBACKS@

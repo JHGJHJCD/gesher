@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <pthread.h>
 #include "../../compat/posix/src/socket_internal.h"
+#include "owner_thread_diagnostics.h"
 #undef pthread_mutex_lock  // log the canonical Winpthreads function, not errno wrapper
 
 namespace {

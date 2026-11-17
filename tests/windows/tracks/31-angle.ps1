@@ -101,4 +101,10 @@ GraphicsDex 'OpenGL ES for Java apps: EGL10 and GLES20 draw a frame (pbuffer, Wi
   GlBindingsTest @()
 GraphicsDex 'ImageReader native surface: EGL pixels, Canvas notification, queue overflow and close lifetime' `
   ImageReaderEglTest @()
+# Independently exercise the old staging path even if ANGLE supports the
+# direct readback extension. All ImageReader pixel/lifetime checks must pass.
+$env:GESHER_EGL_DIRECT_READBACK = '0'
+GraphicsDex 'ImageReader surface: forced staging fallback preserves pixels and lifetime' `
+  ImageReaderEglTest @()
+Remove-Item Env:GESHER_EGL_DIRECT_READBACK
 Remove-Item Env:GESHER_EGL_DEVICE

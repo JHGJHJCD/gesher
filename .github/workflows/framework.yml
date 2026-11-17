@@ -476,10 +476,17 @@ jobs:
             --apksig "$RUNNER_TEMP/gesher-apksig.jar")
           python3 tools/test_activity_finish.py "${args[@]}"
           python3 tools/test_null_bindings.py "${args[@]}"
+          python3 tools/test_service_rebinding.py "${args[@]}"
           "$JAVA_HOME/bin/javac" -cp work/sdk-36/android.jar \
             -d "$RUNNER_TEMP/media-receiver-sdk" \
             tests/dex-services/gesher/services/MediaTestBootstrap.java \
             tests/dex-services/gesher/services/MediaReceiverLifecycleTest.java
+
+      - name: MediaStore SDK access and provider client contracts
+        run: |
+          python3 tools/test_media_store_access.py --java-home "$JAVA_HOME" \
+            --sdk-jar work/sdk-36/android.jar --framework-classes out/framework/classes \
+            --core-classes out/coremod --app-classes out/app/gesher-app-classes.jar
 
       - name: Cookie callback caller Looper contracts
         run: |

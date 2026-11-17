@@ -167,6 +167,11 @@ bool DeliverExternalSignal(int sig, int sender_pid, int code, int status, bool o
 // handler has run then); returns true if interrupted, with what was left.
 bool InterruptibleSleep(uint32_t ms, uint32_t* left_ms);
 
+// As above, observing an interruption before delivering its handlers. The
+// observer is an internal host callback, never loaded application code; it
+// runs without the signal-state lock and must only record the wake instant.
+bool InterruptibleSleepObserved(uint32_t ms, void (*observe)(void*), void* context);
+
 // Runs the handlers of signals sent to this thread that it no longer blocks
 // (signal_bionic.cc). Called where Linux would deliver them: blocking waits
 // and sleeps, and wherever the signal mask is lowered. Cheap when none are

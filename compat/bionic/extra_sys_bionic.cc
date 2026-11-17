@@ -204,13 +204,25 @@ int BIONIC_SYSV PthreadAttrGetscope(const bionic_pthread_attr_t*, int* scope) {
   *scope = 0;  // PTHREAD_SCOPE_SYSTEM
   return 0;
 }
-int BIONIC_SYSV PthreadAttrGetinheritsched(const bionic_pthread_attr_t*, int* v) {
-  *v = 0;  // PTHREAD_INHERIT_SCHED
+int BIONIC_SYSV PthreadAttrGetinheritsched(const bionic_pthread_attr_t* attr, int* v) {
+  // Android's constants differ from glibc: EXPLICIT=0, INHERIT=1. Before
+  // Android P there was no setter; preserve its policy-dependent default.
+  if ((attr->flags & 4) != 0) *v = 1;
+  else if ((attr->flags & 8) != 0) *v = 0;
+  else *v = attr->sched_policy == 0 ? 1 : 0;
   return 0;
 }
-int BIONIC_SYSV PthreadAttrSetinheritsched(bionic_pthread_attr_t*, int) { return 0; }
+int BIONIC_SYSV PthreadAttrSetinheritsched(bionic_pthread_attr_t* attr, int value) {
+  if (value == 0) attr->flags = (attr->flags & ~uint32_t{4}) | 8;
+  else if (value == 1) attr->flags = (attr->flags & ~uint32_t{8}) | 4;
+  else return kEINVAL;
+  return 0;
+}
 int BIONIC_SYSV PthreadAttrSetstack(bionic_pthread_attr_t* a, void* base, size_t size) {
-  if (size < 16384) return kEINVAL;
+  // Match the pinned bionic contract and the guest's 4096-byte page size.
+  // This validates the attribute; CreateThread still owns the actual stack.
+  if (size < 16384 || (size & 4095) != 0 ||
+      (reinterpret_cast<uintptr_t>(base) & 4095) != 0) return kEINVAL;
   a->stack_base = base;
   a->stack_size = size;
   return 0;
@@ -431,18 +443,31 @@ int BIONIC_SYSV ClockNanosleep(int clock, int flags, const LinuxTimespec* req, L
     return NowMonotonicNs();
   };
   const __int128 requested = static_cast<__int128>(req->tv_sec) * 1000000000 + req->tv_nsec;
-  const __int128 deadline = absolute ? requested : now() + requested;
+  __int128 deadline = absolute ? requested : now() + requested;
+  // Linux hrtimers saturate both converted timespecs and relative-deadline
+  // addition at signed nanosecond KTIME_MAX, even for a wider time_t input.
+  if (deadline > INT64_MAX) deadline = INT64_MAX;
   for (;;) {
     __int128 left = deadline - now();
-    if (left <= 0) return 0;
+    if (left <= 0) {
+      // Preserve signal delivery even when no host wait is necessary. The
+      // errno restorer also covers a handler run at this completion boundary.
+      DeliverPendingSignals();
+      return 0;
+    }
     __int128 milliseconds = (left + 999999) / 1000000;
     if (milliseconds > 0x7ffffffe) milliseconds = 0x7ffffffe;
     // Recheck wall-clock adjustments and BOOTTIME after system resume instead
     // of leaving a long relative Windows wait unaware of the new clock value.
     if ((realtime_absolute || clock == 7) && milliseconds > 1000) milliseconds = 1000;
-    if (InterruptibleSleep(static_cast<uint32_t>(milliseconds), nullptr)) {
+    int64_t interrupted_at = 0;
+    auto observe = [](void* value) { *static_cast<int64_t*>(value) = NowMonotonicNs(); };
+    if (InterruptibleSleepObserved(static_cast<uint32_t>(milliseconds), observe,
+                                  &interrupted_at)) {
       if (!absolute && rem != nullptr) {
-        left = deadline - now();
+        // Relative waits report the interval left when the signal interrupted
+        // them, before its handler runs. Absolute waits never write rem.
+        left = deadline - interrupted_at;
         if (left < 0) left = 0;
         *rem = {static_cast<int64_t>(left / 1000000000),
                 static_cast<int64_t>(left % 1000000000)};

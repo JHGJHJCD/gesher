@@ -137,6 +137,7 @@ jobs:
       - name: Native allocation, directory, semaphore, file-lock and socket-control contracts
         run: |
           python3 tools/test_hwui_renderer_policy.py --sanitize
+          python3 tools/test_egl_readback_layout.py --sanitize
           python3 tools/test_bionic_allocations.py --sanitize
           python3 tools/test_bionic_system_contracts.py --sanitize
           python3 tools/test_socket_control_contract.py --sanitize
@@ -152,12 +153,14 @@ jobs:
           python3 tools/test_msync_contracts.py --sanitize
           python3 tools/test_retriever_frame_contracts.py --sanitize
           python3 tools/test_utc_time_contracts.py --sanitize
+          python3 tools/test_sleep_contracts.py --sanitize
 
       - name: Native TLS, wait, DNS, clock, affinity, finalizer and media lifecycle contracts
         run: |
           python3 tools/test_bionic_key_contracts.py --sanitize
           python3 tools/test_pthread_clock_contracts.py --sanitize
           python3 tools/test_pthread_clock_contracts.py --linux-reference
+          python3 tools/test_pthread_attribute_contracts.py --sanitize
           python3 tools/test_bionic_wait_contracts.py --sanitize
           python3 tools/test_libcore_process_logging.py --sanitize
           python3 tools/test_debug_memory_contracts.py --sanitize
@@ -171,6 +174,7 @@ jobs:
           python3 tools/test_elf_lookup_performance.py --sanitize
           python3 tools/test_media_api_contracts.py --sanitize
           python3 tools/test_aaudio_builder_contracts.py
+          python3 tools/test_aaudio_lifecycle_contracts.py --sanitize
 
       - name: Timer, DNS and media lifetime contracts
         run: |
@@ -213,6 +217,7 @@ jobs:
           "$RUNNER_TEMP/event-loop-reference"
           python3 tools/test_audio_state_contracts.py --sanitize
           python3 tools/test_surface_geometry_contracts.py --sanitize
+          python3 tools/test_native_window_dispatch.py --sanitize
 
       - name: Physical keys, sensor flushes, directory walks and futex contracts
         run: |

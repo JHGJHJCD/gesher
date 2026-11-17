@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <system/window.h>
 #include "surface_geometry_assertions.h"
+#include "native_window_dispatch_assertions.h"
 
 int main() {
   auto queue = android::sp<gesher::media::QueueSurface>::make(4, 6);
@@ -17,5 +18,6 @@ int main() {
   surface_contract::Run(window.get(), host_window->width(), host_window->height());
   std::printf("surface geometry contracts: %d checks, %d failures\n",
               surface_contract::checks, surface_contract::failures);
-  return surface_contract::failures != 0;
+  const int dispatch_failures = native_window_dispatch_contract::Run();
+  return surface_contract::failures != 0 || dispatch_failures != 0;
 }

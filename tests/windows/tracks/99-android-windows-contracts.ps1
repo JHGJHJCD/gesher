@@ -1,5 +1,7 @@
 # Runtime contracts added by the November 14 Android/Windows audit.
 # Track 50 supplies bounded RunTimed; track 94 supplies the framework boot path.
+. "$PSScriptRoot/../pthread-attribute-contracts.ps1"
+
 # Exercise synthetic Hebrew/English permission dialogs on a never-shown desktop.
 # This is the production dialog implementation, with denial/keyboard/scroll checks.
 $permissionDialogOut = RunTimed "$Dir/permission_dialog_test.exe" @() 60
@@ -33,7 +35,8 @@ try {
     Check "media: $aaudioGuest actual negotiation, callbacks and clock errors" {
       $global:LASTEXITCODE = $aaudioCode
       $aaudioOut
-    } @('AAudio builder guest contracts:', ' checks, 0 failures')
+    } @('AAudio builder guest contracts:', ' checks, 0 failures',
+        'AAudio lifecycle guest contracts: all passed')
   }
 } finally {
   if ($null -eq $aaudioSaved) { Remove-Item Env:GESHER_AUDIO -ErrorAction SilentlyContinue }
@@ -57,7 +60,8 @@ Check 'media: real callback WAV sources, PCM bytes, metadata and receiver releas
 # The November 16 contracts run on actual ART/JNI and generated Binder proxies.
 foreach ($finishFixture in @(
   @{ Class = 'ActivityFinishContractTest'; Marker = 'Activity finish Binder contract all passed:' },
-  @{ Class = 'NullBindingContractTest'; Marker = 'Null binding contracts passed:' }
+  @{ Class = 'NullBindingContractTest'; Marker = 'Null binding contracts passed:' },
+  @{ Class = 'ServiceRebindContractTest'; Marker = 'Service rebinding contracts passed:' }
 )) {
   $finishOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' + $finishFixture.Class) 90
   $finishCode = $LASTEXITCODE
@@ -66,6 +70,13 @@ foreach ($finishFixture in @(
     $finishOut
   } @($finishFixture.Marker)
 }
+
+$mediaStoreAccessOut = FixesRun ($dvmFixes + 'gesher.services.MediaStoreAccessContractTest') 90
+$mediaStoreAccessCode = $LASTEXITCODE
+Check 'services: MediaStore SDK linkage, AppOps and provider access contracts' {
+  $global:LASTEXITCODE = $mediaStoreAccessCode
+  $mediaStoreAccessOut
+} @('MediaStoreAccessContractTest all passed:')
 
 $receiverAudioSaved = [Environment]::GetEnvironmentVariable('GESHER_AUDIO', 'Process')
 try {

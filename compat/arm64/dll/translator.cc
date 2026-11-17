@@ -512,6 +512,13 @@ class Env final : public A64::UserCallbacks {
     event_ = false;
     wait_pc_ = 0;
     tid_ = GetCurrentThreadId();
+    // This private guest allocation differs from the native callback stack.
+    // Only values cross the boundary; the host registry owns pthread lifetime.
+    using PublishStack = int(GESHER_SYSV*)(void*, uint64_t, uint64_t);
+    static auto publish_stack = reinterpret_cast<PublishStack>(
+        g_host != nullptr && g_host->resolve != nullptr
+            ? g_host->resolve("__gesher_arm64_set_thread_stack") : nullptr);
+    if (publish_stack) publish_stack(stack_base_, kStackSize, kGuardSize);
     if (ProfilePeriodMs() > 0) {
       // Publish only a live profiling handle: Detach removes exactly these
       // entries before closing the handle or returning the Env to the pool.
