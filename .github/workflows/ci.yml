@@ -136,6 +136,7 @@ jobs:
 
       - name: Native allocation, directory, semaphore, file-lock and socket-control contracts
         run: |
+          python3 tools/test_hwui_renderer_policy.py --sanitize
           python3 tools/test_egl_readback_layout.py --sanitize
           python3 tools/test_bionic_allocations.py --sanitize
           python3 tools/test_bionic_system_contracts.py --sanitize
