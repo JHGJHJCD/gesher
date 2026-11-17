@@ -142,6 +142,10 @@ add_executable(timerfd_windows_test tests/native/timerfd_windows_test.cc)
 target_compile_options(timerfd_windows_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(timerfd_windows_test PRIVATE gesher_posix)
 
+add_executable(boottime_resume_windows_test tests/native/boottime_resume_windows_test.cc)
+target_compile_options(boottime_resume_windows_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(boottime_resume_windows_test PRIVATE gesher_bionic gesher_elf gesher_posix)
+
 # libutils' Looper over gesher-base's epoll and eventfd, RefBase, String8;
 # also run in CI on Windows.
 add_executable(libutils_probe probes/system/libutils_probe.cc)

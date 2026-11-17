@@ -448,17 +448,20 @@ int BIONIC_SYSV ClockNanosleep(int clock, int flags, const LinuxTimespec* req, L
     }
     __int128 milliseconds = (left + 999999) / 1000000;
     if (milliseconds > 0x7ffffffe) milliseconds = 0x7ffffffe;
-    // Recheck wall-clock adjustments and BOOTTIME after system resume instead
-    // of leaving a long relative Windows wait unaware of the new clock value.
-    if ((realtime_absolute || clock == 7) && milliseconds > 1000) milliseconds = 1000;
+    // Wall-clock adjustment still needs a finite recheck. BOOTTIME has an
+    // independent resume notification and does not add an awake-time slice.
+    if (realtime_absolute && milliseconds > 1000) milliseconds = 1000;
     struct Observation { int clock; int64_t at; } observed{clock, 0};
     auto observe = [](void* value) {
       auto& sample = *static_cast<Observation*>(value);
       sample.at = sample.clock == 7 ? gesher::BoottimeNanos() : NowMonotonicNs();
     };
-    if (InterruptibleSleepObserved(static_cast<uint32_t>(milliseconds), observe,
-                                  &observed)) {
-      if (!absolute && rem != nullptr) {
+    const int error = clock == 7
+        ? InterruptibleBoottimeSleepObserved(static_cast<int64_t>(deadline), observe, &observed)
+        : (InterruptibleSleepObserved(static_cast<uint32_t>(milliseconds), observe, &observed)
+               ? kEINTR : 0);
+    if (error != 0) {
+      if (error == kEINTR && !absolute && rem != nullptr) {
         // Relative waits report the interval left when the signal interrupted
         // them, before its handler runs. Absolute waits never write rem.
         left = deadline - observed.at;
@@ -466,7 +469,7 @@ int BIONIC_SYSV ClockNanosleep(int clock, int flags, const LinuxTimespec* req, L
         *rem = {static_cast<int64_t>(left / 1000000000),
                 static_cast<int64_t>(left % 1000000000)};
       }
-      return kEINTR;
+      return error;
     }
     // A wait slice (or an early Windows wake) never completes the full request
     // until the selected clock reaches its deadline.

@@ -34,16 +34,18 @@ python3 tools/test_clock_domains.py --sanitize \
   --source-ref 6f5e23a598c10906e4518045bc8d73f5c0cf3a9f
 ```
 
-The companion timerfd fixture exercises the actual timer backend and callback
-path; its `suspend` case fails six of nine assertions at the same base:
+The corrected timerfd fixture models native relative-timer eligibility across
+suspension and delivers a distinct power notification. Its `suspend` case fails
+10 of 28 assertions on the reviewed PR head (which already has correct readers):
 
 ```sh
 python3 tools/test_timerfd_contracts.py --sanitize --case suspend \
-  --skip-linux-reference --source-ref 6f5e23a598c10906e4518045bc8d73f5c0cf3a9f
+  --skip-linux-reference --source-ref 35c55f3b7024fd5f0b7cd91f2b46b77f87aadd26
 ```
 
-The candidate passes all 71 clock assertions and all nine timerfd suspend
-assertions. These are deterministic regression tests, not physical suspend
+The candidate passes all 71 clock assertions, 28 timerfd suspend assertions and
+35 integrated sleep/resume assertions (`tools/test_boottime_resume.py`). These
+are deterministic regression tests, not physical suspend
 qualification. See [the acceptance notes](../../docs/research/clock-domains-2026-11-17.md)
 for the real Windows probe and remaining runtime gates.
 

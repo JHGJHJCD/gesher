@@ -6,6 +6,7 @@
 // since disabling a threadpool timer alone does not revoke queued callbacks.
 #include <gesher/timerfd.h>
 #include <gesher/clocks.h>
+#include <gesher/resume.h>
 
 #include <errno.h>
 #include <string.h>
@@ -69,6 +70,7 @@ struct TimerFd {
   std::mutex mutex;
   std::condition_variable changed;
   std::shared_ptr<EventFd> readiness;
+  ResumeSubscription resume;
   PTP_TIMER timer = nullptr;
   int clockid = kMonotonic;
   bool changing = false;
@@ -78,6 +80,9 @@ struct TimerFd {
   uint64_t pending = 0;
 
   ~TimerFd() {
+    // A resume observer can need mutex. Join it before taking either timer
+    // lock or destroying the native timer/readiness object.
+    resume.Reset();
     if (timer == nullptr) return;
     std::lock_guard<std::mutex> serial(operation);
     Quiesce();
@@ -134,12 +139,10 @@ struct TimerFd {
       ticks = kUnixEpoch100ns + next / 100 + (next % 100 != 0);
     } else {
       const __int128 left = static_cast<__int128>(next) - Now();
-      // Relative Win32 timers stop during suspend. A BOOTTIME deadline must
-      // be rechecked after resume, even if it was hours away before sleep.
-      // A finite slice bounds that delay without a wall-clock-dependent timer.
+      // Relative Win32 timers stop during suspend. The independent resume
+      // notification expires/rearms BOOTTIME using its actual remaining time.
       const __int128 rounded = left > 0 ? (left + 99) / 100 : 1;
-      const int64_t cap = clockid == kBoottime ? 10000000 : kMaxTime;
-      ticks = -static_cast<int64_t>(std::min(rounded, static_cast<__int128>(cap)));
+      ticks = -static_cast<int64_t>(std::min(rounded, static_cast<__int128>(kMaxTime)));
     }
     const uint64_t bits = static_cast<uint64_t>(ticks);
     FILETIME due{static_cast<DWORD>(bits), static_cast<DWORD>(bits >> 32)};
@@ -153,6 +156,17 @@ VOID CALLBACK Expired(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER) {
   auto& timer = *static_cast<TimerFd*>(context);
   std::lock_guard<std::mutex> lock(timer.mutex);
   if (timer.changing) return;
+  timer.Expire(timer.Now());
+  timer.Arm();
+}
+
+void Resumed(void* context) {
+  auto& timer = *static_cast<TimerFd*>(context);
+  std::lock_guard<std::mutex> lock(timer.mutex);
+  if (timer.changing) return;
+  // SetReadable signals the event used by poll/epoll; changed wakes a blocked
+  // read. Duplicate notifications cannot count an expiration twice.
+  SetThreadpoolTimer(timer.timer, nullptr, 0, 0);
   timer.Expire(timer.Now());
   timer.Arm();
 }
@@ -179,6 +193,10 @@ int TimerFdCreate(int clockid, int flags) {
   if (timer->readiness == nullptr) return FailWithLastError();
   timer->timer = CreateThreadpoolTimer(Expired, timer.get(), nullptr);
   if (timer->timer == nullptr) return FailWithLastError();
+  if (clockid == kBoottime) {
+    const int error = timer->resume.Start(Resumed, timer.get());
+    if (error != 0) return errno = error, -1;
+  }
   auto readiness = timer->readiness;
   // ReserveFd is always non-inheritable, just as for eventfd and inotify.
   record_locks::DescriptorGuard descriptors;

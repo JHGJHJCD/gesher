@@ -23,3 +23,13 @@ Check 'clock domains: Windows unbiased/biased readers and unchanged host pthread
   'clock-domains-windows: PASS host winpthreads keeps its QPC epoch',
   'clock-domains-windows: PASS explicit Android adapter keeps the awake epoch',
   ' assertions, 0 failures')
+
+# Default mode runs only awake waits; physical --after-suspend qualification is
+# opt-in and must be recorded separately for suspend and hibernate.
+Check 'boottime transport: real Windows registration and read poll epoll guest sleep' {
+  N2Run "$n2Dir/boottime_resume_windows_test.exe" @()
+} @('boottime-windows: PASS blocked timer read receives one expiration',
+  'boottime-windows: PASS guest BOOTTIME sleep completes without EINTR',
+  'boottime-windows: PASS blocked native poll wakes',
+  'boottime-windows: PASS blocked native epoll wakes',
+  ' assertions, 0 failures; physical=no')
