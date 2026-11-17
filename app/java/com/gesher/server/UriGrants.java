@@ -14,7 +14,6 @@ import android.os.Process;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -108,14 +107,23 @@ final class UriGrants {
                 && !mPm.isRemovalPending(pkg.packageName);
     }
 
+    private record GrantIdentity(Uri uri, boolean prefix) {}
+
     private boolean holdsGrant(ApkPackage target, Uri uri, int modes, boolean requirePrefix) {
         synchronized (this) {
             if (!current(target)) return false;
+            java.util.Map<GrantIdentity, Integer> held = null;
             for (Grant grant : mGrants) {
                 if (grant.target == target && current(grant.owner)
                         && (!requirePrefix || grant.prefix)
-                        && matches(grant.uri, grant.prefix, uri)
-                        && (grant.modes & modes) == modes) return true;
+                        && matches(grant.uri, grant.prefix, uri)) {
+                    if ((grant.modes & modes) == modes) return true;
+                    if (held == null) held = new java.util.HashMap<>();
+                    GrantIdentity identity = new GrantIdentity(grant.uri, grant.prefix);
+                    int combined = held.getOrDefault(identity, 0) | grant.modes;
+                    held.put(identity, combined);
+                    if ((combined & modes) == modes) return true;
+                }
             }
         }
         return false;
@@ -337,80 +345,117 @@ final class UriGrants {
         }
     }
 
+    /** Tokens are issued by this service, never accepted from arbitrary binders. */
+    synchronized IBinder newOwner() {
+        IBinder token = new android.os.Binder();
+        mTrackedOwners.add(token);
+        return token;
+    }
+
     void grantFromOwner(IBinder owner, int fromUid, String targetPackage, Uri original,
             int modes, int sourceUserId, int targetUserId) {
-        if (sourceUserId != 0 || targetUserId != 0) {
-            throw new SecurityException("Only content URIs for user 0 are available");
+        synchronized (this) {
+            if (owner == null || !mTrackedOwners.contains(owner)) {
+                throw new IllegalArgumentException("Unknown URI permission owner");
+            }
         }
+        Grant grant = prepare(fromUid, targetPackage, original, modes, sourceUserId, targetUserId);
+        if (grant != null) publish(owner, java.util.Collections.singletonList(grant));
+    }
+
+    /** Validate the entire Intent before publishing any grant or lifecycle state. */
+    List<Grant> prepareIntent(int uid, String target, Intent root) {
+        List<Grant> result = new ArrayList<>();
+        if (root == null) return result;
+        int modes = root.getFlags() & (ACCESS | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        if ((modes & ACCESS) == 0) return result;
+        Set<Intent> seen = Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+        java.util.ArrayDeque<Intent> pending = new java.util.ArrayDeque<>();
+        pending.add(root);
+        while (!pending.isEmpty()) {
+            Intent intent = pending.removeFirst();
+            if (!seen.add(intent)) continue;
+            Uri data = intent.getData();
+            if (data != null) {
+                Grant g = prepare(uid, target, data, modes, 0, 0);
+                if (g != null) result.add(g);
+            }
+            android.content.ClipData clip = intent.getClipData();
+            if (clip == null) continue;
+            for (int i = 0; i < clip.getItemCount(); ++i) {
+                android.content.ClipData.Item item = clip.getItemAt(i);
+                if (item.getUri() != null) {
+                    Grant g = prepare(uid, target, item.getUri(), modes, 0, 0);
+                    if (g != null) result.add(g);
+                } else if (item.getIntent() != null) pending.add(item.getIntent());
+            }
+        }
+        return result;
+    }
+
+    private Grant prepare(int uid, String targetName, Uri original, int modes,
+            int sourceUser, int targetUser) {
+        if (sourceUser != 0 || targetUser != 0) throw new SecurityException("Only user 0 is available");
+        if (targetName == null) throw new NullPointerException("targetPackage");
+        if (original == null) throw new NullPointerException("uri");
+        int access = modes & ACCESS;
+        if (access == 0 || !"content".equals(original.getScheme())) return null;
         if ((modes & Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION) != 0) {
             throw new UnsupportedOperationException("Persistable URI grants are not implemented");
         }
-        int access = modes & ACCESS;
-        if (access == 0 || (modes & ~(ACCESS | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)) != 0) {
+        if ((modes & ~(ACCESS | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)) != 0) {
             throw new IllegalArgumentException("Invalid URI grant flags");
         }
-        if (targetPackage == null) throw new IllegalArgumentException("Missing URI grant target");
-        Uri uri = checkedUri(original, sourceUserId);
+        Uri uri = checkedUri(original, sourceUser);
+        // Android never lets system/root delegate arbitrary provider authority.
+        if ((uid == Process.SYSTEM_UID || uid == Process.ROOT_UID)
+                && !"com.android.settings.files".equals(uri.getAuthority())
+                && !"com.android.settings.module_licenses".equals(uri.getAuthority())) return null;
         boolean prefix = (modes & Intent.FLAG_GRANT_PREFIX_URI_PERMISSION) != 0;
         synchronized (mPm) {
             ProviderInfo info = ContentProviders.declaredProvider(mPm, uri.getAuthority());
-            if (info == null) return;
-            ApkPackage providerPkg = mPm.get(info.packageName);
-            ApkPackage target = mPm.get(targetPackage);
-            if (target == null) return;
-            if (!current(providerPkg) || !current(target)) {
-                throw new SecurityException("Unknown or retiring URI grant participant");
-            }
-            if (target.packageName.equals(info.packageName)) return;
-            if (!prefix && !info.forceUriPermissions && hasDirectAccess(target, info, uri, access)) return;
-
+            if (info == null) return null;
+            ApkPackage provider = mPm.get(info.packageName), target = mPm.get(targetName);
+            if (target == null) return null;
+            if (!current(provider) || !current(target)) throw new SecurityException("Retiring URI participant");
+            if (!prefix && !info.forceUriPermissions && hasDirectAccess(target, info, uri, access)) return null;
             boolean grantable = info.grantUriPermissions;
             if (info.uriPermissionPatterns != null && info.uriPermissionPatterns.length != 0) {
                 grantable = false;
                 for (android.os.PatternMatcher pattern : info.uriPermissionPatterns) {
-                    if (pattern != null && pattern.match(uri.getPath())) {
-                        grantable = true;
-                        break;
-                    }
+                    if (pattern != null && pattern.match(uri.getPath())) { grantable = true; break; }
                 }
             }
             if (!grantable) throw new SecurityException("Provider does not allow URI grants");
-
-            boolean direct = fromUid == Process.SYSTEM_UID || fromUid == Process.ROOT_UID || fromUid == 0;
-            if (!direct) {
-                String[] senderPkgs = mPm.getPackagesForUid(fromUid);
-                if (senderPkgs != null) {
-                    for (String sp : senderPkgs) {
-                        ApkPackage sender = mPm.get(sp);
-                        if (sender != null && current(sender)) {
-                            if (hasDirectAccess(sender, info, uri, access)
-                                    || holdsGrant(sender, uri, access, prefix)) {
-                                direct = true;
-                                break;
-                            }
-                        }
-                    }
+            String[] names = mPm.getPackagesForUid(uid);
+            if (names != null) for (String name : names) {
+                ApkPackage sender = mPm.get(name);
+                if (current(sender) && (hasDirectAccess(sender, info, uri, access)
+                        || holdsGrant(sender, uri, access, prefix))) {
+                    return new Grant(provider, target, uri, access, prefix);
                 }
             }
-            if (!direct) {
-                throw new SecurityException("Caller cannot delegate this URI with these modes");
-            }
+            throw new SecurityException("Caller cannot delegate this URI with these modes");
+        }
+    }
 
+    void publish(IBinder owner, List<Grant> grants) {
+        if (owner == null) throw new IllegalArgumentException("Missing URI permission owner");
+        synchronized (mPm) {
+            // Verify the complete prepared set before modifying existing owner state.
+            for (Grant g : grants) {
+                if (!current(g.owner) || !current(g.target)) throw new SecurityException("Retired URI participant");
+            }
             synchronized (this) {
-                for (Grant grant : mGrants) {
-                    if (grant.owner == providerPkg && grant.target == target
-                            && grant.prefix == prefix && grant.uri.equals(uri)
-                            && Objects.equals(grant.ownerToken, owner)) {
-                        grant.modes |= access;
-                        return;
+                for (Grant g : grants) {
+                    Grant existing = null;
+                    for (Grant old : mGrants) {
+                        if (old.ownerToken == owner && old.owner == g.owner && old.target == g.target
+                                && old.prefix == g.prefix && old.uri.equals(g.uri)) { existing = old; break; }
                     }
-                }
-                mGrants.add(new Grant(providerPkg, target, uri, access, prefix, owner));
-                if (owner != null && mTrackedOwners.add(owner)) {
-                    try {
-                        owner.linkToDeath(() -> revokeByOwner(owner), 0);
-                    } catch (Exception ignored) {
-                    }
+                    if (existing != null) existing.modes |= g.modes;
+                    else mGrants.add(new Grant(g.owner, g.target, g.uri, g.modes, g.prefix, owner));
                 }
             }
         }
@@ -418,60 +463,12 @@ final class UriGrants {
 
     synchronized void revokeByOwner(IBinder owner) {
         if (owner == null) return;
-        mTrackedOwners.remove(owner);
-        mGrants.removeIf(grant -> Objects.equals(grant.ownerToken, owner));
+        mGrants.removeIf(grant -> grant.ownerToken == owner);
     }
 
     int checkGrantUriPermission_ignoreNonSystem(int sourceUid, String targetPackage, Uri original,
             int modes, int userId) {
-        if (userId != 0 || targetPackage == null || original == null) return -1;
-        Uri uri;
-        try {
-            uri = checkedUri(original, userId);
-        } catch (SecurityException invalid) {
-            return -1;
-        }
-        int access = modes & ACCESS;
-        if (access == 0 || (modes & ~(ACCESS | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION)) != 0) {
-            return -1;
-        }
-        boolean prefix = (modes & Intent.FLAG_GRANT_PREFIX_URI_PERMISSION) != 0;
-        synchronized (mPm) {
-            ProviderInfo info = ContentProviders.declaredProvider(mPm, uri.getAuthority());
-            if (info == null) return -1;
-            ApkPackage providerPkg = mPm.get(info.packageName);
-            ApkPackage target = mPm.get(targetPackage);
-            if (target == null || !current(providerPkg) || !current(target)) return -1;
-
-            boolean grantable = info.grantUriPermissions;
-            if (info.uriPermissionPatterns != null && info.uriPermissionPatterns.length != 0) {
-                grantable = false;
-                for (android.os.PatternMatcher pattern : info.uriPermissionPatterns) {
-                    if (pattern != null && pattern.match(uri.getPath())) {
-                        grantable = true;
-                        break;
-                    }
-                }
-            }
-            if (!grantable) return -1;
-
-            boolean direct = sourceUid == Process.SYSTEM_UID || sourceUid == Process.ROOT_UID || sourceUid == 0;
-            if (!direct) {
-                String[] senderPkgs = mPm.getPackagesForUid(sourceUid);
-                if (senderPkgs == null) return -1;
-                for (String sp : senderPkgs) {
-                    ApkPackage sender = mPm.get(sp);
-                    if (sender != null && current(sender)) {
-                        if (hasDirectAccess(sender, info, uri, access)
-                                || holdsGrant(sender, uri, access, prefix)) {
-                            direct = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!direct) return -1;
-            return target.uid();
-        }
+        Grant grant = prepare(sourceUid, targetPackage, original, modes, userId, userId);
+        return grant == null ? -1 : grant.target.uid();
     }
 }

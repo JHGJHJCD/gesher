@@ -87,6 +87,7 @@ final class ActiveServices {
     private static final class PendingStart {
         final ServiceStartArgs args;
         final BooleanSupplier lifetime;
+        List<UriGrants.Grant> grants = java.util.Collections.emptyList();
         PendingStart(ServiceStartArgs args, BooleanSupplier lifetime) {
             this.args = args; this.lifetime = lifetime;
         }
@@ -110,6 +111,8 @@ final class ActiveServices {
         int restartAttempts;
         ScheduledFuture<?> restart;
         final List<PendingStart> pendingStarts = new ArrayList<>();
+        final Map<Integer, IBinder> startGrantOwners = new HashMap<>();
+        final Map<Integer, PendingStart> deliveredStarts = new LinkedHashMap<>();
         final Map<Intent.FilterComparison, IntentBindRecord> bindings = new LinkedHashMap<>();
         final ArrayDeque<BindingCall> bindingCalls = new ArrayDeque<>();
         final ArrayDeque<IntentBindRecord> pendingUnbinds = new ArrayDeque<>();
@@ -328,6 +331,12 @@ final class ActiveServices {
             return null;
         }
         enforceAccess(info, sender);
+        UriGrants uriGrants = mAtm.uriGrants();
+        ApkPackage grantSender = sender.system ? null : mPm.get(sender.packageName);
+        if (!sender.system && grantSender == null) throw new SecurityException("Retired service caller");
+        int grantUid = sender.system ? android.os.Process.SYSTEM_UID : grantSender.uid();
+        List<UriGrants.Grant> prepared = uriGrants == null ? java.util.Collections.emptyList()
+                : uriGrants.prepareIntent(grantUid, info.packageName, service);
         ServiceRecord r;
         synchronized (this) {
             if (!sender.acceptance.getAsBoolean() || target == null
@@ -337,17 +346,13 @@ final class ActiveServices {
             r.lastStartIntent = new Intent(service);
             r.startLifetime = sender.lifetime;
             int startId = ++r.lastStartId;
-            r.pendingStarts.add(new PendingStart(new ServiceStartArgs(false /* taskRemoved */, startId,
-                    0 /* flags */, new Intent(service)), sender.lifetime));
+            PendingStart pending = new PendingStart(new ServiceStartArgs(false /* taskRemoved */, startId,
+                    0 /* flags */, new Intent(service)), sender.lifetime);
+            pending.grants = prepared;
+            r.pendingStarts.add(pending);
         }
         SystemServer.log("startService " + r + " from " + callingPackage
                 + (requireForeground ? " (foreground)" : ""));
-        int grantModes = service.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
-                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        if ((grantModes & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) != 0) {
-            grantServiceUris(r, sender, service, grantModes);
-        }
         long identity = Binder.clearCallingIdentity();
         try { bringUp(r); } finally { Binder.restoreCallingIdentity(identity); }
         return r.name;
@@ -377,6 +382,7 @@ final class ActiveServices {
             if (r == null) return false;
             requireServiceOwner(r);
             // stopSelf(startId) stops only if no later start came.
+            if (startId >= 0) clearStartGrants(r, startId);
             if (startId >= 0 && startId != r.lastStartId) return false;
             r.startRequested = false;
             r.pendingStarts.clear();
@@ -433,12 +439,6 @@ final class ActiveServices {
         }
         SystemServer.log("bindService " + r + " from " + callingPackage + " (flags 0x"
                 + Long.toHexString(flags) + ")");
-        int grantModes = service.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
-                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        if ((grantModes & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) != 0) {
-            grantServiceUris(r, sender, service, grantModes);
-        }
         long identity = Binder.clearCallingIdentity();
         try {
             // onBind may have completed with null. That is a published null binding,
@@ -535,6 +535,11 @@ final class ActiveServices {
         synchronized (this) {
             r = token instanceof ServiceRecord ? (ServiceRecord) token : null;
             if (r != null) requireServiceOwner(r);
+            if (r != null && type == 1 && res != Service.START_REDELIVER_INTENT) {
+                r.deliveredStarts.remove(startId);
+                IBinder owner = r.startGrantOwners.remove(startId);
+                if (owner != null && mAtm.uriGrants() != null) mAtm.uriGrants().revokeByOwner(owner);
+            }
             if (r != null && type == 1 && startId == r.lastStartId) {
                 r.startResult = res;
             }
@@ -786,7 +791,16 @@ final class ActiveServices {
                 // and reinstall the creator before its queued start is delivered.
                 List<ServiceStartArgs> currentStarts = new ArrayList<>();
                 for (PendingStart start : starts) {
-                    if (start.lifetime.getAsBoolean() && serviceCurrent(r)) currentStarts.add(start.args);
+                    synchronized (this) {
+                        if (!start.lifetime.getAsBoolean() || !serviceCurrent(r) || !r.startRequested) continue;
+                        if (!start.grants.isEmpty()) {
+                            IBinder owner = new Binder();
+                            mAtm.uriGrants().publish(owner, start.grants);
+                            r.startGrantOwners.put(start.args.startId, owner);
+                        }
+                        r.deliveredStarts.put(start.args.startId, start);
+                        currentStarts.add(start.args);
+                    }
                 }
                 if (!currentStarts.isEmpty() && workCurrent(r)) {
                     SystemServer.log("scheduleServiceArgs " + r + ": " + currentStarts.size()
@@ -807,14 +821,14 @@ final class ActiveServices {
         });
     }
 
-    private void grantServiceUris(ServiceRecord r, Sender sender, Intent service, int grantModes) {
+    private void clearStartGrants(ServiceRecord r, int throughId) {
+        r.deliveredStarts.keySet().removeIf(id -> id <= throughId);
         UriGrants grants = mAtm.uriGrants();
-        if (grants == null) return;
-        int callerUid = sender.system ? android.os.Process.SYSTEM_UID : (mPm.get(sender.packageName) != null
-                ? mPm.get(sender.packageName).uid() : Binder.getCallingUid());
-        for (Uri uri : ActivityCallerState.contentUris(service)) {
-            grants.grantFromOwner(r, callerUid, r.info.packageName, uri, grantModes, 0, 0);
-        }
+        r.startGrantOwners.entrySet().removeIf(entry -> {
+            if (entry.getKey() > throughId) return false;
+            if (grants != null) grants.revokeByOwner(entry.getValue());
+            return true;
+        });
     }
 
     /** ActiveServices.bringDownServiceIfNeededLocked: destroy it if nothing keeps it. */
@@ -834,9 +848,7 @@ final class ActiveServices {
                 }
             }
         }
-        if (mAtm.uriGrants() != null) {
-            mAtm.uriGrants().revokeByOwner(r);
-        }
+        synchronized (this) { clearStartGrants(r, Integer.MAX_VALUE); }
         if (r.foregroundId != 0) mNotifications.cancel(r.info.packageName, null, r.foregroundId);
         if (r.app == null || !r.created) return;
         SystemServer.log("scheduleStopService " + r);
@@ -899,6 +911,7 @@ final class ActiveServices {
         mServices.values().removeIf(r -> {
             if (r.app != app) return false;
             resetBindingsLocked(r);
+            clearStartGrants(r, Integer.MAX_VALUE);
             return true;
         });
         mConnections.entrySet().removeIf(e -> {
@@ -916,6 +929,7 @@ final class ActiveServices {
                 if (!packageName.equals(r.info.packageName)) continue;
                 r.startRequested = false;
                 r.pendingStarts.clear();
+                clearStartGrants(r, Integer.MAX_VALUE);
                 // A running binding dispatch may defer the final stop, but a
                 // force-stop must not allow its queued callbacks to run first.
                 resetBindingsLocked(r);
@@ -958,6 +972,20 @@ final class ActiveServices {
             for (ServiceRecord r : new ArrayList<>(mServices.values())) {
                 if (r.app != app) continue;
                 pruneRetired(r);
+                List<PendingStart> redeliver = new ArrayList<>(r.deliveredStarts.values());
+                clearStartGrants(r, Integer.MAX_VALUE);
+                if (!app.exiting || app.reaped || app.recoverAfterPidSupersession) {
+                    List<PendingStart> pending = new ArrayList<>(r.pendingStarts);
+                    r.pendingStarts.clear();
+                    for (PendingStart old : redeliver) {
+                        if (!old.lifetime.getAsBoolean()) continue;
+                        PendingStart again = new PendingStart(new ServiceStartArgs(old.args.taskRemoved,
+                                old.args.startId, Service.START_FLAG_REDELIVERY, old.args.args), old.lifetime);
+                        again.grants = old.grants;
+                        r.pendingStarts.add(again);
+                    }
+                    r.pendingStarts.addAll(pending);
+                }
                 if (r.foregroundId != 0) {
                     mNotifications.cancel(r.info.packageName, null, r.foregroundId);
                     r.foregroundId = 0;

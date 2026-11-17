@@ -1139,6 +1139,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                             attributedCaller, false, shareIdentity);
             callerSnapshot = ActivityCallerState.capture(callerOrigin, launch, mAm.uriGrants());
         }
+        final List<UriGrants.Grant> preparedGrants = mAm.uriGrants().prepareIntent(
+                callerOrigin.uid, info.packageName, launch);
         int callingPid = Binder.getCallingPid();
         int launchFlags = intent.getFlags();
         ActivityRecord source = resultToToken != null ? forToken(resultToToken) : null;
@@ -1190,6 +1192,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     && singleTop ? belowInTask(taskId, launch.getComponent()) : null;
             if (top != null && top.app != null && top.component().equals(launch.getComponent())
                     && singleTop) {
+                mAm.uriGrants().publish(top.token, preparedGrants);
                 deliverTo = top;
             } else if (below != null) {
                 // FLAG_ACTIVITY_CLEAR_TOP with singleTop (Task.performClearTop): the
@@ -1197,6 +1200,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 // RedirectUriReceiverActivity hands the redirect to the
                 // AuthorizationManagementActivity below it this way). Without singleTop,
                 // Android would recreate it: that start stays a plain one here.
+                mAm.uriGrants().publish(below.token, preparedGrants);
                 deliverTo = below;
                 for (int i = mActivities.size() - 1; i >= 0; i--) {
                     ActivityRecord a = mActivities.get(i);
@@ -1209,6 +1213,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 ActivityRecord resultRecord = requestCode >= 0 ? source : null;
                 r = new ActivityRecord(info, launch, taskId, callingPid, callingPackage,
                         resultRecord, resultWho, requestCode, targetCode);
+                mAm.uriGrants().publish(r.token, preparedGrants);
                 r.callerState.add(r.initialCallerInfoAccessToken, callerSnapshot);
                 r.sourceLifetime = sourceLifetime;
                 r.accountCompletion = mAccountCompletion.get();
@@ -1261,21 +1266,6 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 }
             }
         }
-        int grantModes = launchFlags & (Intent.FLAG_GRANT_READ_URI_PERMISSION
-                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
-        if ((grantModes & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION)) != 0
-                && mAm != null && mAm.uriGrants() != null) {
-            ActivityRecord targetActivity = r != null ? r : deliverTo;
-            if (targetActivity != null) {
-                try {
-                    grantIntentUris(targetActivity.token, callerOrigin.uid, info.packageName, launch, grantModes);
-                } catch (RuntimeException e) {
-                    if (r != null) remove(r);
-                    throw e;
-                }
-            }
-        }
         if (deliverTo != null) {
             started[0] = deliverTo;
             SystemServer.log("START u0 {" + launch.toShortString(false, true, true, false)
@@ -1310,13 +1300,6 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         for (ActivityRecord a : reconfigure) ensureConfiguration(a);
         updateTopResumed();
         return ActivityManager.START_SUCCESS;
-    }
-
-    private void grantIntentUris(IBinder owner, int fromUid, String targetPackage, Intent intent, int modes) {
-        if (mAm == null || mAm.uriGrants() == null || intent == null) return;
-        for (Uri uri : ActivityCallerState.contentUris(intent)) {
-            mAm.uriGrants().grantFromOwner(owner, fromUid, targetPackage, uri, modes, 0, 0);
-        }
     }
 
     private static String callerName(String callingPackage, int callingPid) {

@@ -40,7 +40,10 @@ final class UriGrantsManagerService extends IUriGrantsManager.Default {
     }
     @Override public void grantUriPermissionFromOwner(IBinder owner, int fromUid, String targetPackage,
             Uri uri, int modes, int sourceUserId, int targetUserId) {
-        host(); user(sourceUserId); user(targetUserId);
+        user(sourceUserId); user(targetUserId);
+        if (!mCallers.isSystem() && fromUid != mCallers.callerUid()) {
+            throw new SecurityException("Cannot grant on behalf of another UID");
+        }
         mGrants.grantFromOwner(owner, fromUid, targetPackage, uri, modes, sourceUserId, targetUserId);
     }
     @Override public ParceledListSlice getGrantedUriPermissions(String packageName, int userId) {
