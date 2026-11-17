@@ -426,6 +426,7 @@ foreach ($fixture in @(
   @('NdefDataContractTest', 'NDEF bytes, helpers, malformed input and native Parcel round trips'),
   @('PowerWakeLockCallbackTest', 'wake lock listener callbacks, real held state and token lifetime'),
   @('PackageManifestFlagsTest', 'complete parsed manifest flags preserve installed application state'),
+  @('AppStorageContextTest', 'distinct CE/DE contexts, files, preferences, databases and data migration'),
   @('PackageServiceQueriesTest', 'package UID/group queries and Android 16 dex-module completion'),
   @('BluetoothValueContractTest', 'BLE settings, filters, advertisements and parcels without an adapter'),
   @('MediaStoreContractTest', 'media collections, resolver forwarding and unavailable-provider handling'),
