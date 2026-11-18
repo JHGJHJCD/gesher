@@ -1667,6 +1667,7 @@ jobs:
         with:
           sparse-checkout: |
             tests
+            docs/research
             tools/ci
             tools/surface
             tools/symbolize.py
