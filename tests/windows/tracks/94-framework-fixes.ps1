@@ -353,6 +353,15 @@ Check 'services: audio focus ownership, loss escalation, token death and public 
   $audioFocusOut
 } @('AudioFocusLifecycleTest all passed:')
 
+# UiMode uses generated IUiModeManager Binder parcels and the real ATM transaction path.
+$uiModeOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' +
+  'UiModeContractTest') 90
+$uiModeCode = $LASTEXITCODE
+Check 'services: Android night mode scope, schedule, permissions, persistence and relaunch' {
+  $global:LASTEXITCODE = $uiModeCode
+  $uiModeOut
+} @('UiModeContractTest all passed:', 'checks; binder=true')
+
 # The wrapper creates the writable framework cache region. The fixture uses
 # generated AM Binder parcels and production URI/provider authorization state.
 $uriGrantsOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' +

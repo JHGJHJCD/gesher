@@ -797,6 +797,16 @@ int SessionDisplayState() {
   return state;
 }
 
+int AppsUseLightTheme() {
+  DWORD value = 0;
+  DWORD size = sizeof(value);
+  LSTATUS status = RegGetValueW(HKEY_CURRENT_USER,
+      L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+      L"AppsUseLightTheme", RRF_RT_REG_DWORD, nullptr, &value, &size);
+  return status == ERROR_SUCCESS && size == sizeof(value) && value <= 1
+      ? static_cast<int>(value) : -1;
+}
+
 uint64_t JobIdleMillis() {
   AcquireSRWLockShared(&g_lock);
   bool off = g_session_display_state == 0;

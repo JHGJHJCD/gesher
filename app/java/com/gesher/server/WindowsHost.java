@@ -396,6 +396,16 @@ public final class WindowsHost {
 
     private static native boolean nativeIsLocalDocument(String windowsPath);
 
+    /** AppsUseLightTheme: 0 dark, 1 light, -1 missing/unreadable; never launches a process. */
+    public static int appsUseLightTheme() {
+        if (!available()) return -1;
+        try { return nativeAppsUseLightTheme(); }
+        catch (UnsatisfiedLinkError unavailable) { return -1; }
+    }
+
+    public static void removeListener(Listener listener) { sListeners.remove(listener); }
+
+    private static native int nativeAppsUseLightTheme();
     private static native long nativeStartEvents();
     private static native int nativeWaitEvents(int timeoutMs);
     private static native String[] nativeNextActivation();

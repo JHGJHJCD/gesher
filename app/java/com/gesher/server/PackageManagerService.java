@@ -97,6 +97,7 @@ public final class PackageManagerService extends IPackageManager.Default {
 
     /** Server-local capability cleanup; never callable through the package Binder. */
     synchronized void onPackageRemoval(Consumer<String> cleanup) { mPackageRemoval.add(cleanup); }
+    synchronized void removePackageRemovalListener(Consumer<String> cleanup) { mPackageRemoval.remove(cleanup); }
 
     synchronized void onPackageRemovalCheck(Consumer<String> check) { mPackageRemovalChecks.add(check); }
 
