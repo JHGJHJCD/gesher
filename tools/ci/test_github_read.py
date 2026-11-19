@@ -276,6 +276,67 @@ class ReceiptIntegrationTest(unittest.TestCase):
         self.assertEqual(len(self.downloads), 1)
         self.assertEqual(self.downloads[0][2:6], ['--id', '10', '--digest', current['digest']])
 
+    def test_rerun_selects_current_producer_output_in_either_inventory_order(self):
+        current = self.inventory['artifacts'][0]
+        earlier = dict(current, id=11, created_at='2026-11-08T02:50:35Z')
+        # The named inventory must contain only this role. A same-name artifact
+        # newer than the proved producer remains a rejection, tested below.
+        for rows in ([earlier, current], [current, earlier]):
+            with self.subTest(order=[item['id'] for item in rows]):
+                self.downloads.clear()
+                self.responses = [response(self.run_value), response(self.jobs),
+                                  response({'total_count': len(rows), 'artifacts': rows})]
+                self._receipt()
+                self.assertEqual(self.downloads, [[sys.executable,
+                    'tools/surface/download-verified-artifact.py', '--id', '10',
+                    '--digest', 'sha256:' + 'c' * 64, '--destination', 'supplier']])
+
+    def test_rerun_never_uses_another_attempt_or_resolves_current_ambiguity(self):
+        current = self.inventory['artifacts'][0]
+        earlier = dict(current, id=11, created_at='2026-11-08T02:50:35Z')
+        later = dict(current, id=12, created_at='2026-11-08T04:50:35Z')
+        duplicate = dict(current, id=14, created_at='2026-11-08T03:50:36Z')
+        for rows in ([earlier], [later], [earlier, later], [current, duplicate],
+                     [earlier, current, later, duplicate]):
+            with self.subTest(ids=[item['id'] for item in rows]):
+                self.responses = [response(self.run_value), response(self.jobs),
+                                  response({'total_count': len(rows), 'artifacts': rows})]
+                with self.assertRaisesRegex(RuntimeError,
+                        'Artifact missing or ambiguous|Same-name artifact appeared after'):
+                    self._receipt()
+                self.assertEqual(self.downloads, [])
+
+    def test_rerun_preserves_selected_artifact_identity_and_digest_checks(self):
+        original = self.inventory['artifacts'][0]
+        earlier = dict(original, id=11, created_at='2026-11-08T02:50:35Z')
+        mutations = [('digest', 'sha256:wrong'), ('expired', True), ('size_in_bytes', 0)]
+        mutations += [('workflow_run.' + field, value) for field, value in
+                      [('id', 99), ('head_sha', 'd' * 40), ('repository_id', 99),
+                       ('head_repository_id', 99)]]
+        for field, value in mutations:
+            with self.subTest(field=field):
+                current = copy.deepcopy(original)
+                if field.startswith('workflow_run.'):
+                    current['workflow_run'][field.split('.')[1]] = value
+                else:
+                    current[field] = value
+                self.responses = [response(self.run_value), response(self.jobs),
+                                  response({'total_count': 2, 'artifacts': [earlier, current]})]
+                with self.assertRaisesRegex(RuntimeError,
+                        'Artifact (identity|digest, size or expiry) mismatch'):
+                    self._receipt()
+                self.assertEqual(self.downloads, [])
+
+    def test_current_artifact_at_either_producer_boundary_remains_valid(self):
+        for field in ('started_at', 'completed_at'):
+            with self.subTest(boundary=field):
+                self.downloads.clear()
+                inventory = copy.deepcopy(self.inventory)
+                inventory['artifacts'][0]['created_at'] = self.jobs['jobs'][0][field]
+                self.responses = [response(self.run_value), response(self.jobs), response(inventory)]
+                self._receipt()
+                self.assertEqual(len(self.downloads), 1)
+
     def test_same_name_conflicts_never_fall_back_to_an_earlier_artifact(self):
         current = self.inventory['artifacts'][0]
         old = dict(current, id=11, created_at='2026-11-08T02:50:35Z')
