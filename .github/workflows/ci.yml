@@ -2003,6 +2003,7 @@ jobs:
           path: |
             results.txt
             ci-owners.json
+            dist/realtime-signals-evidence/**/*.json
           if-no-files-found: error
 
   test:
