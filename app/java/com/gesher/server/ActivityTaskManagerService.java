@@ -278,6 +278,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         boolean deferredHistory;
         boolean historyEntry;
         boolean launchScheduled;
+        boolean launchingPaused;
         /**
          * The configuration it was launched or relaunched with, or told of last: its
          * package's (locale track: LocaleManagerService.configurationFor) with its task's size
@@ -598,6 +599,20 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
     }
 
     void setAccountManager(AccountManagerService accounts) { mAccounts = accounts; }
+
+    private DesktopUsageStatsService mUsageStats;
+
+    void setUsageStats(DesktopUsageStatsService usageStats) { mUsageStats = usageStats; }
+
+    void flushUsageStats() {
+        if (mUsageStats != null) mUsageStats.flush();
+    }
+
+    private void recordUsage(ActivityRecord record, ActivityUsageHistory.State state) {
+        if (mUsageStats != null) {
+            mUsageStats.transition(record.token, record.info.packageName, record.info.name, state);
+        }
+    }
 
     private int chooseAccount(IApplicationThread caller, String callingPackage, Intent intent,
             IBinder token, String resultWho, int requestCode) {
@@ -3786,6 +3801,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (!mProcesses.remove(app)) return;
             app.dead = true;
             for (ActivityRecord r : new ArrayList<>(app.activities)) {
+                recordUsage(r, ActivityUsageHistory.State.TERMINATED);
                 for (ActivityRecord a : mActivities) {
                     if (a.waitingFor == r) {
                         a.waitingFor = null;
@@ -4136,7 +4152,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         } else {
             t.addTransactionItem(new PauseActivityItem(r.token, false, false, false, false));
         }
-        setState(r, State.LAUNCHING);
+        synchronized (this) {
+            r.launchingPaused = !andResume;
+            setState(r, State.LAUNCHING);
+        }
         schedule(r, t, andResume ? "LaunchActivityItem, ResumeActivityItem"
                 : "LaunchActivityItem, PauseActivityItem");
     }
@@ -4926,6 +4945,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         ProcessRecord check = null;
         List<ActivityRecord> released = new ArrayList<>();
         synchronized (this) {
+            recordUsage(r, ActivityUsageHistory.State.TERMINATED);
             r.state = State.DESTROYED;
             accountActivityFinished(r);
             mActivities.remove(r);
@@ -5070,6 +5090,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
 
             // A pause or a finish may already be on its way (startActivity or finish() in
             // onResume).
+            if (r.app != null && !r.app.dead && (r.state == State.LAUNCHING && !r.launchingPaused
+                    || r.state == State.RESUMING || r.state == State.PAUSING)) {
+                recordUsage(r, ActivityUsageHistory.State.RESUMED);
+            }
             if (r.state == State.LAUNCHING || r.state == State.RESUMING) r.state = State.RESUMED;
             coveredByNativeUi = (r.documentPickers > 0 || r.chooserCoverCount > 0)
                     && r.state == State.RESUMED;
@@ -5368,6 +5392,14 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         boolean needProcess = false;
         ActivityRecord processTarget = null;
         synchronized (this) {
+            // Covered launches acknowledge the PauseActivityItem actually sent;
+            // an already started visible activity may also acknowledge a pause.
+            if (r.app != null && !r.app.dead && (r.state == State.PAUSING
+                    || r.state == State.STARTED
+                    || r.state == State.LAUNCHING && r.launchingPaused)) {
+                recordUsage(r, ActivityUsageHistory.State.PAUSED);
+            }
+            r.launchingPaused = false;
             r.state = State.PAUSED;
             finishing = r.finishing;
             // Paused as its task went to the back: stopped now (nothing in front of it will
@@ -5470,7 +5502,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             if (persistentState != null) r.persistentState = persistentState;
             // A resume may have been scheduled after the stop (the activity in front
             // finished first): it stays on its way to the front.
-            if (r.state == State.STOPPING) r.state = State.STOPPED;
+            if (r.state == State.STOPPING) {
+                if (r.app != null && !r.app.dead) recordUsage(r, ActivityUsageHistory.State.STOPPED);
+                r.state = State.STOPPED;
+            }
             destroy = r.finishing;
             notifyAll();
         }
