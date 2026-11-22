@@ -121,6 +121,10 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: tests/windows/test-process-reader-handles.ps1
+      - name: Actual WindowsHost event window, delivery and idle wait
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: python tools/test_windows_host_events.py --java-home "$env:JAVA_HOME"
       - name: Release updater and control panel contracts on Windows PowerShell 5.1
         if: ${{ !cancelled() }}
         shell: powershell
