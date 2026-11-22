@@ -687,12 +687,14 @@ see "After that" for what is left._
   (`ucontext` is zeroed); `alarm`/`setitimer` timers; `sigaltstack` is only
   recorded; `kill` of other processes is `ESRCH`. A `SIG_DFL` that would
   terminate does (`abort()` for the core-dumping signals).
-- **libandroid stand-ins**: sensors (none), tracing (off), OBB mounting
-  (unsupported; scanning works), AChoreographer's vsync (a 60 Hz clock, not
-  the display's). Not provided at all (they bind to the aborting stubs):
+- **libandroid stand-ins**: sensors (none), tracing (off), performance hints
+  (unsupported; `APerformanceHint_getManager` returns `nullptr`, sessions
+  fail cleanly), OBB mounting (unsupported; scanning works),
+  AChoreographer's vsync (a 60 Hz clock, not the display's). Not provided at
+  all (they bind to the aborting stubs):
   `ASurfaceTexture_*`, `AHardwareBuffer_fromHardwareBuffer`/`toHardwareBuffer`
   (Java HardwareBuffer has no natives), `ASurfaceTransaction_fromJava`,
-  `ASurfaceTransaction_setLuts`, `AThermal_*`, `APerformanceHint_*`,
+  `ASurfaceTransaction_setLuts`, `AThermal_*`,
   `ASharedMemory_dupFromJava`, `android_getaddrinfofornetwork` & co.
   AInputReceivers are refused (null): no input channels for layers.
 - **NativeActivity** (0032): `onConfigurationChanged`, `onLowMemory` and
