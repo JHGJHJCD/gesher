@@ -24,7 +24,8 @@ def main() -> None:
     parser.add_argument("--source-ref")
     parser.add_argument("--case", choices=("all", "history", "validation", "tasks", "recents",
                                           "attach", "visibility", "permissions", "pending",
-                                          "back", "appwindow", "windowclose", "windowmode"), default="all")
+                                          "back", "appwindow", "windowclose", "windowmode",
+                                          "ordinary"), default="all")
     args = parser.parse_args()
     compiler = shutil.which("cc")
     if not compiler:

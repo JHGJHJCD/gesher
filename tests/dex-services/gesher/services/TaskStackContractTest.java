@@ -14,6 +14,7 @@ import android.app.IActivityTaskManager;
 import android.app.IApplicationThread;
 import android.app.servertransaction.ClientTransaction;
 import android.app.servertransaction.ActivityTransactionItem;
+import android.app.servertransaction.ActivityResultItem;
 import android.app.servertransaction.LaunchActivityItem;
 import android.app.servertransaction.NewIntentItem;
 import android.app.servertransaction.PauseActivityItem;
@@ -181,6 +182,18 @@ public final class TaskStackContractTest {
             }
             return count;
         }
+        <T extends ActivityTransactionItem> T last(Class<T> kind, Object record) throws Exception {
+            IBinder token = (IBinder)get(record, "token");
+            T found = null;
+            for (ClientTransaction transaction : transactions) {
+                for (var item : transaction.getTransactionItems()) {
+                    if (kind.isInstance(item) && kind.cast(item).getActivityToken() == token) {
+                        found = kind.cast(item);
+                    }
+                }
+            }
+            return found;
+        }
     }
     private static final class Harness {
         final Object tasks;
@@ -271,6 +284,12 @@ public final class TaskStackContractTest {
             final int[] status = new int[1];
             asApp(() -> status[0] = api.startActivities(thread, PKG, null, intents, new String[intents.length],
                     null, null, 0));
+            return status[0];
+        }
+        int startOne(Intent intent, Object source) throws Exception {
+            final int[] status = new int[1];
+            asApp(() -> status[0] = api.startActivity(thread, PKG, null, intent, null,
+                    source == null ? null : (IBinder)get(source, "token"), null, -1, 0, null, null));
             return status[0];
         }
         void finish(Object activity) throws Exception {
@@ -550,6 +569,260 @@ public final class TaskStackContractTest {
         check(!(Boolean)get(parentCallers.values().iterator().next(), "shareIdentity")
                 && (Boolean)get(topCallers.values().iterator().next(), "shareIdentity"),
                 "Top-only identity sharing disclosed the source to parent history");
+    }
+
+    /** Ordinary starts must reuse tasks even when no startActivities batch is active. */
+    private static void ordinaryTaskReuse() throws Exception {
+        for (String state : List.of("resumed", "stopped", "pausing")) {
+            Harness h = new Harness();
+            check(h.startOne(launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null)
+                    == ActivityManager.START_SUCCESS, "Ordinary singleTask launch rejected");
+            Object target = h.record("Single");
+            Object token = get(target, "token"), process = get(target, "app");
+            int taskId = (Integer)get(target, "taskId");
+            h.acknowledge("activityResumed", target);
+            h.acknowledge("activityIdle", target);
+            if (!state.equals("resumed")) {
+                h.asApp(() -> check(h.api.getActivityClientController().moveActivityTaskToBack(
+                        (IBinder)token, true), "Ordinary reuse setup did not minimize its task"));
+                if (state.equals("stopped")) {
+                    h.acknowledge("activityPaused", target);
+                    h.acknowledgeStopped(target);
+                    check("STOPPED".equals(h.state(target)), "Ordinary reuse setup did not stop");
+                }
+            }
+            int resumes = h.thread.items(ResumeActivityItem.class, target);
+            check(h.startOne(launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    .putExtra("request", state), null) == ActivityManager.START_DELIVERED_TO_TOP,
+                    "Ordinary " + state + " singleTask launch did not reuse its existing task");
+            check(h.records().size() == 1 && h.record("Single") == target
+                    && get(target, "token") == token && get(target, "app") == process
+                    && (Integer)get(target, "taskId") == taskId && h.thread.launches(null) == 1,
+                    "Ordinary " + state + " reuse replaced the Activity, task, token or process");
+            NewIntentItem delivery = h.thread.last(NewIntentItem.class, target);
+            check(delivery != null && h.thread.items(NewIntentItem.class, target) == 1,
+                    "Ordinary " + state + " reuse did not deliver exactly one new Intent");
+            List<?> payload = (List<?>)get(delivery, "mIntents");
+            check(payload.size() == 1 && state.equals(((Intent)payload.get(0)).getStringExtra("request")),
+                    "Ordinary reuse lost the caller's new Intent payload");
+            if (state.equals("pausing")) {
+                check("PAUSING".equals(h.state(target))
+                        && h.thread.items(ResumeActivityItem.class, target) == resumes,
+                        "Ordinary reuse resumed before the pending pause acknowledgement");
+                h.acknowledge("activityPaused", target);
+            }
+            if (state.equals("resumed")) {
+                check("RESUMED".equals(h.state(target)) && (Boolean)get(delivery, "mResume")
+                        && h.thread.items(ResumeActivityItem.class, target) == resumes,
+                        "Already resumed reuse lost the NewIntentItem implicit resume or duplicated it");
+            } else {
+                check("RESUMING".equals(h.state(target)) && !(Boolean)get(delivery, "mResume")
+                        && h.thread.items(ResumeActivityItem.class, target) == resumes + 1,
+                        "Ordinary reuse moved task recency without resuming its stopped Activity");
+                h.acknowledge("activityResumed", target);
+            }
+            h.asApp(() -> {
+                ActivityManager.RecentTaskInfo visible = appTask(h.api.getAppTasks(PKG).get(0)).getTaskInfo();
+                check(visible.taskId == taskId && visible.isVisible && visible.isFocused
+                        && visible.numActivities == 1,
+                        "Ordinary restored task is not the focused visible original task");
+            });
+        }
+    }
+
+    /** Match Launcher.startActivityAndWait without a synthetic task-selection API. */
+    private static void ordinaryWaitReuse() throws Exception {
+        Harness h = new Harness();
+        h.startOne(launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null);
+        Object original = h.record("Single");
+        h.acknowledge("activityResumed", original); h.acknowledge("activityIdle", original);
+        // Explicitly complete real queued launches/resumes, including an erroneous new
+        // launch in the negative control. This keeps waitForStarted bounded without
+        // mutating task selection, record identity or the launch result.
+        h.thread.onSchedule = () -> {
+            try {
+                for (Object activity : new ArrayList<>(h.records())) {
+                    if (h.state(activity).equals("LAUNCHING") || h.state(activity).equals("RESUMING")) {
+                        h.acknowledge("activityResumed", activity);
+                        h.acknowledge("activityIdle", activity);
+                    }
+                }
+            } catch (Exception failure) { throw new AssertionError(failure); }
+        };
+        h.asApp(() -> {
+            android.app.WaitResult result = h.api.startActivityAndWait(h.thread, PKG, null,
+                    launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null, null,
+                    null, -1, 0, null, null, 0);
+            check(result.result == ActivityManager.START_DELIVERED_TO_TOP && !result.timeout
+                    && result.who.equals(launch("Single").getComponent()),
+                    "startActivityAndWait did not report completion of the reused target");
+        });
+        check(h.records().size() == 1 && h.record("Single") == original
+                && h.thread.launches(null) == 1 && h.thread.items(NewIntentItem.class, original) == 1,
+                "startActivityAndWait recreated an existing singleTask Activity");
+    }
+
+    /** A cross-task singleTask launch must pause its live covering Activity before resume. */
+    private static void ordinaryClearTop() throws Exception {
+        Harness h = new Harness();
+        h.startOne(launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null);
+        Object original = h.record("Single");
+        h.acknowledge("activityResumed", original);
+        h.startOne(launch("Middle"), original);
+        Object above = h.record("Middle");
+        h.acknowledge("activityPaused", original);
+        h.acknowledge("activityResumed", above); h.acknowledge("activityIdle", above);
+        h.acknowledgeStopped(original);
+        h.startOne(launch("Other").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_MULTIPLE_TASK), null);
+        Object other = h.record("Other"); h.acknowledge("activityResumed", other);
+        int resumes = h.thread.items(ResumeActivityItem.class, original);
+        check(h.startOne(launch("Single"), other) == ActivityManager.START_DELIVERED_TO_TOP,
+                "Cross-task singleTask launch ignored its manifest's task reuse");
+        check(h.record("Single") == original && h.thread.launches(original) == 1
+                && h.thread.items(NewIntentItem.class, original) == 1 && live(h, other)
+                && (Boolean)get(above, "finishing") && "PAUSING".equals(h.state(above)),
+                "singleTask CLEAR_TOP did not retain its target and finish only its covering Activity");
+        check("STOPPED".equals(h.state(original))
+                && h.thread.items(ResumeActivityItem.class, original) == resumes,
+                "singleTask destination resumed before its covering Activity paused");
+        h.acknowledge("activityPaused", above);
+        check("RESUMING".equals(h.state(original))
+                && h.thread.items(ResumeActivityItem.class, original) == resumes + 1,
+                "singleTask destination did not resume after CLEAR_TOP's pause acknowledgement");
+        h.acknowledge("activityPaused", above);
+        check(h.thread.items(ResumeActivityItem.class, original) == resumes + 1,
+                "Duplicate CLEAR_TOP acknowledgement resumed the target twice");
+    }
+
+    private static void ordinaryRootAndMultipleTasks() throws Exception {
+        Harness h = new Harness();
+        h.startOne(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null);
+        Object root = h.record("Root"); h.acknowledge("activityResumed", root);
+        h.startOne(launch("Top"), root);
+        Object top = h.record("Top"); h.acknowledge("activityPaused", root);
+        h.acknowledge("activityResumed", top); h.acknowledge("activityIdle", top);
+        h.acknowledgeStopped(root);
+        h.asApp(() -> check(h.api.getActivityClientController().moveActivityTaskToBack(
+                (IBinder)get(top, "token"), true), "Root reuse setup did not hide its task"));
+        h.acknowledge("activityPaused", top); h.acknowledgeStopped(top);
+        int resumes = h.thread.items(ResumeActivityItem.class, top);
+        check(h.startOne(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null)
+                == ActivityManager.START_TASK_TO_FRONT, "Matching NEW_TASK did not bring existing history forward");
+        check(h.records().size() == 2 && h.record("Root") == root && h.record("Top") == top
+                && h.thread.launches(null) == 2 && h.thread.items(NewIntentItem.class, null) == 0
+                && h.thread.items(ResumeActivityItem.class, top) == resumes + 1,
+                "Matching NEW_TASK duplicated its root, delivered an unrelated Intent or failed to resume its top");
+        h.acknowledge("activityResumed", top);
+        check(h.startOne(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                | Intent.FLAG_ACTIVITY_MULTIPLE_TASK), null) == ActivityManager.START_SUCCESS,
+                "Explicit MULTIPLE_TASK failed to create a separate task");
+        check(h.records().size() == 3 && h.api.getTasks(10, false, true, Display.DEFAULT_DISPLAY).size() == 2
+                && h.thread.launches(null) == 3 && live(h, root) && live(h, top),
+                "Task reuse consumed MULTIPLE_TASK or retired the original task");
+    }
+
+    /** A NEW_TASK result request is canceled; its new/reused destination owns no result route. */
+    private static void ordinaryNewTaskResult() throws Exception {
+        for (boolean manifest : new boolean[]{false, true}) {
+            Harness h = new Harness();
+            h.startOne(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null);
+            Object source = h.record("Root"); h.acknowledge("activityResumed", source);
+            Intent target = launch(manifest ? "Single" : "Other");
+            if (!manifest) target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            h.asApp(() -> check(h.api.startActivity(h.thread, PKG, null, target, null,
+                    (IBinder)get(source, "token"), "result-owner", 73, 0, null, null) >= 0,
+                    "NEW_TASK for-result start rejected"));
+            Object destination = h.record(manifest ? "Single" : "Other");
+            check(get(destination, "resultTo") == null,
+                    "NEW_TASK target retained a result route across tasks");
+            ActivityResultItem item = h.thread.last(ActivityResultItem.class, source);
+            check(item != null && h.thread.items(ActivityResultItem.class, source) == 1,
+                    "NEW_TASK did not deliver exactly one canceled result to its source");
+            List<?> results = (List<?>)get(item, "mResultInfoList");
+            android.app.ResultInfo result = (android.app.ResultInfo)results.get(0);
+            check(results.size() == 1 && result.mResultCode == android.app.Activity.RESULT_CANCELED
+                    && result.mRequestCode == 73 && "result-owner".equals(result.mResultWho)
+                    && result.mData == null, "NEW_TASK cancellation lost the original result recipient");
+        }
+    }
+
+    private static void ordinaryReuseAdmission() throws Exception {
+        for (boolean callerRetired : new boolean[]{false, true}) {
+            Harness h = new Harness();
+            h.startOne(launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null);
+            Object original = h.record("Single"); h.acknowledge("activityResumed", original);
+            set(h.tasks, "mBeforeActivityPublication", (Runnable)() -> {
+                try {
+                    if (callerRetired) set(h.process, "exiting", true);
+                    else publishFixtureCode(h, PKG, code(PKG, UID));
+                } catch (Exception failure) { throw new AssertionError(failure); }
+            });
+            check(h.startOne(launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null)
+                    == ActivityManager.START_CANCELED, "Retired ordinary launch admission was reused");
+            check(h.records().size() == 1 && h.record("Single") == original
+                    && h.thread.launches(null) == 1 && h.thread.items(NewIntentItem.class, original) == 0,
+                    "Rejected ordinary reuse mutated task identity or delivered a new Intent");
+        }
+    }
+
+    /** NEW_DOCUMENT must not implicitly detach a startActivityForResult from its source. */
+    private static void ordinaryDocumentResult() throws Exception {
+        Harness h = new Harness();
+        h.startOne(launch("Root").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null);
+        Object source = h.record("Root"); h.acknowledge("activityResumed", source);
+        h.asApp(() -> check(h.api.startActivity(h.thread, PKG, null,
+                launch("Doc").setData(android.net.Uri.parse("content://fixture/document/result")),
+                null, (IBinder)get(source, "token"), "document-result", 91, 0, null, null)
+                == ActivityManager.START_SUCCESS, "Document for-result start rejected"));
+        Object document = h.record("Doc");
+        int flags = ((Intent)get(document, "intent")).getFlags();
+        check((flags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0
+                && (flags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0
+                && get(document, "resultTo") == source
+                && get(document, "taskId").equals(get(source, "taskId")),
+                "Document mode detached a for-result launch into a new task");
+        check(h.thread.items(ActivityResultItem.class, source) == 0,
+                "Document mode canceled a valid same-task result request");
+    }
+
+    /** The admitted chooser capability still owns a fresh authenticator Activity's completion. */
+    @SuppressWarnings("unchecked")
+    private static void ordinaryAuthenticatorCompletion() throws Exception {
+        for (boolean reorder : new boolean[]{false, true}) {
+            Harness h = new Harness();
+            h.startOne(launch("Single").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK), null);
+            Object original = h.record("Single"); h.acknowledge("activityResumed", original);
+            Object previous = original;
+            if (reorder) {
+                h.startOne(launch("Middle"), original);
+                previous = h.record("Middle"); h.acknowledge("activityPaused", original);
+                h.acknowledge("activityResumed", previous);
+            }
+            int[] completed = {0};
+            Runnable finished = () -> completed[0]++;
+            // Explicit admitted-account-chooser boundary; no authenticator APK or
+            // chooser UI is simulated. Ordinary Activity requests cannot set this scope.
+            ThreadLocal<Runnable> scope = (ThreadLocal<Runnable>)get(h.tasks, "mAccountCompletion");
+            scope.set(finished);
+            try {
+                check(h.startOne(launch("Single").addFlags(reorder ? Intent.FLAG_ACTIVITY_REORDER_TO_FRONT : 0),
+                        previous) == ActivityManager.START_SUCCESS,
+                        "Authenticator launch reused an Activity without its own completion");
+            } finally { scope.remove(); }
+            Object fresh = h.records().get(h.records().size() - 1);
+            check(fresh != original && live(h, original) && get(original, "accountCompletion") == null
+                    && get(fresh, "accountCompletion") == finished
+                    && h.thread.items(NewIntentItem.class, original) == 0 && completed[0] == 0,
+                    "Task reuse/reorder transferred the authenticator completion to an unrelated Activity");
+            h.acknowledge("activityPaused", previous);
+            check(h.thread.launches(fresh) == 1 && h.thread.launches(original) == 1,
+                    "Authenticator request did not launch its fresh Activity exactly once");
+            h.acknowledge("activityResumed", fresh);
+            h.finish(fresh);
+            check(completed[0] == 1 && live(h, original),
+                    "Finishing the fresh authenticator Activity lost or duplicated its completion");
+        }
     }
 
     private static void visibilityAndRemoval() throws Exception {
@@ -1908,6 +2181,10 @@ public final class TaskStackContractTest {
         if (selected.equals("all") || selected.equals("history")) { fullStack(); acceptedHistoryLifetimes(); disabledDeferredHistory(); }
         if (selected.equals("all") || selected.equals("validation")) invalidBatch();
         if (selected.equals("all") || selected.equals("tasks")) { taskFlags(); reorderedUriOwner(); abandonedUriOwners(); processDeathUriOwners(); forceStopTransientUris(); }
+        if (selected.equals("all") || selected.equals("ordinary")) {
+            ordinaryTaskReuse(); ordinaryWaitReuse(); ordinaryClearTop(); ordinaryRootAndMultipleTasks();
+            ordinaryNewTaskResult(); ordinaryDocumentResult(); ordinaryReuseAdmission(); ordinaryAuthenticatorCompletion();
+        }
         if (selected.equals("all") || selected.equals("recents")) {
             appTaskRecents(); appTaskLaunchFlags(); appTaskForeground(); appTaskObsoleteForeground(); appTaskLaunchAdmission();
         }

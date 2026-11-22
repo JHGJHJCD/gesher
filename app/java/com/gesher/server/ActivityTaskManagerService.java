@@ -2571,8 +2571,10 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         StackLaunch stack = mStackLaunch.get();
         boolean publishHistory = stack != null && stack.intent == intent;
         boolean inAppTask = requiredTask != null;
-        int launchFlags = publishHistory || inAppTask
-                ? taskLaunchFlags(info, intent, source, inAppTask) : intent.getFlags();
+        // Single launches and batches share Android's task/manifest semantics;
+        // only a batch defers the creation of its activity history.
+        int launchFlags = taskLaunchFlags(info, intent, source, inAppTask,
+                requestCode >= 0 && source != null);
         launch.setFlags(launchFlags);
         // Whether it leaves the activity below it visible (its theme), read before the lock.
         boolean translucent = ActivityTheme.isTranslucentOrFloating(info);
@@ -2584,6 +2586,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         ProcessRecord bind = null;
         boolean launchNow = false;
         boolean needProcess = false;
+        boolean cancelResult = false;
+        ProcessRecord resultProcess = null;
         String sourceWindowMode = null;
         List<ActivityRecord> reconfigure = new ArrayList<>();
         Runnable beforePublication = mBeforeActivityPublication;
@@ -2623,13 +2627,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     delegatedResult ? source.app.pid : callingPid,
                     resultToToken == null, info.packageName,
                     componentProcess(info.packageName, info.processName));
-            int taskId = publishHistory ? historyTaskId(info, launch, source, launchTaskId)
-                    : launchTaskId >= 0 && topOf(launchTaskId) != null ? launchTaskId
-                    : source != null && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0
-                    ? source.taskId : mNextTaskId++;
+            int taskId = findLaunchTaskId(info, launch, source, launchTaskId);
             ActivityRecord top = topOf(taskId);
-            boolean clearTask = (publishHistory || inAppTask)
-                    && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+            boolean clearTask = (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
                     && (launchFlags & Intent.FLAG_ACTIVITY_CLEAR_TASK) != 0;
             if (clearTask) {
                 for (int i = mActivities.size() - 1; i >= 0; i--) {
@@ -2638,26 +2638,24 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 }
                 top = null;
             }
-            boolean documentIntoExisting = (publishHistory || inAppTask)
-                    && (launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0
+            boolean documentIntoExisting = (launchFlags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0
                     && (launchFlags & Intent.FLAG_ACTIVITY_MULTIPLE_TASK) == 0;
             boolean singleTop = mAccountCompletion.get() == null
                     && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TOP
-                    || (publishHistory || inAppTask) && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
-                            || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
-                            || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK)
+                    || info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
+                    || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
+                    || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK
                     || documentIntoExisting
                     || (launchFlags & Intent.FLAG_ACTIVITY_SINGLE_TOP) != 0);
             boolean clearToInstance = (launchFlags & Intent.FLAG_ACTIVITY_CLEAR_TOP) != 0
                     || documentIntoExisting
-                    || (publishHistory || inAppTask) && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
+                    || mAccountCompletion.get() == null && (info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
                             || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
                             || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK);
             ActivityRecord below = !clearTask && clearToInstance
-                    && (singleTop || publishHistory || inAppTask)
                     ? belowInTask(taskId, launch.getComponent()) : null;
-            ActivityRecord reordered = (publishHistory || inAppTask
-                    && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0) && !clearTask && !clearToInstance
+            ActivityRecord reordered = mAccountCompletion.get() == null && (!inAppTask
+                    || (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0) && !clearTask && !clearToInstance
                     && (launchFlags & Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) != 0
                     ? belowInTask(taskId, launch.getComponent()) : null;
             ActivityRecord taskRoot = rootOf(taskId);
@@ -2690,7 +2688,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                 mActivities.remove(reordered);
                 mActivities.add(reordered);
                 deliverTo = reordered;
-            } else if (publishHistory && top != null && !clearTask && !clearToInstance
+            } else if (!inAppTask && mAccountCompletion.get() == null
+                    && top != null && !clearTask && !clearToInstance
                     && (launchFlags & Intent.FLAG_ACTIVITY_REORDER_TO_FRONT) == 0
                     && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
                     && launchTaskId < 0 && taskRoot != null
@@ -2708,7 +2707,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                         if (activity == below) break;
                     }
                 }
-                ActivityRecord resultRecord = requestCode >= 0 ? source : null;
+                ActivityRecord resultRecord = requestCode >= 0
+                        && (launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) == 0 ? source : null;
                 r = new ActivityRecord(info, launch, taskId, callingPid, callingPackage,
                         resultRecord, resultWho, requestCode, targetCode);
                 mAm.uriGrants().publish(r.token, preparedGrants);
@@ -2759,9 +2759,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     }
                     if (front != null) {
                         r.waitingFor = front;
-                        // Clearing the explicit task already schedules this
+                        // Clearing the task already schedules this
                         // activity's finishing pause through finishTogether.
-                        if (front.state != State.PAUSING && (!inAppTask || !clearTop.contains(front))) {
+                        if (front.state != State.PAUSING && !clearTop.contains(front)) {
                             pause = front;
                         }
                     } else {
@@ -2769,14 +2769,25 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     }
                 }
             }
-            if (!inAppTask && (deliverTo != null || reusedTaskTop != null)) {
+            if (publishHistory && (deliverTo != null || reusedTaskTop != null)) {
                 mHiddenTasks.remove(taskId);
                 focusTaskLocked(taskId);
             }
+            // A new task cannot return a result to its launching Activity. Reusing
+            // an existing instance also completes this launch's result with cancellation.
+            // Capture the admitted recipient process before invoking any lifecycle work.
+            cancelResult = source != null && requestCode >= 0
+                    && ((launchFlags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
+                            || deliverTo != null || reusedTaskTop != null);
+            if (cancelResult) resultProcess = source.app;
+        }
+        if (cancelResult) {
+            deliverResult(source, new ResultInfo(resultWho, requestCode,
+                    android.app.Activity.RESULT_CANCELED, null, null), null, null, resultProcess);
         }
         if (reusedTaskTop != null) {
             started[0] = reusedTaskTop;
-            if (inAppTask) moveTaskToFront(reusedTaskTop.taskId, requiredTask);
+            if (!publishHistory) moveTaskToFront(reusedTaskTop.taskId, requiredTask, false, true);
             applyAppWindows();
             return ActivityManager.START_TASK_TO_FRONT;
         }
@@ -2793,7 +2804,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
             // finish the sender/IntentSender holder; that must not erase this
             // delivery. Creator code/capability and target generations remain live.
             deliverNewIntent(deliverTo, launch, callingPackage, sourceLifetime, callerSnapshot);
-            if (inAppTask) moveTaskToFront(deliverTo.taskId, requiredTask);
+            if (!publishHistory) moveTaskToFront(deliverTo.taskId, requiredTask, false, true);
             applyAppWindows();
             return ActivityManager.START_DELIVERED_TO_TOP;
         }
@@ -2823,9 +2834,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         return callingPackage != null ? callingPackage : "pid " + callingPid;
     }
 
-    /** ActivityStarter's manifest/document flags for history and explicit AppTask launches. */
+    /** ActivityStarter's manifest/document flags for ordinary, batch and AppTask launches. */
     private static int taskLaunchFlags(ActivityInfo info, Intent intent, ActivityRecord source,
-            boolean inAppTask) {
+            boolean inAppTask, boolean forResult) {
         int flags = intent.getFlags();
         boolean single = info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
                 || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE;
@@ -2844,7 +2855,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         if (!inAppTask && (source == null || source.info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE
                     || single)
                 || info.launchMode == ActivityInfo.LAUNCH_SINGLE_INSTANCE_PER_TASK
-                || (flags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0) {
+                || (flags & Intent.FLAG_ACTIVITY_NEW_DOCUMENT) != 0 && !forResult) {
             flags |= Intent.FLAG_ACTIVITY_NEW_TASK;
         }
         if ((flags & Intent.FLAG_ACTIVITY_NEW_TASK) != 0
@@ -2854,8 +2865,8 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
         return flags;
     }
 
-    /** Batch members use ActivityStarter's source/NEW_TASK choice, never a forced first task. */
-    private int historyTaskId(ActivityInfo info, Intent intent, ActivityRecord source, int requestedTask) {
+    /** ActivityStarter's source/NEW_TASK choice, shared by single launches and batches. */
+    private int findLaunchTaskId(ActivityInfo info, Intent intent, ActivityRecord source, int requestedTask) {
         if (requestedTask >= 0 && topOf(requestedTask) != null) return requestedTask;
         int flags = intent.getFlags();
         boolean singleTask = info.launchMode == ActivityInfo.LAUNCH_SINGLE_TASK
@@ -5819,6 +5830,11 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
      * window just covered (settlingAppTaskLocked).
      */
     private void moveTaskToFront(int taskId, AppTaskRecord requiredTask, boolean fromWindow) {
+        moveTaskToFront(taskId, requiredTask, fromWindow, false);
+    }
+
+    private void moveTaskToFront(int taskId, AppTaskRecord requiredTask, boolean fromWindow,
+            boolean fromLaunch) {
         boolean history;
         synchronized (this) {
             if (requiredTask != null && !hasAppTaskLocked(requiredTask)) return;
@@ -5869,9 +5885,9 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     case STARTED:
                     case STOPPING:
                     case STOPPED:
-                        // An explicit task launch can reorder a live activity.
+                        // A launch can reuse or reorder a live activity.
                         // Its previous foreground activity must pause first.
-                        ActivityRecord previous = requiredTask != null ? front(top) : null;
+                        ActivityRecord previous = requiredTask != null || fromLaunch ? front(top) : null;
                         if (previous == null) {
                             resumeNow = true;
                         } else {
@@ -5883,7 +5899,7 @@ public final class ActivityTaskManagerService extends IActivityTaskManager.Defau
                     case PAUSING:
                         // A task may be restored before its move-to-back pause
                         // completes. Resume it on that acknowledgement.
-                        if (requiredTask != null) {
+                        if (requiredTask != null || fromLaunch) {
                             top.resumeAfterPause = true;
                         } else {
                             if (!wasHidden && !refocused) return;
