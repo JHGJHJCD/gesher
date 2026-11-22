@@ -7,6 +7,13 @@ Check 'framework: Wi-Fi data APIs and real native Parcelable round trips' {
   $deepWifiOut
 } @('WifiDataContractTest all passed:', 'parcel=true')
 
+$deepWifiTransportOut = FixesRun ($dvmFixes + 'gesher.services.WindowsWifiTransportTest') 90
+$deepWifiTransportCode = $LASTEXITCODE
+Check 'framework: authenticated Wi-Fi service Binder proxy and native typed parcels' {
+  $global:LASTEXITCODE = $deepWifiTransportCode
+  $deepWifiTransportOut
+} @('WindowsWifiTransportTest passed:', 'proxy=true')
+
 $deepSafetyCenterOut = FixesRun ($dvmFixes + 'gesher.services.SafetyCenterContractTest') 90
 $deepSafetyCenterCode = $LASTEXITCODE
 Check 'framework: android.safetycenter values on the boot class path, no Safety Center service' {
