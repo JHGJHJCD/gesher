@@ -66,9 +66,10 @@ it is as trusted as a downloaded `.exe`.
    that claims a UID below `FIRST_APPLICATION_UID` or a pid other than its own
    (`GetNamedPipeClientProcessId`). M2 maps the
    container SID to the package's UID and ignores the hello's UID altogether.
-6. **Roll out behind a switch** (`GESHER_SANDBOX=appcontainer`), off until the
-   milestones in docs/sandbox.md pass, with a per-app opt-out and diagnostics for
-   every access denied.
+6. **Run M1 in a development test layout** (`GESHER_SANDBOX=appcontainer`).
+   Installed launches use the ordinary runtime during M1. Expose the feature
+   when the milestones in docs/sandbox.md pass, with a per-app opt-out and
+   diagnostics for denied access.
 
 The Android-visible contract is unchanged: applications see the same APIs,
 permissions, results and errors. The change adds the enforcement Android has:

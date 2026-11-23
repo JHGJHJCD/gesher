@@ -13,11 +13,11 @@ issue #314), and the record of what each milestone established.
 
 ## Trying it
 
-Experimental and off by default. With `GESHER_SANDBOX=appcontainer` in the
-environment of the process that starts the Gesher device (`gesher-app`, the
-launcher), the system server starts app processes in their packages'
-AppContainers and binderd admits them. App processes do **not** run correctly
-in it yet (see M1's results): this is for development only.
+M1 is a developer experiment for a test layout. The installed launcher
+starts the ordinary runtime, even if its parent process set `GESHER_SANDBOX`.
+The fixture scripts set `GESHER_SANDBOX=appcontainer` on their own test device
+so the system server starts its app processes in their packages' AppContainers.
+See the M1 results below for the launch dependencies the experiment exposes.
 
 - `tests/windows/tracks/53-sandbox.ps1` (CI): binderd in sandbox mode and the
   production launch path with real AppContainer tokens
