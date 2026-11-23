@@ -13,10 +13,12 @@
 
 #include "shim_internal.h"
 #include "extra_bionic.h"
+#include "memmem_search.h"
 
 #include <gesher/bionic_shim.h>
 #include <gesher/elf_loader.h>
 #include <gesher/clocks.h>
+#include <gesher/environment.h>
 
 #include <windows.h>
 // bcrypt.h needs windows.h first.
@@ -444,11 +446,7 @@ int BIONIC_SYSV Strcasecmp(const char* a, const char* b) { return _stricmp(a, b)
 int BIONIC_SYSV Strncasecmp(const char* a, const char* b, size_t n) { return _strnicmp(a, b, n); }
 void* BIONIC_SYSV Memmem(const void* h, size_t hn, const void* n, size_t nn) {
   if (nn == 0) return const_cast<void*>(h);
-  auto hp = static_cast<const uint8_t*>(h);
-  for (size_t i = 0; i + nn <= hn; ++i) {
-    if (std::memcmp(hp + i, n, nn) == 0) return const_cast<uint8_t*>(hp + i);
-  }
-  return nullptr;
+  return const_cast<void*>(search::FindBytes(h, hn, n, nn));
 }
 
 // FORTIFY (_FORTIFY_SOURCE) checked variants: check, then do the work.
@@ -543,11 +541,9 @@ int* BIONIC_SYSV Errno() { return &errno; }
   std::abort();
 }
 [[noreturn]] void BIONIC_SYSV Exit(int code) {
-  ExitIfVforkChild(code);  // a vfork/fork child that exits without exec
   std::exit(code);
 }
 [[noreturn]] void BIONIC_SYSV UnderscoreExit(int code) {
-  ExitIfVforkChild(code);
   std::fflush(stdout);
   std::fflush(stderr);
   ExitProcess(static_cast<UINT>(code));
@@ -567,15 +563,14 @@ void BIONIC_SYSV SetAbortMessage(const char* msg) {
   std::fprintf(stderr, "gesher bionic: abort message: %s\n", msg ? msg : "");
 }
 
-// The environment is the CRT's (environ is its _environ). gesher-base's
-// setenv/unsetenv keep every string they replace or remove, as bionic does
-// (compat/posix/src/unistd.cc), so what getenv returns and what environ points
-// at stay valid: mozglue reads environ through its own getenv.
-char* BIONIC_SYSV Getenv(const char* name) { return name != nullptr ? std::getenv(name) : nullptr; }
+// Host and guest calls share a POSIX table. Owned strings survive replacement;
+// putenv keeps caller storage, which must never be handed to UCRT for freeing.
+char* BIONIC_SYSV Getenv(const char* name) { return gesher::GetEnvironment(name); }
 int BIONIC_SYSV Setenv(const char* name, const char* value, int overwrite) {
   return ::setenv(name, value, overwrite);
 }
 int BIONIC_SYSV Unsetenv(const char* name) { return ::unsetenv(name); }
+int BIONIC_SYSV Putenv(char* assignment) { return gesher::PutEnvironment(assignment); }
 
 int BIONIC_SYSV Getpid() { return static_cast<int>(GetCurrentProcessId()); }
 int BIONIC_SYSV Gettid() { return static_cast<int>(GetCurrentThreadId()); }
@@ -837,6 +832,9 @@ int64_t BIONIC_SYSV Clock() { return ProcessCpuNanos() / 1000; }  // CLOCKS_PER_
 // caller passed it, and open ignores it without O_CREAT. Linux flag values,
 // like gesher-base's open.
 int BIONIC_SYSV Open(const char* path, int flags, int mode) { return open(path, flags, mode); }
+int BIONIC_SYSV Creat(const char* path, int mode) {
+  return Open(path, O_CREAT | O_TRUNC | O_WRONLY, mode);
+}
 int BIONIC_SYSV Close(int fd) { return close(fd); }
 int64_t BIONIC_SYSV Read(int fd, void* buf, size_t n) {
   return read(fd, buf, static_cast<unsigned>(n > 0x7fffffff ? 0x7fffffff : n));
@@ -1342,6 +1340,7 @@ void RegisterLibc(SymbolTable& t) {
   ENTRY("getenv", Getenv);
   ENTRY("setenv", Setenv);
   ENTRY("unsetenv", Unsetenv);
+  ENTRY("putenv", Putenv);
   ENTRY("getpid", Getpid);
   ENTRY("gettid", Gettid);
   ENTRY("getpagesize", Getpagesize);
@@ -1369,6 +1368,8 @@ void RegisterLibc(SymbolTable& t) {
   ENTRY("open", Open);
   ENTRY("open64", Open);
   ENTRY("__open_2", Open);
+  ENTRY("creat", Creat);
+  ENTRY("creat64", Creat);
   ENTRY("close", Close);
   ENTRY("read", Read);
   ENTRY("write", Write);

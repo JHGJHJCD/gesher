@@ -62,6 +62,12 @@ public final class AppShell {
     private static final String TAG = "gesher-app";
     private static final String RECORD = "shortcut.properties";
     private static final String ICON = "icon.ico";
+    /**
+     * Written next to the window icon for a package without an enabled MAIN/LAUNCHER activity,
+     * removed when it has one: the Control Center offers "Launch" only for packages a launcher
+     * would list (tools/package/gesher-control-panel.ps1).
+     */
+    private static final String NO_LAUNCHER = "no-launcher-activity";
 
     private AppShell() {
     }
@@ -128,8 +134,36 @@ public final class AppShell {
         }
     }
 
+    /**
+     * Records whether {@code pkg} has an enabled MAIN/LAUNCHER activity ({@link #NO_LAUNCHER}),
+     * from its installed state when the system server passes its package (an enabled-state
+     * change, the device's start). Never throws.
+     */
+    public static void updateLauncherRecordQuietly(String packageName, ApkPackage pkg) {
+        try {
+            writeLauncherRecord(packageName, launcherActivity(pkg) != null);
+        } catch (Throwable t) {
+            log("no launcher record for " + packageName + ": " + t);
+        }
+    }
+
+    /** The installed package already has a data directory. Never recreate one during removal. */
+    private static void writeLauncherRecord(String packageName, boolean hasLauncher)
+            throws java.io.IOException {
+        File dir = shellDir(packageName);
+        File marker = new File(dir, NO_LAUNCHER);
+        if (hasLauncher) {
+            marker.delete();
+        } else if (!marker.isFile()) {
+            if (!dir.getParentFile().isDirectory()) return;
+            dir.mkdir();
+            new java.io.FileOutputStream(marker).close();
+        }
+    }
+
     private static void register(String packageName, String codePath, boolean changed)
             throws Exception {
+        Properties old = shortcutOf(packageName);
         if ("0".equals(System.getenv(ENV_SHORTCUTS))) return;
         String gesher = installDir();
         String systemRoot = System.getenv("SystemRoot");
@@ -152,7 +186,6 @@ public final class AppShell {
             log("no Start menu shortcut for " + packageName + ": no Programs folder");
             return;
         }
-        Properties old = shortcutOf(packageName);
         String oldLink = old != null ? old.getProperty("link") : null;
         String oldTarget = old != null ? old.getProperty("target") : null;
         if (!changed && oldLink != null && codePath.equals(old.getProperty("code"))
@@ -161,12 +194,24 @@ public final class AppShell {
             return;  // up to date
         }
 
-        ApkPackage pkg = ApkPackage.parseCodeDirectory(codePath);
+        ApkPackage addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
+        ApkPackage pkg = addon != null ? addon : ApkPackage.parseCodeDirectory(codePath);
+        if (addon != null) {
+            // A staged microG addon (system/priv-app, not installed with gesher-app): its
+            // windows get its icon, but no Start menu shortcut, which gesher-app-microg.ps1
+            // -Remove would leave behind; the Control Center opens microG's settings.
+            removeShortcut(old);
+            if (old != null) new File(shellDir(packageName), RECORD).delete();
+            writeWindowIcon(addon, packageName, changed);
+            return;
+        }
         ActivityInfo launcher = launcherActivity(pkg);
         if (launcher == null) {
             // As a launcher's app list: only apps with a MAIN/LAUNCHER activity.
             log(packageName + " has no launcher activity: no Start menu shortcut");
             removeShortcut(old);
+            if (old != null) new File(shellDir(packageName), RECORD).delete();
+            writeWindowIcon(pkg, packageName, changed);
             return;
         }
         AppIcon icon = AppIcon.load(pkg.apkPath, pkg.applicationInfo(0), launcher);
@@ -211,6 +256,31 @@ public final class AppShell {
     }
 
     /**
+     * A package without a launcher activity still has windows (a settings Activity another app
+     * or `launch <package>` starts), whose task shows the application's icon as on Android.
+     * Without a shortcut, its window takes {@code gesher-shell/icon.ico}
+     * (WindowSession.appIcon), written here from the application icon; unchanged code (an
+     * APK no newer than it) keeps the one already written. {@link #unregisterQuietly}, or
+     * gesher-app-microg.ps1 -Remove for a staged addon, removes it.
+     */
+    private static void writeWindowIcon(ApkPackage pkg, String packageName, boolean changed)
+            throws java.io.IOException {
+        File dir = shellDir(packageName);
+        File ico = new File(dir, ICON);
+        if (!changed && ico.isFile() && ico.lastModified() >= new File(pkg.apkPath).lastModified()) {
+            return;
+        }
+        AppIcon icon = AppIcon.load(pkg.apkPath, pkg.applicationInfo(0), null);
+        if (!icon.hasImages()) {
+            log("no window icon for " + packageName + ": " + icon.source);
+            return;
+        }
+        dir.mkdirs();
+        icon.writeIco(ico);
+        log("window icon " + ico + " for " + packageName + " from " + icon.source);
+    }
+
+    /**
      * Before uninstalling {@code packageName}, {@link #shortcutOf} it; after, this removes the
      * shortcut, the icon, and the folder if it is empty. Logs what it did; never throws.
      */
@@ -223,6 +293,7 @@ public final class AppShell {
             new File(dir, ICON).delete();
             new File(dir, RECORD).delete();
             new File(dir, DYNAMIC_RECORD).delete();
+            new File(dir, NO_LAUNCHER).delete();
             java.nio.file.Files.deleteIfExists(dir.toPath());
             rewriteApkIcons(packageName, null);
         } catch (Throwable t) {
