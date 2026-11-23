@@ -62,6 +62,12 @@ public final class AppShell {
     private static final String TAG = "gesher-app";
     private static final String RECORD = "shortcut.properties";
     private static final String ICON = "icon.ico";
+    /**
+     * Written next to the window icon for a package without an enabled MAIN/LAUNCHER activity,
+     * removed when it has one: the Control Center offers "Launch" only for packages a launcher
+     * would list (tools/package/gesher-control-panel.ps1).
+     */
+    private static final String NO_LAUNCHER = "no-launcher-activity";
 
     private AppShell() {
     }
@@ -173,14 +179,20 @@ public final class AppShell {
         }
         ApkPackage pkg = ApkPackage.parseCodeDirectory(codePath);
         ActivityInfo launcher = launcherActivity(pkg);
+        File noLauncher = new File(shellDir(packageName), NO_LAUNCHER);
         if (launcher == null) {
             // As a launcher's app list: only apps with a MAIN/LAUNCHER activity.
             log(packageName + " has no launcher activity: no Start menu shortcut");
             removeShortcut(old);
             if (old != null) new File(shellDir(packageName), RECORD).delete();
+            if (!noLauncher.isFile()) {
+                noLauncher.getParentFile().mkdirs();
+                new java.io.FileOutputStream(noLauncher).close();
+            }
             writeWindowIcon(pkg, packageName, changed);
             return;
         }
+        noLauncher.delete();
         AppIcon icon = AppIcon.load(pkg.apkPath, pkg.applicationInfo(0), launcher);
         File dir = shellDir(packageName);
         File ico = new File(dir, ICON);
