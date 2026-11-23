@@ -80,7 +80,10 @@ not a new contract.
 ## Consequences
 
 - Until M2, the sandbox is **not a security boundary**: a contained process can
-  still claim another application's UID to binderd. It does not run apps yet
+  still claim another application's UID to binderd, and with the switch on the
+  user's own Low integrity processes could serve an instance of binderd's pipe
+  (docs/sandbox.md; M2 hands contained processes a connection at launch instead).
+  It does not run apps yet
   either: objects that app processes share by name (`Local\` sections, events
   and mutexes) are separate per container, among the blockers docs/sandbox.md
   lists.

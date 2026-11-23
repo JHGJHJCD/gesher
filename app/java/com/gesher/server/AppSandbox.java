@@ -52,7 +52,20 @@ final class AppSandbox {
      * data root) from sharing a container, its grants and its deletion at uninstall.
      */
     static String containerName(String packageName) {
-        return containerName(Device.dataDir(), packageName);
+        return containerName(canonical(new File(Device.dataDir())).getPath(), packageName);
+    }
+
+    /**
+     * The canonical form, as the installer builds code directories (a {@code /mnt/<drive>}
+     * path or an 8.3 short name names the same directory); the absolute one if the
+     * canonical cannot be read.
+     */
+    static File canonical(File file) {
+        try {
+            return file.getCanonicalFile();
+        } catch (java.io.IOException e) {
+            return file.getAbsoluteFile();
+        }
     }
 
     static String containerName(String dataRoot, String packageName) {
@@ -108,9 +121,9 @@ final class AppSandbox {
         // The APK itself; its directory (and the oat files in it) only when it is the
         // package's own code directory under data/app. An APK run from where the user
         // keeps it (Downloads) must not open that directory to the container.
-        File apk = new File(pkg.apkPath);
+        File apk = canonical(new File(pkg.apkPath));
         grantContainer(apk.getPath(), container, READ_EXECUTE, false);
-        File apps = new File(Device.dataDir(), "app");
+        File apps = canonical(new File(Device.dataDir(), "app"));
         File code = apk.getParentFile();
         if (code != null && apps.getPath().equals(code.getParent())) {
             grantContainer(code.getPath(), container, READ_EXECUTE, true);

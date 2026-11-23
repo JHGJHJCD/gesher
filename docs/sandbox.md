@@ -38,8 +38,9 @@ in it yet (see M1's results): this is for development only.
 | Control Center, `gesher-launch`, scripts | the user's |
 
 - **Profile name**: `Gesher.App.` + the first 40 hex digits of SHA-256 of the
-  package name (`CreateAppContainerProfile` allows 64 characters of a restricted
-  set). Created at the first launch, deleted at uninstall while the switch is
+  device's canonical data root, a NUL and the package name
+  (`CreateAppContainerProfile` allows 64 characters of a restricted set; the root
+  keeps two devices of one user apart). Created at the first launch, deleted at uninstall while the switch is
   on. Grants stay when the switch is turned off (see the ADR's consequences).
 - **Files** (explicit, inherited ACEs; idempotent, an ACE already present on the
   root is not written or propagated again, so a propagation that stopped part way,
@@ -138,8 +139,18 @@ process, windows and Direct3D, the JIT and its profile, WebView2, clipboard,
 IME and drag and drop under UIPI, Conscrypt and the user's root store
 (`CurrentUser\Root`, content filters), loopback.
 
-**Not a security boundary yet:** a contained process can still claim another
-application's UID (≥ 10000) to binderd; M2 takes the UID from the container SID.
+**Not a security boundary yet:**
+
+- A contained process can still claim another application's UID (≥ 10000) to
+  binderd; M2 takes the UID from the container SID.
+- With the switch on, the pipe's Low label lets the user's own Low integrity
+  processes outside any container use the user's full-access ACE: they cannot
+  claim a system UID or another pid, but they could create an instance of the
+  device's pipe or change its DACL (a Medium label stops both when the switch is
+  off). The DACL cannot tell Low from Medium processes of one user, so M2 replaces
+  the named pipe for contained processes with a connection the broker hands each
+  one at launch (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`), and keeps the pipe at
+  Medium.
 
 ## Open questions
 

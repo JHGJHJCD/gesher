@@ -146,7 +146,11 @@ std::string RunLowIntegrity(const std::wstring& exe, const std::wstring& device,
   if (!ok) return "duplicate error " + std::to_string(GetLastError()) + "\n";
   SID_IDENTIFIER_AUTHORITY mandatory = SECURITY_MANDATORY_LABEL_AUTHORITY;
   PSID low = nullptr;
-  AllocateAndInitializeSid(&mandatory, 1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0, &low);
+  if (!AllocateAndInitializeSid(&mandatory, 1, SECURITY_MANDATORY_LOW_RID, 0, 0, 0, 0, 0, 0, 0,
+                                &low)) {
+    CloseHandle(token);
+    return "sid error " + std::to_string(GetLastError()) + "\n";
+  }
   TOKEN_MANDATORY_LABEL label{};
   label.Label.Attributes = SE_GROUP_INTEGRITY;
   label.Label.Sid = low;
@@ -160,6 +164,11 @@ std::string RunLowIntegrity(const std::wstring& exe, const std::wstring& device,
   SECURITY_ATTRIBUTES inherit{sizeof(inherit), nullptr, TRUE};
   HANDLE out = CreateFileW(log.c_str(), FILE_APPEND_DATA | SYNCHRONIZE,
                            FILE_SHARE_READ | FILE_SHARE_WRITE, &inherit, CREATE_ALWAYS, 0, nullptr);
+  if (out == INVALID_HANDLE_VALUE) {
+    DWORD failed = GetLastError();
+    CloseHandle(token);
+    return "log error " + std::to_string(failed) + "\n";
+  }
   STARTUPINFOW si{};
   si.cb = sizeof(si);
   si.dwFlags = STARTF_USESTDHANDLES;
@@ -220,7 +229,12 @@ int main(int argc, char** argv) {
   // inherited handle.
   const std::wstring dir = std::wstring(temp) + L"gesher-sandbox-probe-" + stamp;
   const std::wstring exe = dir + L"\\appcontainer-probe.exe";
-  if (!CreateDirectoryW(dir.c_str(), nullptr) || !CopyFileW(self, exe.c_str(), FALSE)) return 4;
+  if (!CreateDirectoryW(dir.c_str(), nullptr) || !CopyFileW(self, exe.c_str(), FALSE)) {
+    std::printf("FAIL  copying the probe to %ls: %lu\n", dir.c_str(), GetLastError());
+    RemoveDirectoryW(dir.c_str());
+    DeleteFileW(canary.c_str());
+    return 4;
+  }
   int failures = 0;
   if (gesher::zygote::GrantToCapability(U16(dir), u"gesherRuntimeFiles", 0x001200A9, true) != 0) {
     std::printf("FAIL  granting the runtime capability on %ls\n", dir.c_str());
