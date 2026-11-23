@@ -156,21 +156,6 @@ bool WriteFileAtomically(const std::wstring& dir, const std::wstring& name,
   return ok;
 }
 
-// Removes the .<name>.tmp-<pid>-<tid> files WriteFileAtomically stages in `dir`
-// (earlier versions staged them in cacerts itself). Called with the writers'
-// mutex held, so none of them belongs to a live write.
-void RemoveStaleTemporaryFiles(const std::wstring& dir) {
-  WIN32_FIND_DATAW entry;
-  HANDLE find = FindFirstFileW((dir + L"\\.*.tmp-*").c_str(), &entry);
-  if (find == INVALID_HANDLE_VALUE) return;
-  do {
-    if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-      DeleteFileW((dir + L"\\" + entry.cFileName).c_str());
-    }
-  } while (FindNextFileW(find, &entry));
-  FindClose(find);
-}
-
 bool MakeDirectories(const std::wstring& dir) {
   if (CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
     return true;
@@ -224,6 +209,37 @@ bool IsCertFileName(const std::wstring& name) {
     if (!iswdigit(name[i])) return false;
   }
   return true;
+}
+
+bool IsStagedTrustFile(const std::wstring& name) {
+  const size_t marker = name.rfind(L".tmp-");
+  if (name.empty() || name.front() != L'.' || marker == std::wstring::npos || marker <= 1)
+    return false;
+  const std::wstring target = name.substr(1, marker - 1);
+  if (target != L".gesher-cacerts" && !IsCertFileName(target)) return false;
+  const size_t pid = marker + 5;
+  const size_t separator = name.find(L'-', pid);
+  if (separator == std::wstring::npos || separator == pid || separator + 1 >= name.size()) return false;
+  for (size_t i = pid; i < name.size(); i++) {
+    if (i != separator && (name[i] < L'0' || name[i] > L'9')) return false;
+  }
+  return true;
+}
+
+// Removes the .<name>.tmp-<pid>-<tid> files WriteFileAtomically stages in `dir`
+// (earlier versions staged them in cacerts itself). Called with the writers'
+// mutex held, so none of them belongs to a live write.
+void RemoveStaleTemporaryFiles(const std::wstring& dir) {
+  WIN32_FIND_DATAW entry;
+  HANDLE find = FindFirstFileW((dir + L"\\.*.tmp-*").c_str(), &entry);
+  if (find == INVALID_HANDLE_VALUE) return;
+  do {
+    if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+        IsStagedTrustFile(entry.cFileName)) {
+      DeleteFileW((dir + L"\\" + entry.cFileName).c_str());
+    }
+  } while (FindNextFileW(find, &entry));
+  FindClose(find);
 }
 
 void Sync() {
@@ -304,16 +320,19 @@ void Sync() {
   // One process at a time rewrites the directory.
   HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\gesher-system-cacerts");
   DWORD waited = mutex != nullptr ? WaitForSingleObject(mutex, 30000) : WAIT_FAILED;
-  bool held = waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED;
+  if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED) {
+    DWORD error = waited == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError();
+    if (mutex != nullptr) CloseHandle(mutex);
+    fprintf(stderr, "gesher: could not lock the system CA certificate store (error %lu)\n", error);
+    return;
+  }
   std::string current;
   // Earlier versions kept the manifest in cacerts itself.
   DeleteFileW((dir + L"\\.gesher-cacerts").c_str());
   // Temporary files of a writer that died before its rename (every writer
   // holds the mutex while its temporary files exist).
-  if (held) {
-    RemoveStaleTemporaryFiles(security);
-    RemoveStaleTemporaryFiles(dir);
-  }
+  RemoveStaleTemporaryFiles(security);
+  RemoveStaleTemporaryFiles(dir);
   // The manifest is outside the directory: it describes the directory only
   // while the directory and every file it lists exist.
   DWORD dir_attributes = GetFileAttributesW(dir.c_str());
@@ -321,9 +340,8 @@ void Sync() {
                  (dir_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
                  !ReadWholeFile(manifest_path, &current) || current != manifest;
   for (auto it = files.begin(); !changed && it != files.end(); ++it) {
-    if (GetFileAttributesW((dir + L"\\" + it->first).c_str()) == INVALID_FILE_ATTRIBUTES) {
-      changed = true;
-    }
+    DWORD attributes = GetFileAttributesW((dir + L"\\" + it->first).c_str());
+    changed = attributes == INVALID_FILE_ATTRIBUTES || (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
   }
   size_t written = 0, removed = 0;
   bool ok = true;
@@ -353,10 +371,8 @@ void Sync() {
     }
     if (ok) ok = WriteFileAtomically(security, L".gesher-cacerts", manifest, security);
   }
-  if (mutex != nullptr) {
-    ReleaseMutex(mutex);
-    CloseHandle(mutex);
-  }
+  ReleaseMutex(mutex);
+  CloseHandle(mutex);
   if (!ok) {
     fprintf(stderr, "gesher: could not write the system CA certificates to %s/etc/security/cacerts "
             "(error %lu)\n", android_root, GetLastError());

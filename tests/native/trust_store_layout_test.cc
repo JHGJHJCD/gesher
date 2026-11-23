@@ -112,6 +112,19 @@ int main() {
   utf8.resize(len > 0 ? len : 0);
   _putenv_s("ANDROID_ROOT", utf8.c_str());
 
+  // A different object type on the writer's mutex name makes CreateMutexW
+  // fail immediately. A failed admission must never start the migration.
+  HANDLE blocker = CreateEventW(nullptr, FALSE, FALSE, L"Local\\gesher-system-cacerts");
+  CHECK(blocker != nullptr);
+  if (blocker != nullptr) {
+    const auto legacy = List(cacerts);
+    const auto layout = List(security);
+    gesher::net::SyncSystemCaCerts();
+    CHECK(List(cacerts) == legacy);
+    CHECK(List(security) == layout);
+    CloseHandle(blocker);
+  }
+
   gesher::net::SyncSystemCaCerts();
 
   std::string manifest;
@@ -159,9 +172,14 @@ int main() {
   // unchanged one.
   CHECK(WriteFile(security + L"\\.0000abcd.0.tmp-11-22", "partial"));
   CHECK(WriteFile(security + L"\\..gesher-cacerts.tmp-11-22", "partial"));
+  const std::wstring unrelated = security + L"\\.unrelated-config.tmp-11-22";
+  CHECK(WriteFile(unrelated, "must remain"));
   CHECK(WriteFile(cacerts + L"\\.0000abcd.0.tmp-11-22", "partial"));
   gesher::net::SyncSystemCaCerts();
   CHECK(List(cacerts) == files);
+  std::string unrelated_contents;
+  CHECK(ReadFile(unrelated, &unrelated_contents) && unrelated_contents == "must remain");
+  CHECK(DeleteFileW(unrelated.c_str()));
   for (const std::wstring& name : List(security)) {
     CHECK(name == L"cacerts" || name == L".gesher-cacerts");
   }

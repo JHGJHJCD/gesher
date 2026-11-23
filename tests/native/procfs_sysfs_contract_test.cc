@@ -435,10 +435,44 @@ static void TestRandom() {
   CHECK_MSG(IsUuidLine(boot2), boot2.c_str());
   CHECK(boot2 != boot1);
   CHECK(ChildBootId() == boot2);
+  SetEnvironmentVariableW(L"GESHER_BINDER", first.c_str());
+  CHECK(ChildBootId() == boot1);
+  CHECK(ReadAll("/proc/sys/kernel/random/boot_id") == boot1);
+
+  // A device cannot claim boot identity from an unwriteable data root. An
+  // ordinary file obstructs its system directory even on an elevated runner.
+  std::wstring blocked = data + L"\\blocked";
+  HANDLE obstruction = CreateFileW(blocked.c_str(), GENERIC_WRITE, 0, nullptr,
+                                  CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+  CHECK(obstruction != INVALID_HANDLE_VALUE);
+  if (obstruction != INVALID_HANDLE_VALUE) {
+    CloseHandle(obstruction);
+    SetEnvironmentVariableW(L"ANDROID_DATA", blocked.c_str());
+    std::wstring third = L"gesher-boot-test-c-" + std::to_wstring(GetCurrentProcessId());
+    SetEnvironmentVariableW(L"GESHER_BINDER", third.c_str());
+    errno = 0;
+    int unreadable = open("/proc/sys/kernel/random/boot_id", O_RDONLY);
+    CHECK(unreadable == -1 && errno == EIO);
+    if (unreadable >= 0) close(unreadable);
+    SetEnvironmentVariableW(L"ANDROID_DATA", data.c_str());
+    std::string boot3 = ReadAll("/proc/sys/kernel/random/boot_id");
+    CHECK_MSG(IsUuidLine(boot3), boot3.c_str());
+    CHECK(ChildBootId() == boot3);
+    DeleteFileW(blocked.c_str());
+  }
 
   SetEnvironmentVariableW(L"GESHER_BINDER", nullptr);
-  DeleteFileW((data + L"\\system\\gesher-boot-id").c_str());
-  RemoveDirectoryW((data + L"\\system").c_str());
+  CHECK(ReadAll("/proc/sys/kernel/random/boot_id") == own);
+  std::wstring system = data + L"\\system";
+  WIN32_FIND_DATAW entry;
+  HANDLE find = FindFirstFileW((system + L"\\gesher-boot-id-*").c_str(), &entry);
+  if (find != INVALID_HANDLE_VALUE) {
+    do {
+      DeleteFileW((system + L"\\" + entry.cFileName).c_str());
+    } while (FindNextFileW(find, &entry));
+    FindClose(find);
+  }
+  RemoveDirectoryW(system.c_str());
   RemoveDirectoryW(data.c_str());
 }
 

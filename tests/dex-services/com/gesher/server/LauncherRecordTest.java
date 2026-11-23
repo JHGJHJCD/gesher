@@ -23,8 +23,8 @@ import java.util.function.Consumer;
  *
  *   LauncherRecordTest <APK with a MAIN/LAUNCHER activity> <APK without one>
  *
- * (tests/apps' lifecycle.apk and gesher-camera.apk). Covers the record AppShell writes when it
- * registers a package with GESHER_SHORTCUTS=0, the system server's listener after
+ * (tests/apps' lifecycle.apk and gesher-camera.apk). Covers the marker written on trusted
+ * package publication even with GESHER_SHORTCUTS=0, the system server's listener after
  * setComponentEnabledSetting / setApplicationEnabledSetting (called from the package event
  * executor, outside PackageManagerService's monitor), the refresh over installed packages at the
  * device's start, and that neither brings a removed package's data directory back.
@@ -119,13 +119,6 @@ public final class LauncherRecordTest {
         ComponentName launcherActivity = new ComponentName(withLauncher,
                 launcher.launcherActivity(null).name);
 
-        // 1. Registration (an install, a launch) with GESHER_SHORTCUTS=0.
-        AppShell.registerQuietly(without, new File(plain.apkPath).getParent(), true);
-        AppShell.registerQuietly(withLauncher, new File(launcher.apkPath).getParent(), true);
-        check(recorded(without), "a package without a launcher activity is recorded with shortcuts off");
-        check(!recorded(withLauncher), "a package with a launcher activity is not recorded");
-        check(AppShell.shortcutOf(withLauncher) == null, "no shortcut was made with shortcuts off");
-
         // The real package manager; package events queued, then run on this thread, outside its
         // monitor, as its executor does.
         Constructor<PackageManagerService> constructor = PackageManagerService.class
@@ -145,6 +138,14 @@ public final class LauncherRecordTest {
         check(!refresh.isAlive(), "refresh finished");
         check(recorded(without) && !recorded(withLauncher), "the refresh corrects every installed package's record");
 
+        // Package publication, not a shortcut's raw APK reader, owns the record.
+        marker(without).delete();
+        call(pm, "packageInstalled", new Class<?>[]{ApkPackage.class, boolean.class, Object.class}, plain, false, pm);
+        while (!events.isEmpty()) events.poll().run();
+        check(recorded(without), "a package without a launcher activity is recorded on publication with shortcuts off");
+        check(!recorded(withLauncher) && AppShell.shortcutOf(withLauncher) == null,
+                "a launchable package has no marker or shortcut with shortcuts off");
+
         // The production listener, checked to run outside the package manager's monitor.
         Field listenerField = field(PackageManagerService.class, "mDesktopEnabledStateListener");
         Consumer<ApkPackage> production = (Consumer<ApkPackage>) listenerField.get(pm);
@@ -163,6 +164,8 @@ public final class LauncherRecordTest {
         while (!events.isEmpty()) events.poll().run();
         check(calls.equals(List.of(withLauncher)), "the listener saw the change: " + calls);
         check(recorded(withLauncher), "disabling the only launcher activity records the package");
+        AppShell.registerQuietly(withLauncher, new File(launcher.apkPath).getParent(), true);
+        check(recorded(withLauncher), "shortcut registration cannot overwrite the installed disabled state");
         pm.setComponentEnabledSetting(launcherActivity, PackageManager.COMPONENT_ENABLED_STATE_DEFAULT,
                 PackageManager.DONT_KILL_APP, 0, "android");
         while (!events.isEmpty()) events.poll().run();
@@ -209,5 +212,7 @@ public final class LauncherRecordTest {
         Thread quiet = track(pm);
         quiet.join(30000);
         check(recorded(without) && !recorded(withLauncher), "records are right once packages are quiet");
+        AppShell.unregisterQuietly(without, null);
+        check(!marker(without).getParentFile().exists(), "unregister removes an owned launcher marker and empty shell directory");
     }
 }

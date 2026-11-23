@@ -73,12 +73,21 @@ public final class PackageManagerService extends IPackageManager.Default {
     private volatile Consumer<ApkPackage> mDesktopEnabledStateListener;
 
     /**
-     * The desktop shell's view of a package whose enabled state changed (whether it still has
-     * an enabled launcher activity), called with today's installed package.
+     * Updates the desktop shell's launcher's view after a package install or enabled-state
+     * change, outside the package manager monitor.
      */
     void setDesktopEnabledStateListener(Consumer<ApkPackage> listener) {
         mDesktopEnabledStateListener = listener;
     }
+    private void notifyDesktopLauncher(ApkPackage pkg) {
+        Consumer<ApkPackage> desktop = mDesktopEnabledStateListener;
+        if (desktop == null) return;
+        try { desktop.accept(pkg); }
+        catch (RuntimeException failure) {
+            SystemServer.log("desktop launcher update failed: " + failure);
+        }
+    }
+
     private final List<Consumer<String>> mPackageRemoval = new ArrayList<>();
     private final List<Consumer<String>> mPackageRemovalChecks = new ArrayList<>();
     private volatile Consumer<Set<String>> mAccountRemovalReconciler = installed -> { };
@@ -307,6 +316,7 @@ public final class PackageManagerService extends IPackageManager.Default {
             // checks. Do not call application Binders until that outer lock is released.
             synchronized (publicationLock) { }
             if (get(name) != pkg || isRemovalPending(name)) return;
+            notifyDesktopLauncher(pkg);
             for (Consumer<ApkPackage> listener : mPackageChanges) {
                 if (get(name) != pkg || isRemovalPending(name)) return;
                 listener.accept(pkg);
@@ -953,14 +963,7 @@ public final class PackageManagerService extends IPackageManager.Default {
             for (EnabledChange event : events.values()) {
                 Consumer<EnabledChange> listener = mEnabledStateListener;
                 if (listener != null && event.current(this)) listener.accept(event);
-                Consumer<ApkPackage> desktop = mDesktopEnabledStateListener;
-                if (desktop != null && event.current(this)) {
-                    try {
-                        desktop.accept(event.pkg);
-                    } catch (RuntimeException failure) {
-                        SystemServer.log("desktop enabled-state update failed: " + failure);
-                    }
-                }
+                if (event.current(this)) notifyDesktopLauncher(event.pkg);
                 if (!event.dontKill && event.restartCurrent(this)) {
                     try {
                         Consumer<EnabledChange> restarter = mEnabledStateRestarter;

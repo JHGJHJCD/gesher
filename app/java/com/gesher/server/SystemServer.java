@@ -67,25 +67,28 @@ public final class SystemServer {
 
     /**
      * Whether each package has an enabled launcher activity, for the Control Center
-     * (AppShell's no-launcher-activity record): kept up to date when an enabled state changes
-     * (PackageManagerService calls the listener from its event executor, outside its monitor),
+     * (AppShell's no-launcher-activity record): kept current on installs and enabled-state
+     * changes (PackageManagerService calls the listener outside its monitor),
      * and brought up to date now from the installed packages, in the background, for packages
      * installed before the record existed. Returns that background thread, started.
      */
     static Thread trackLauncherRecords(PackageManagerService pm) {
-        pm.setDesktopEnabledStateListener(
-                p -> com.gesher.app.shell.AppShell.updateLauncherRecordQuietly(p.packageName, p));
+        Object recordsLock = new Object();
+        java.util.function.Consumer<ApkPackage> update = p -> {
+            synchronized (recordsLock) {
+                if (pm.get(p.packageName) == p && !pm.isRemovalPending(p.packageName)) {
+                    com.gesher.app.shell.AppShell.updateLauncherRecordQuietly(p.packageName, p);
+                }
+            }
+        };
+        pm.setDesktopEnabledStateListener(update);
         Thread records = new Thread(() -> {
             List<ApkPackage> installed;
             synchronized (pm) {
                 installed = new ArrayList<>(pm.packages());
             }
-            for (ApkPackage p : installed) {
-                // Not a package removed (or replaced) since the snapshot; the record never
-                // creates a removed package's data directory (AppShell).
-                if (pm.get(p.packageName) != p) continue;
-                com.gesher.app.shell.AppShell.updateLauncherRecordQuietly(p.packageName, p);
-            }
+            // Use the same lock and current generation check as package events.
+            for (ApkPackage p : installed) update.accept(p);
         }, "launcher-records");
         records.setDaemon(true);
         records.start();

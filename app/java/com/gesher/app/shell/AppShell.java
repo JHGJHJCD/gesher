@@ -141,46 +141,29 @@ public final class AppShell {
      */
     public static void updateLauncherRecordQuietly(String packageName, ApkPackage pkg) {
         try {
-            writeLauncherRecord(packageName, launcherActivity(pkg) != null, false);
+            writeLauncherRecord(packageName, launcherActivity(pkg) != null);
         } catch (Throwable t) {
             log("no launcher record for " + packageName + ": " + t);
         }
     }
 
-    /**
-     * {@code create}: an install or a launch of the package may make its data directory. The
-     * system server's updates (which can race an uninstall) write only into an existing one, so
-     * that they never bring a removed package's directory back.
-     */
-    private static void writeLauncherRecord(String packageName, boolean hasLauncher,
-            boolean create) throws java.io.IOException {
+    /** The installed package already has a data directory. Never recreate one during removal. */
+    private static void writeLauncherRecord(String packageName, boolean hasLauncher)
+            throws java.io.IOException {
         File dir = shellDir(packageName);
         File marker = new File(dir, NO_LAUNCHER);
         if (hasLauncher) {
             marker.delete();
         } else if (!marker.isFile()) {
-            if (create) {
-                dir.mkdirs();
-            } else {
-                if (!dir.getParentFile().isDirectory()) return;
-                dir.mkdir();
-            }
+            if (!dir.getParentFile().isDirectory()) return;
+            dir.mkdir();
             new java.io.FileOutputStream(marker).close();
         }
     }
 
     private static void register(String packageName, String codePath, boolean changed)
             throws Exception {
-        // The launcher record does not depend on shortcuts being made. A shortcut recorded for
-        // this code means the package had a launcher activity: nothing to parse; otherwise the
-        // package (or the staged microG addon) is parsed once, for the record and below.
         Properties old = shortcutOf(packageName);
-        ApkPackage addon = null, pkg = null;
-        if (changed || old == null || !codePath.equals(old.getProperty("code"))) {
-            addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
-            pkg = addon != null ? addon : ApkPackage.parseCodeDirectory(codePath);
-            writeLauncherRecord(packageName, launcherActivity(pkg) != null, true);
-        }
         if ("0".equals(System.getenv(ENV_SHORTCUTS))) return;
         String gesher = installDir();
         String systemRoot = System.getenv("SystemRoot");
@@ -211,10 +194,8 @@ public final class AppShell {
             return;  // up to date
         }
 
-        if (pkg == null) {
-            addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
-            pkg = addon != null ? addon : ApkPackage.parseCodeDirectory(codePath);
-        }
+        ApkPackage addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
+        ApkPackage pkg = addon != null ? addon : ApkPackage.parseCodeDirectory(codePath);
         if (addon != null) {
             // A staged microG addon (system/priv-app, not installed with gesher-app): its
             // windows get its icon, but no Start menu shortcut, which gesher-app-microg.ps1
@@ -312,6 +293,7 @@ public final class AppShell {
             new File(dir, ICON).delete();
             new File(dir, RECORD).delete();
             new File(dir, DYNAMIC_RECORD).delete();
+            new File(dir, NO_LAUNCHER).delete();
             java.nio.file.Files.deleteIfExists(dir.toPath());
             rewriteApkIcons(packageName, null);
         } catch (Throwable t) {

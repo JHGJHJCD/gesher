@@ -693,84 +693,96 @@ bool IsUuid(const std::string& s) {
   return true;
 }
 
-// /proc/sys/kernel/random/boot_id: a random UUID that stays the same for the
-// whole boot and is new after the next one. Gesher's boot is the device: every
-// process of a device ($GESHER_BINDER, named anew at each device start, as the
-// property area's session is) reads the same id, which the first reader of the
-// boot generates and keeps in $ANDROID_DATA/system/gesher-boot-id next to the
-// session it belongs to; a device restart starts a new session and so a new id.
-// A process outside a device keeps one of its own.
-std::mutex g_boot_id_mutex;
-std::wstring g_boot_id_session;
-std::string g_boot_id;
-
-std::string BootId() {
-  std::wstring binder = EnvironmentValue(L"GESHER_BINDER");
-  std::wstring session = binder.empty() ? std::wstring() : L"device-" + binder;
-  std::lock_guard<std::mutex> lock(g_boot_id_mutex);
-  if (!g_boot_id.empty() && g_boot_id_session == session) return g_boot_id;
-  std::string id;
-  if (!session.empty()) {
-    // The data root the property area of this session uses (system_properties.cc),
-    // so that a scratch $ANDROID_DATA of ART's tests does not start another boot.
-    std::wstring data = EnvironmentValue(L"GESHER_PROPERTY_ROOT_SESSION") == session
-                            ? EnvironmentValue(L"GESHER_PROPERTY_ROOT") : std::wstring();
-    if (data.empty()) data = EnvironmentValue(L"ANDROID_DATA");
-    if (data.empty()) {
-      data = EnvironmentValue(L"LOCALAPPDATA");
-      if (!data.empty()) data += L"\\Gesher\\data";
-    }
-    for (wchar_t& c : data) {
-      if (c == L'/') c = L'\\';
-    }
-    HANDLE mutex = CreateMutexW(nullptr, FALSE, (L"Local\\gesher-boot-id-" + binder).c_str());
-    DWORD waited = mutex != nullptr ? WaitForSingleObject(mutex, 10000) : WAIT_FAILED;
-    bool held = waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED;
-    if (!data.empty() && held) {
-      std::wstring dir = data + L"\\system";
-      std::wstring path = dir + L"\\gesher-boot-id";
-      std::string expected = Narrow(session.c_str()) + "\n";
-      HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
-                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-      if (h != INVALID_HANDLE_VALUE) {
-        char buffer[512];
-        DWORD n = 0;
-        if (::ReadFile(h, buffer, sizeof(buffer), &n, nullptr)) {
-          std::string text(buffer, n);
-          if (text.size() == expected.size() + 37 && text.compare(0, expected.size(), expected) == 0 &&
-              text.back() == '\n' && IsUuid(text.substr(expected.size(), 36))) {
-            id = text.substr(expected.size(), 36);
-          }
-        }
-        CloseHandle(h);
-      }
-      if (id.empty()) {
-        id = RandomUuid();
-        std::string text = expected + id + "\n";
-        std::wstring tmp = path + L".tmp-" + std::to_wstring(GetCurrentProcessId());
-        CreateDirectoryW(data.c_str(), nullptr);
-        CreateDirectoryW(dir.c_str(), nullptr);
-        h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
-                        FILE_ATTRIBUTE_NORMAL, nullptr);
-        bool written = false;
-        if (h != INVALID_HANDLE_VALUE) {
-          DWORD n = 0;
-          written = ::WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &n, nullptr) &&
-                    n == text.size();
-          CloseHandle(h);
-        }
-        if (!written || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
-          DeleteFileW(tmp.c_str());
-        }
-      }
-    }
-    if (held) ReleaseMutex(mutex);
-    if (mutex != nullptr) CloseHandle(mutex);
+// Session names are opaque. Hash the whole name into a safe fixed-width
+// path and keep the original name in the record to detect collisions.
+std::wstring BootKey(const std::wstring& session) {
+  uint64_t hash = 14695981039346656037ULL;
+  for (wchar_t ch : session) {
+    hash = (hash ^ static_cast<uint16_t>(ch)) * 1099511628211ULL;
   }
-  if (id.empty()) id = RandomUuid();
+  wchar_t key[17] = {};
+  swprintf(key, 17, L"%016llx", static_cast<unsigned long long>(hash));
+  return key;
+}
+
+std::string ReadOrCreateBootId(const std::wstring& data, const std::wstring& key,
+                               const std::string& expected) {
+  const std::wstring dir = data + L"\\system";
+  const std::wstring path = dir + L"\\gesher-boot-id-" + key;
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h != INVALID_HANDLE_VALUE) {
+    char buffer[512];
+    DWORD n = 0;
+    const bool read = ::ReadFile(h, buffer, sizeof(buffer), &n, nullptr) != FALSE;
+    CloseHandle(h);
+    if (!read || n != expected.size() + 37) return "";
+    std::string text(buffer, n);
+    if (text.compare(0, expected.size(), expected) != 0 || text.back() != '\n') return "";
+    std::string id = text.substr(expected.size(), 36);
+    return IsUuid(id) ? id : "";
+  }
+  const DWORD read_error = GetLastError();
+  if (read_error != ERROR_FILE_NOT_FOUND && read_error != ERROR_PATH_NOT_FOUND) return "";
+  std::string id = RandomUuid();
   if (id.empty()) return "";
-  g_boot_id_session = session;
-  g_boot_id = id;
+  const std::string text = expected + id + "\n";
+  const std::wstring tmp = path + L".tmp-" + std::to_wstring(GetCurrentProcessId());
+  CreateDirectoryW(data.c_str(), nullptr);
+  CreateDirectoryW(dir.c_str(), nullptr);
+  h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                  FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (h == INVALID_HANDLE_VALUE) return "";
+  DWORD n = 0;
+  const bool written = ::WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &n, nullptr) &&
+      n == text.size();
+  CloseHandle(h);
+  if (written && MoveFileExW(tmp.c_str(), path.c_str(), 0)) return id;
+  DeleteFileW(tmp.c_str());
+  return "";
+}
+
+// Each device boot has an independently persisted ID. A process outside a
+// device has its own ID. Never return a private ID for an admitted device.
+std::string BootId() {
+  static std::mutex lock;
+  static std::string standalone_id, device_id;
+  static std::wstring device_session;
+  const std::wstring binder = EnvironmentValue(L"GESHER_BINDER");
+  std::lock_guard<std::mutex> guard(lock);
+  if (binder.empty()) {
+    if (standalone_id.empty()) standalone_id = RandomUuid();
+    return standalone_id;
+  }
+  const std::wstring session = L"device-" + binder;
+  if (device_session == session) return device_id;
+  const std::string expected = Narrow(session.c_str()) + "\n";
+  if (expected.size() <= 1 || expected.size() + 37 > 512) return "";
+  // Use the property area's original data root even when ART uses a scratch one.
+  std::wstring data = EnvironmentValue(L"GESHER_PROPERTY_ROOT_SESSION") == session
+                          ? EnvironmentValue(L"GESHER_PROPERTY_ROOT") : std::wstring();
+  if (data.empty()) data = EnvironmentValue(L"ANDROID_DATA");
+  if (data.empty()) {
+    data = EnvironmentValue(L"LOCALAPPDATA");
+    if (!data.empty()) data += L"\\Gesher\\data";
+  }
+  if (data.empty()) return "";
+  std::replace(data.begin(), data.end(), L'/', L'\\');
+  const std::wstring key = BootKey(session);
+  HANDLE mutex = CreateMutexW(nullptr, FALSE, (L"Local\\gesher-boot-id-" + key).c_str());
+  if (mutex == nullptr) return "";
+  const DWORD waited = WaitForSingleObject(mutex, 10000);
+  if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED) {
+    CloseHandle(mutex);
+    return "";
+  }
+  std::string id = ReadOrCreateBootId(data, key, expected);
+  ReleaseMutex(mutex);
+  CloseHandle(mutex);
+  if (!id.empty()) {
+    device_session = session;
+    device_id = id;
+  }
   return id;
 }
 
@@ -1050,7 +1062,11 @@ int Open(const std::wstring& name, int flags) {
   if ((flags & O_ACCMODE) != O_RDONLY || (flags & (O_TRUNC | O_CREAT)) != 0) {
     return errno = EACCES, -1;
   }
-  std::string content = Content(n);
+  std::string content;
+  if ((flags & O_PATH) == 0) {
+    content = Content(n);
+    if (content.empty() && (n.file == "boot_id" || n.file == "uuid")) return errno = EIO, -1;
+  }
   record_locks::DescriptorGuard descriptors;
   int fd = memfd_create("procfs", (flags & O_CLOEXEC) != 0 ? MFD_CLOEXEC : 0);
   if (fd < 0) return -1;
