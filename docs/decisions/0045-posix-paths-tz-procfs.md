@@ -80,6 +80,13 @@ boot is the device: every process of a device (`$GESHER_BINDER`, named anew
 at each device start, as the property area's session is) reads the same id,
 kept with that session in `$ANDROID_DATA/system/gesher-boot-id`, and a device
 restart gives a new one. A process outside a device keeps an id of its own.
+The shared id depends on that file: when `$ANDROID_DATA/system` cannot be
+written or read, or the device's named mutex is not acquired within 10 s, each
+process falls back to an id of its own, stable for that process only. The
+device name must not recur: the launcher names a device
+`gesher-<milliseconds>`, and `gesher-app.ps1 --system-server` runs name theirs
+`gesher-app-<pid>-<milliseconds>`, so a reused pid does not continue an
+earlier run's boot.
 
 ### Time zones: /etc/timezone and the tzdata module's files
 libcore asks `RuntimeHooks`' supplier for the default zone, which only the
