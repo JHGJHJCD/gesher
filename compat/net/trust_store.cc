@@ -135,13 +135,15 @@ bool ReadWholeFile(const std::wstring& path, std::string* out) {
   return ok;
 }
 
-// Writes `path` whole: a temporary file next to it, then renamed over it.
+// Writes dir\name whole: a temporary file in `staging` (on the same volume),
+// then renamed over it. Staging outside cacerts keeps half-written files out
+// of the directory Conscrypt reads.
 bool WriteFileAtomically(const std::wstring& dir, const std::wstring& name,
-                         const std::string& data) {
+                         const std::string& data, const std::wstring& staging) {
   std::wstring path = dir + L"\\" + name;
   wchar_t suffix[64];
   swprintf(suffix, 64, L".tmp-%lu-%lu", GetCurrentProcessId(), GetCurrentThreadId());
-  std::wstring tmp = dir + L"\\." + name + suffix;
+  std::wstring tmp = staging + L"\\." + name + suffix;
   HANDLE h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
                          FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h == INVALID_HANDLE_VALUE) return false;
@@ -212,7 +214,12 @@ bool IsCertFileName(const std::wstring& name) {
 void Sync() {
   const char* android_root = getenv("ANDROID_ROOT");
   if (android_root == nullptr || *android_root == '\0') return;
-  std::wstring dir = WinPath(std::string(android_root) + "/etc/security/cacerts");
+  // The manifest and temporary files live in $ANDROID_ROOT/etc/security, so
+  // cacerts holds only certificates, as on Android: Conscrypt's
+  // DirectoryCertificateSource reads every file in it as one.
+  std::wstring security = WinPath(std::string(android_root) + "/etc/security");
+  std::wstring dir = security + L"\\cacerts";
+  std::wstring manifest_path = security + L"\\.gesher-cacerts";
 
   std::vector<Der> bundled, windows, disallowed;
   ReadBundled(&bundled);
@@ -283,7 +290,9 @@ void Sync() {
   HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\gesher-system-cacerts");
   if (mutex != nullptr) WaitForSingleObject(mutex, 30000);
   std::string current;
-  bool changed = !ReadWholeFile(dir + L"\\.gesher-cacerts", &current) || current != manifest;
+  // Earlier versions kept the manifest in cacerts itself.
+  DeleteFileW((dir + L"\\.gesher-cacerts").c_str());
+  bool changed = !ReadWholeFile(manifest_path, &current) || current != manifest;
   size_t written = 0, removed = 0;
   bool ok = true;
   if (changed) {
@@ -292,7 +301,7 @@ void Sync() {
       if (!ok) break;
       std::string existing;
       if (ReadWholeFile(dir + L"\\" + name, &existing) && existing == anchor->pem) continue;
-      if (WriteFileAtomically(dir, name, anchor->pem)) {
+      if (WriteFileAtomically(dir, name, anchor->pem, security)) {
         written++;
       } else {
         ok = false;
@@ -306,11 +315,14 @@ void Sync() {
         if (IsCertFileName(name) && files.count(name) == 0 &&
             DeleteFileW((dir + L"\\" + name).c_str())) {
           removed++;
+        } else if (name[0] == L'.' && name.find(L".tmp-") != std::wstring::npos) {
+          // A temporary file an earlier version staged here and never renamed.
+          DeleteFileW((dir + L"\\" + name).c_str());
         }
       } while (FindNextFileW(find, &entry));
       FindClose(find);
     }
-    if (ok) ok = WriteFileAtomically(dir, L".gesher-cacerts", manifest);
+    if (ok) ok = WriteFileAtomically(security, L".gesher-cacerts", manifest, security);
   }
   if (mutex != nullptr) {
     ReleaseMutex(mutex);
