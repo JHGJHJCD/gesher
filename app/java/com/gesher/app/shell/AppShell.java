@@ -141,19 +141,30 @@ public final class AppShell {
      */
     public static void updateLauncherRecordQuietly(String packageName, ApkPackage pkg) {
         try {
-            writeLauncherRecord(packageName, launcherActivity(pkg) != null);
+            writeLauncherRecord(packageName, launcherActivity(pkg) != null, false);
         } catch (Throwable t) {
             log("no launcher record for " + packageName + ": " + t);
         }
     }
 
-    private static void writeLauncherRecord(String packageName, boolean hasLauncher)
-            throws java.io.IOException {
-        File marker = new File(shellDir(packageName), NO_LAUNCHER);
+    /**
+     * {@code create}: an install or a launch of the package may make its data directory. The
+     * system server's updates (which can race an uninstall) write only into an existing one, so
+     * that they never bring a removed package's directory back.
+     */
+    private static void writeLauncherRecord(String packageName, boolean hasLauncher,
+            boolean create) throws java.io.IOException {
+        File dir = shellDir(packageName);
+        File marker = new File(dir, NO_LAUNCHER);
         if (hasLauncher) {
             marker.delete();
         } else if (!marker.isFile()) {
-            marker.getParentFile().mkdirs();
+            if (create) {
+                dir.mkdirs();
+            } else {
+                if (!dir.getParentFile().isDirectory()) return;
+                dir.mkdir();
+            }
             new java.io.FileOutputStream(marker).close();
         }
     }
@@ -168,7 +179,7 @@ public final class AppShell {
         if (changed || old == null || !codePath.equals(old.getProperty("code"))) {
             addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
             pkg = addon != null ? addon : ApkPackage.parseCodeDirectory(codePath);
-            writeLauncherRecord(packageName, launcherActivity(pkg) != null);
+            writeLauncherRecord(packageName, launcherActivity(pkg) != null, true);
         }
         if ("0".equals(System.getenv(ENV_SHORTCUTS))) return;
         String gesher = installDir();
