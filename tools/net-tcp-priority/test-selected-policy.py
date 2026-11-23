@@ -265,7 +265,7 @@ RECEIPT_SOURCE_BLOCK=b'''  if ($null -ne $SourceIdentity) {
 # then EVERY earlier preservation assertion below still runs on its result.
 # Coupled OFD/stdio/pipe source files are pinned by the same qualification.
 # No supplier, socket core, fixture predicate, deadline or DAG is exempted.
-OFD_QUALIFICATION_SHA256 = 'e7e6d5f81027abf7b727490cc771370450c4fb6ad600c8b171b77224a3db59bb'
+OFD_QUALIFICATION_SHA256 = 'd3b8b9505b3f03e72b49fa944b8512691d04e79bb75bf6e694b9f2dac5065937'
 # Bionic's independently reviewed memmem search changes only this include and
 # complete wrapper. Restore those exact bytes before applying the UNCHANGED
 # OFD qualification digest. Pin the new pure-search helper separately: no other

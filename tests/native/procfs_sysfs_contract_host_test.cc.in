@@ -432,18 +432,12 @@ int main() {
   Check(Lookup(L"proc/sys", false).type == S_IFDIR, "Lookup /proc/sys is dir");
   Check(Lookup(L"proc/sys/kernel", false).type == S_IFDIR, "Lookup /proc/sys/kernel is dir");
   Check(Lookup(L"proc/sys/kernel/random", false).type == S_IFDIR, "Lookup /proc/sys/kernel/random is dir");
-  Check(Lookup(L"proc/sys/kernel/random", true).entries.size() == 2, "random lists boot_id and uuid");
+  Check(Lookup(L"proc/sys/kernel/random", true).entries.size() == 1, "random lists boot_id");
   Check(Lookup(L"proc/sys/kernel/random/boot_id", false).type == S_IFREG, "Lookup boot_id is file");
-  Check(Lookup(L"proc/sys/kernel/random/uuid", false).type == S_IFREG, "Lookup uuid is file");
+  Check(Lookup(L"proc/sys/kernel/random/uuid", false).type == 0, "Lookup does not expose a snapshot uuid");
   Check(Lookup(L"proc/sys/kernel/osrelease", false).type == 0, "Lookup unimplemented /proc/sys leaf returns 0");
   Check(Lookup(L"proc/sys/net", false).type == 0, "Lookup unimplemented /proc/sys dir returns 0");
   {
-    Node uuid_node;
-    uuid_node.type = S_IFREG;
-    uuid_node.file = "uuid";
-    std::string u1 = Content(uuid_node), u2 = Content(uuid_node);
-    Check(u1.size() == 37 && u1[8] == '-' && u1[14] == '4' && u1.back() == '\n', "uuid is a v4 UUID line");
-    Check(u1 != u2, "uuid differs at each read");
     Node boot_node;
     boot_node.type = S_IFREG;
     boot_node.file = "boot_id";

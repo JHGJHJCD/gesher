@@ -13,7 +13,6 @@
 //   /proc/self/task/<tid>/{comm,stat,status}
 //   /proc/{meminfo,cpuinfo,uptime,mounts}
 //   /proc/sys/kernel/random/boot_id   a random UUID for the device's boot
-//   /proc/sys/kernel/random/uuid      a new random UUID at each open
 //   /etc/timezone                the IANA id of Windows' time zone (libcore)
 #include <errno.h>
 #include <fcntl.h>
@@ -657,8 +656,7 @@ std::string Uptime() {
   return Format("%llu.%02llu 0.00\n", ms / 1000, (ms % 1000) / 10);
 }
 
-// A random (version 4) UUID, lowercase, as Linux's /proc/sys/kernel/random/uuid
-// writes one; empty when the system RNG fails.
+// A lowercase version 4 UUID, or empty when the system RNG fails.
 std::string RandomUuid() {
   unsigned char b[16];
   if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
@@ -714,7 +712,10 @@ std::string ReadOrCreateBootId(const std::wstring& data, const std::wstring& key
   if (h != INVALID_HANDLE_VALUE) {
     char buffer[512];
     DWORD n = 0;
-    const bool read = ::ReadFile(h, buffer, sizeof(buffer), &n, nullptr) != FALSE;
+    LARGE_INTEGER size{};
+    const bool read = GetFileSizeEx(h, &size) &&
+        size.QuadPart == static_cast<LONGLONG>(expected.size() + 37) &&
+        ::ReadFile(h, buffer, sizeof(buffer), &n, nullptr);
     CloseHandle(h);
     if (!read || n != expected.size() + 37) return "";
     std::string text(buffer, n);
@@ -837,7 +838,7 @@ Node Lookup(const std::wstring& name, bool list) {
     n.file = p[1];
     return n;
   }
-  // /proc/sys/kernel/random/{boot_id,uuid}.
+  // /proc/sys/kernel/random/boot_id.
   if (p[1] == "sys") {
     static const char* const kSysPath[] = {"sys", "kernel", "random"};
     for (size_t i = 1; i < p.size() && i <= 3; ++i) {
@@ -846,13 +847,10 @@ Node Lookup(const std::wstring& name, bool list) {
     if (p.size() <= 4) {
       n.type = kDir;
       if (list && p.size() < 4) Add(&n.entries, kSysPath[p.size() - 1], DT_DIR);
-      if (list && p.size() == 4) {
-        Add(&n.entries, "boot_id", DT_REG);
-        Add(&n.entries, "uuid", DT_REG);
-      }
+      if (list && p.size() == 4) Add(&n.entries, "boot_id", DT_REG);
       return n;
     }
-    if (p.size() == 5 && (p[4] == "boot_id" || p[4] == "uuid")) {
+    if (p.size() == 5 && p[4] == "boot_id") {
       n.type = kFile;
       n.file = p[4];
     }
@@ -951,8 +949,8 @@ std::string Content(const Node& n) {
     return cpus > 1 ? Format("0-%lu\n", cpus - 1) : std::string("0\n");
   }
   if (f == "uptime") return Uptime();
-  if (f == "boot_id" || f == "uuid") {
-    std::string id = f == "boot_id" ? BootId() : RandomUuid();
+  if (f == "boot_id") {
+    std::string id = BootId();
     return id.empty() ? id : id + "\n";
   }
   return "";  // mounts: no mount table (misc.cc's setmntent agrees)
@@ -1065,7 +1063,7 @@ int Open(const std::wstring& name, int flags) {
   std::string content;
   if ((flags & O_PATH) == 0) {
     content = Content(n);
-    if (content.empty() && (n.file == "boot_id" || n.file == "uuid")) return errno = EIO, -1;
+    if (content.empty() && n.file == "boot_id") return errno = EIO, -1;
   }
   record_locks::DescriptorGuard descriptors;
   int fd = memfd_create("procfs", (flags & O_CLOEXEC) != 0 ? MFD_CLOEXEC : 0);

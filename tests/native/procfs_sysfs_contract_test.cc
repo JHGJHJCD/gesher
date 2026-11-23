@@ -389,13 +389,8 @@ static std::string ChildBootId() {
 }
 
 static void TestRandom() {
-  printf("Testing /proc/sys/kernel/random/{uuid,boot_id}...\n");
-  // uuid: a new random UUID at each read.
-  std::string a = ReadAll("/proc/sys/kernel/random/uuid");
-  std::string b = ReadAll("/proc/sys/kernel/random/uuid");
-  CHECK_MSG(IsUuidLine(a), a.c_str());
-  CHECK_MSG(IsUuidLine(b), b.c_str());
-  CHECK(a != b);
+  printf("Testing /proc/sys/kernel/random/boot_id...\n");
+  CHECK(open("/proc/sys/kernel/random/uuid", O_RDONLY) == -1 && errno == ENOENT);
 
   struct stat st;
   CHECK(stat("/proc/sys/kernel/random/boot_id", &st) == 0 && S_ISREG(st.st_mode));
