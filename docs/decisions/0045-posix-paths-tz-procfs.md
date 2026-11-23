@@ -74,6 +74,12 @@ for this process (`self` and its pid): `cmdline`, `comm`, `environ`,
 `status`, `stat`, `statm`, `maps`, `mounts` (empty), `fd/` (links), `task/`
 (`<tid>/comm`, `stat`, `status`), `exe` and `cwd` links; and `/proc/meminfo`,
 `/proc/cpuinfo`, `/proc/uptime`, `/proc/mounts`. Other pids have no entries.
+`/proc/sys/kernel/random/uuid` is a new random (version 4) UUID at each open;
+`/proc/sys/kernel/random/boot_id` is one random UUID per boot, and Gesher's
+boot is the device: every process of a device (`$GESHER_BINDER`, named anew
+at each device start, as the property area's session is) reads the same id,
+kept with that session in `$ANDROID_DATA/system/gesher-boot-id`, and a device
+restart gives a new one. A process outside a device keeps an id of its own.
 
 ### Time zones: /etc/timezone and the tzdata module's files
 libcore asks `RuntimeHooks`' supplier for the default zone, which only the

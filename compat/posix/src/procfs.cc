@@ -12,6 +12,8 @@
 //   /proc/self/exe, cwd          links to the executable, the current directory
 //   /proc/self/task/<tid>/{comm,stat,status}
 //   /proc/{meminfo,cpuinfo,uptime,mounts}
+//   /proc/sys/kernel/random/boot_id   a random UUID for the device's boot
+//   /proc/sys/kernel/random/uuid      a new random UUID at each open
 //   /etc/timezone                the IANA id of Windows' time zone (libcore)
 #include <errno.h>
 #include <fcntl.h>
@@ -655,6 +657,123 @@ std::string Uptime() {
   return Format("%llu.%02llu 0.00\n", ms / 1000, (ms % 1000) / 10);
 }
 
+// A random (version 4) UUID, lowercase, as Linux's /proc/sys/kernel/random/uuid
+// writes one; empty when the system RNG fails.
+std::string RandomUuid() {
+  unsigned char b[16];
+  if (!BCRYPT_SUCCESS(BCryptGenRandom(nullptr, b, sizeof(b), BCRYPT_USE_SYSTEM_PREFERRED_RNG))) {
+    return "";
+  }
+  b[6] = static_cast<unsigned char>((b[6] & 0x0f) | 0x40);
+  b[8] = static_cast<unsigned char>((b[8] & 0x3f) | 0x80);
+  return Format("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0], b[1],
+                b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14],
+                b[15]);
+}
+
+// Heap-allocated: procfs reads run on app threads with small stacks too.
+std::wstring EnvironmentValue(const wchar_t* name) {
+  DWORD size = GetEnvironmentVariableW(name, nullptr, 0);
+  if (size == 0) return std::wstring();
+  std::wstring value(size, L'\0');
+  DWORD n = GetEnvironmentVariableW(name, value.data(), size);
+  if (n == 0 || n >= size) return std::wstring();
+  value.resize(n);
+  return value;
+}
+
+bool IsUuid(const std::string& s) {
+  if (s.size() != 36) return false;
+  for (size_t i = 0; i < s.size(); ++i) {
+    bool dash = i == 8 || i == 13 || i == 18 || i == 23;
+    if (dash ? s[i] != '-' : !((s[i] >= '0' && s[i] <= '9') || (s[i] >= 'a' && s[i] <= 'f'))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// /proc/sys/kernel/random/boot_id: a random UUID that stays the same for the
+// whole boot and is new after the next one. Gesher's boot is the device: every
+// process of a device ($GESHER_BINDER, named anew at each device start, as the
+// property area's session is) reads the same id, which the first reader of the
+// boot generates and keeps in $ANDROID_DATA/system/gesher-boot-id next to the
+// session it belongs to; a device restart starts a new session and so a new id.
+// A process outside a device keeps one of its own.
+std::mutex g_boot_id_mutex;
+std::wstring g_boot_id_session;
+std::string g_boot_id;
+
+std::string BootId() {
+  std::wstring binder = EnvironmentValue(L"GESHER_BINDER");
+  std::wstring session = binder.empty() ? std::wstring() : L"device-" + binder;
+  std::lock_guard<std::mutex> lock(g_boot_id_mutex);
+  if (!g_boot_id.empty() && g_boot_id_session == session) return g_boot_id;
+  std::string id;
+  if (!session.empty()) {
+    // The data root the property area of this session uses (system_properties.cc),
+    // so that a scratch $ANDROID_DATA of ART's tests does not start another boot.
+    std::wstring data = EnvironmentValue(L"GESHER_PROPERTY_ROOT_SESSION") == session
+                            ? EnvironmentValue(L"GESHER_PROPERTY_ROOT") : std::wstring();
+    if (data.empty()) data = EnvironmentValue(L"ANDROID_DATA");
+    if (data.empty()) {
+      data = EnvironmentValue(L"LOCALAPPDATA");
+      if (!data.empty()) data += L"\\Gesher\\data";
+    }
+    for (wchar_t& c : data) {
+      if (c == L'/') c = L'\\';
+    }
+    HANDLE mutex = CreateMutexW(nullptr, FALSE, (L"Local\\gesher-boot-id-" + binder).c_str());
+    DWORD waited = mutex != nullptr ? WaitForSingleObject(mutex, 10000) : WAIT_FAILED;
+    bool held = waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED;
+    if (!data.empty() && held) {
+      std::wstring dir = data + L"\\system";
+      std::wstring path = dir + L"\\gesher-boot-id";
+      std::string expected = Narrow(session.c_str()) + "\n";
+      HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE,
+                             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+      if (h != INVALID_HANDLE_VALUE) {
+        char buffer[512];
+        DWORD n = 0;
+        if (::ReadFile(h, buffer, sizeof(buffer), &n, nullptr)) {
+          std::string text(buffer, n);
+          if (text.size() == expected.size() + 37 && text.compare(0, expected.size(), expected) == 0 &&
+              text.back() == '\n' && IsUuid(text.substr(expected.size(), 36))) {
+            id = text.substr(expected.size(), 36);
+          }
+        }
+        CloseHandle(h);
+      }
+      if (id.empty()) {
+        id = RandomUuid();
+        std::string text = expected + id + "\n";
+        std::wstring tmp = path + L".tmp-" + std::to_wstring(GetCurrentProcessId());
+        CreateDirectoryW(data.c_str(), nullptr);
+        CreateDirectoryW(dir.c_str(), nullptr);
+        h = CreateFileW(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, nullptr);
+        bool written = false;
+        if (h != INVALID_HANDLE_VALUE) {
+          DWORD n = 0;
+          written = ::WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &n, nullptr) &&
+                    n == text.size();
+          CloseHandle(h);
+        }
+        if (!written || !MoveFileExW(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+          DeleteFileW(tmp.c_str());
+        }
+      }
+    }
+    if (held) ReleaseMutex(mutex);
+    if (mutex != nullptr) CloseHandle(mutex);
+  }
+  if (id.empty()) id = RandomUuid();
+  if (id.empty()) return "";
+  g_boot_id_session = session;
+  g_boot_id = id;
+  return id;
+}
+
 // What a name is. `file` names a generated file's content, `tid` a task
 // directory's thread, `fd` a /proc/self/fd link's fd.
 struct Node {
@@ -696,6 +815,7 @@ Node Lookup(const std::wstring& name, bool list) {
       Add(&n.entries, "self", DT_LNK);
       Add(&n.entries, std::to_string(GetCurrentProcessId()), DT_DIR);
       for (const char* f : {"cpuinfo", "meminfo", "mounts", "uptime"}) Add(&n.entries, f, DT_REG);
+      Add(&n.entries, "sys", DT_DIR);
     }
     return n;
   }
@@ -703,6 +823,27 @@ Node Lookup(const std::wstring& name, bool list) {
                         p[1] == "mounts")) {
     n.type = kFile;
     n.file = p[1];
+    return n;
+  }
+  // /proc/sys/kernel/random/{boot_id,uuid}.
+  if (p[1] == "sys") {
+    static const char* const kSysPath[] = {"sys", "kernel", "random"};
+    for (size_t i = 1; i < p.size() && i <= 3; ++i) {
+      if (p[i] != kSysPath[i - 1]) return n;
+    }
+    if (p.size() <= 4) {
+      n.type = kDir;
+      if (list && p.size() < 4) Add(&n.entries, kSysPath[p.size() - 1], DT_DIR);
+      if (list && p.size() == 4) {
+        Add(&n.entries, "boot_id", DT_REG);
+        Add(&n.entries, "uuid", DT_REG);
+      }
+      return n;
+    }
+    if (p.size() == 5 && (p[4] == "boot_id" || p[4] == "uuid")) {
+      n.type = kFile;
+      n.file = p[4];
+    }
     return n;
   }
   if (p.size() == 2 && p[1] == "self") {
@@ -798,6 +939,10 @@ std::string Content(const Node& n) {
     return cpus > 1 ? Format("0-%lu\n", cpus - 1) : std::string("0\n");
   }
   if (f == "uptime") return Uptime();
+  if (f == "boot_id" || f == "uuid") {
+    std::string id = f == "boot_id" ? BootId() : RandomUuid();
+    return id.empty() ? id : id + "\n";
+  }
   return "";  // mounts: no mount table (misc.cc's setmntent agrees)
 }
 
