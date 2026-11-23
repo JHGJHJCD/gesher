@@ -18,7 +18,7 @@ speed, with no hidden VM and no Android image to boot.
 Gesher runs each Android app as an ordinary Windows program, with the
 permissions of your Windows account. Android's permission prompts control what
 an app can do through Android's APIs, but they do not isolate it from Windows:
-its code, native code above all, can read and change your files, use the
+its code, especially its native code, can read and change your files, use the
 network and start programs, as any program you install can. **Treat an `.apk`
 like a downloaded `.exe`: install only apps you trust, from sources you
 trust.** Per-app isolation with Windows AppContainers is under development and
@@ -163,13 +163,13 @@ See [updating Gesher](docs/updates.md) for behavior, release packaging and tests
 
 גרסה **v0.1.0** כוללת מנוע ART עם JIT, האצת חומרה HWUI/Direct3D, סאונד WASAPI, תמיכת מצלמה ומיקום, שירותי microG GMS, תרגום ספריות ARM64, ושילוב מלא בשולחן העבודה של Windows.
 
-### אבטחה: היישומים אינם מבודדים מ-Windows
+### אבטחה: האפליקציות אינן מבודדות מ-Windows
 
-‏גשר מריץ כל יישום Android כתוכנה רגילה של Windows, עם ההרשאות של חשבון
-ה-Windows שלך. בקשות ההרשאה של Android קובעות מה יישום יכול לעשות דרך
-הממשקים של Android, אבל אינן מבודדות אותו מ-Windows: הקוד שלו, ובמיוחד קוד
+‏גשר מריץ כל אפליקציית אנדרואיד כתוכנה רגילה של Windows, עם ההרשאות של חשבון
+ה-Windows שלך. בקשות ההרשאה של אנדרואיד קובעות מה אפליקציה יכולה לעשות דרך
+הממשקים של אנדרואיד, אבל אינן מבודדות אותה מ-Windows: הקוד שלה, ובמיוחד קוד
 native, יכול לקרוא ולשנות את הקבצים שלך, להשתמש ברשת ולהפעיל תוכנות, כמו כל
 תוכנה שמותקנת במחשב. **יש להתייחס לקובץ ‎`.apk` כמו לקובץ ‎`.exe` שהורד
-מהאינטרנט: להתקין רק יישומים מהימנים, ממקורות מהימנים.** בידוד לכל יישום
+מהאינטרנט: להתקין רק אפליקציות מהימנות, ממקורות מהימנים.** בידוד לכל אפליקציה
 באמצעות Windows AppContainer נמצא בפיתוח וכבוי כברירת מחדל; ראו
 [docs/sandbox.md](docs/sandbox.md).

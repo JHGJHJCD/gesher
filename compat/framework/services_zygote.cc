@@ -484,7 +484,7 @@ bool WaitForBinder(const std::u16string& device, int broker_pid, int timeout_ms)
   ScopedHandle pipe{INVALID_HANDLE_VALUE};
   for (;;) {
     if (WaitForSingleObject(broker.value, 0) != WAIT_TIMEOUT) return false;
-    pipe.value = CreateFileW(name.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+    pipe.value = CreateFileW(name.c_str(), binder_wire::kPipeClientAccess, 0, nullptr,
                              OPEN_EXISTING, FILE_FLAG_OVERLAPPED, nullptr);
     if (pipe.value != INVALID_HANDLE_VALUE) break;
     DWORD error = GetLastError(), left = remaining();

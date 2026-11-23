@@ -1578,37 +1578,51 @@ uint64_t RandomKey() {
   return x;
 }
 
-// Whether the client of `pipe` runs in an AppContainer (GESHER_SANDBOX=appcontainer,
-// ADR 0090). Its token, not its hello, says so: the pipe impersonates the sender of
-// the last message read. A token that cannot be read counts as contained.
-bool ClientIsAppContainer(HANDLE pipe) {
+// Whether the client of `pipe` is restricted (GESHER_SANDBOX=appcontainer, ADR 0090):
+// in an AppContainer, or below Medium integrity. The pipe's Low label admits both,
+// and neither may speak for the system. Its token, not its hello, says so: the
+// pipe impersonates the sender of the last message read. A token that cannot be
+// read counts as restricted.
+bool ClientIsRestricted(HANDLE pipe) {
   if (!ImpersonateNamedPipeClient(pipe)) return true;
   HANDLE token = nullptr;
   BOOL opened = OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token);
   RevertToSelf();
   if (!opened) return true;
   DWORD contained = 1, size = 0;
-  BOOL ok = GetTokenInformation(token, TokenIsAppContainer, &contained, sizeof(contained), &size);
+  bool restricted =
+      !GetTokenInformation(token, TokenIsAppContainer, &contained, sizeof(contained), &size) ||
+      contained != 0;
+  if (!restricted) {
+    alignas(TOKEN_MANDATORY_LABEL) BYTE label[sizeof(TOKEN_MANDATORY_LABEL) + SECURITY_MAX_SID_SIZE];
+    if (!GetTokenInformation(token, TokenIntegrityLevel, label, sizeof(label), &size)) {
+      restricted = true;
+    } else {
+      PSID sid = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(label)->Label.Sid;
+      UCHAR count = *GetSidSubAuthorityCount(sid);
+      restricted = count == 0 || *GetSidSubAuthority(sid, count - 1) < SECURITY_MANDATORY_MEDIUM_RID;
+    }
+  }
   CloseHandle(token);
-  return !ok || contained != 0;
+  return restricted;
 }
 
 void ServeProc(HANDLE pipe, In in) {
   uint32_t version, pid, uid;
   if (!in.Get(&version) || version != wire::kVersion || !in.Get(&pid) || !in.Get(&uid)) return;
-  if (g_sandbox && ClientIsAppContainer(pipe)) {
+  if (g_sandbox && ClientIsRestricted(pipe)) {
     // A first step of kernel-verified identity (ADR 0090, milestone M2 completes it):
-    // a contained process is an app, at its own pid. It cannot claim a system UID
+    // a restricted process is an app, at its own pid. It cannot claim a system UID
     // (SYSTEM_UID 1000 and every other below FIRST_APPLICATION_UID) or another pid.
     ULONG actual = 0;
     bool known = GetNamedPipeClientProcessId(pipe, &actual) != FALSE;
     if (uid < 10000 || !known || actual != pid) {
-      Log("rejected an AppContainer client: claimed pid %u uid %u, actual pid %lu", pid, uid,
-          actual);
       WireReply reply;
       reply.Put<int32_t>(-EPERM);
       // The client reads EPERM before the connection closes, not a broken pipe.
       if (WriteMessage(pipe, reply)) FlushFileBuffers(pipe);
+      Log("rejected a restricted client: claimed pid %u uid %u, actual pid %lu", pid, uid,
+          actual);
       return;
     }
   }
@@ -2081,7 +2095,6 @@ int main(int argc, char** argv) {
       Log("GESHER_SANDBOX=appcontainer: no pipe security descriptor: %lu", error);
       return 1;
     }
-    Log("GESHER_SANDBOX=appcontainer: app processes run in AppContainers (experimental)");
   }
 
   bool first = true;
@@ -2101,6 +2114,9 @@ int main(int argc, char** argv) {
       return 1;
     }
     if (first) {
+      // Logged once the pipe exists: a first write to stderr can be slow, and
+      // clients wait for the pipe, not for the log.
+      if (g_sandbox) Log("GESHER_SANDBOX=appcontainer: app processes run in AppContainers (experimental)");
       Log("serving device %s", device.c_str());
       fflush(stderr);
     }

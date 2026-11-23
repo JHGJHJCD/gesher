@@ -14,7 +14,7 @@ try {
     -RedirectStandardOutput (Join-Path $root 'sandbox-binderd.out') `
     -RedirectStandardError (Join-Path $root 'sandbox-binderd.log')
   $pipe = "gesher-binder-$sandboxDevice"
-  for ($i = 0; $i -lt 300 -and -not (Get-ChildItem '\\.\pipe\' | Where-Object Name -eq $pipe); $i++) {
+  for ($i = 0; $i -lt 600 -and -not (Get-ChildItem '\\.\pipe\' | Where-Object Name -eq $pipe); $i++) {
     if ($sandboxBinderd.HasExited) { break }
     Start-Sleep -Milliseconds 100
   }

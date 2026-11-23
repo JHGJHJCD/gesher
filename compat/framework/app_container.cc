@@ -176,7 +176,10 @@ DWORD BinderPipeSecurity(PSECURITY_DESCRIPTOR* descriptor) {
   std::wstring client = StringSid(capability.value);
   if (user.empty() || client.empty()) return ERROR_INVALID_SID;
   // Protected DACL: nothing inherited, no Everyone/anonymous read of the default one.
-  std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + user + L")(A;;GRGW;;;" + client +
+  // The capability gets FILE_GENERIC_READ | FILE_WRITE_DATA | FILE_WRITE_ATTRIBUTES
+  // (0x12018b), what binder_wire.h's kPipeClientAccess asks: no FILE_APPEND_DATA,
+  // which for a pipe is FILE_CREATE_PIPE_INSTANCE (serving an instance of it).
+  std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + user + L")(A;;0x12018b;;;" + client +
                       L")S:(ML;;NW;;;LW)";
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1,
                                                             descriptor, nullptr)) {

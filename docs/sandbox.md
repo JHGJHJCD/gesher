@@ -39,9 +39,11 @@ in it yet (see M1's results): this is for development only.
 
 - **Profile name**: `Gesher.App.` + the first 40 hex digits of SHA-256 of the
   package name (`CreateAppContainerProfile` allows 64 characters of a restricted
-  set). Created at the first launch, deleted at uninstall.
-- **Files** (explicit, inherited ACEs; idempotent, an ACE already present is not
-  written or propagated again):
+  set). Created at the first launch, deleted at uninstall while the switch is
+  on. Grants stay when the switch is turned off (see the ADR's consequences).
+- **Files** (explicit, inherited ACEs; idempotent, an ACE already present on the
+  root is not written or propagated again, so a propagation that stopped part way,
+  or a file renamed into the tree with an explicit ACL, is not repaired until M2):
 
   | Path | Trustee | Access |
   |---|---|---|
@@ -55,9 +57,14 @@ in it yet (see M1's results): this is for development only.
   INTERNET adds `internetClient` and `privateNetworkClientServer` (Android's
   INTERNET covers the local network too). Nothing else yet: devices stay with
   the system server's services.
-- **binderd** (sandbox on): pipe DACL `D:P(A;;GA;;;SY)(A;;GA;;;<user>)(A;;GRGW;;;<gesherBinderClient>)S:(ML;;NW;;;LW)`.
-  A contained client's hello is refused (`-EPERM`) when it claims a UID below
-  10000 or a pid other than its own (`GetNamedPipeClientProcessId`).
+- **binderd** (sandbox on): clients open the pipe for read, `FILE_WRITE_DATA` and
+  `FILE_WRITE_ATTRIBUTES` only (`kPipeClientAccess`), and the capability gets just
+  that: never `FILE_CREATE_PIPE_INSTANCE`, so a container cannot serve an
+  instance of the device's pipe. Pipe DACL `D:P(A;;GA;;;SY)(A;;GA;;;<user>)(A;;0x12018b;;;<gesherBinderClient>)S:(ML;;NW;;;LW)`.
+  A restricted client's hello (in an AppContainer, or below Medium integrity,
+  which the Low label also admits) is refused (`-EPERM`) when it claims a UID
+  below 10000 or a pid other than its own (`GetNamedPipeClientProcessId`). The
+  user's own Medium processes (the system server) are admitted as before.
 
 ## Milestones
 
@@ -79,7 +86,7 @@ and boot image of a CI layout from 2026-11-21 (the only patch change between the
 
 **Works:**
 
-- Profile creation, the grants above, and `CreateProcessW` with
+- Profile creation, the grants above (no grant reported an error), and `CreateProcessW` with
   `PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES`: the app process ran as
   `S-1-15-2-…` at Low integrity (0x1000), its stdout and stderr in its log.
 - In the container, ART started from the granted runtime files: boot class path,
@@ -88,7 +95,9 @@ and boot image of a CI layout from 2026-11-21 (the only patch change between the
   admitted at its own pid with an app UID; its claims of UID 1000 or of another
   pid get `EPERM`; a container without the capability cannot open the pipe
   (`ERROR_ACCESS_DENIED`); the user's own file in `%TEMP%` is closed to it
-  (`ERROR_ACCESS_DENIED`).
+  (`ERROR_ACCESS_DENIED`). A Low integrity process outside a container gets
+  `EPERM` for UID 1000 as well, and the user's Medium process is still admitted
+  with UID 1000.
 - The same layout without the sandbox (`-NoSandbox`) runs `lifecycle.apk` to
   `onResume` and a clean exit.
 
@@ -109,7 +118,10 @@ and boot image of a CI layout from 2026-11-21 (the only patch change between the
 3. **Shared named objects.** App processes share `Local\` objects with the
    system server and binderd by name: the descriptor broker's doorbell and
    stream positions (`binder_wire.h`), the properties mutex, the logging mutex,
-   process mailboxes, revocable files. In an AppContainer `Local\` is the
+   process mailboxes, revocable files, open file description pipes (`ofd.cc`),
+   native fences (`native_fence.cc`), the audio shared state
+   (`compat/media/audio/shared_state.cc`) and the trust store's lock
+   (`compat/net/trust_store.cc`). In an AppContainer `Local\` is the
    container's own namespace, so these are silently separate objects. They need
    handles passed by the broker (`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`, or the
    rights channel) or objects created in the container's namespace by the broker.

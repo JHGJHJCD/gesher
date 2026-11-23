@@ -61,8 +61,9 @@ DWORD FolderPath(PSID container, std::wstring* path);
 DWORD Grant(const std::wstring& path, PSID trustee, DWORD access, bool inherit);
 
 // The security descriptor binderd's pipe uses when the sandbox is enabled:
-// SYSTEM and this user full access, the binder-client capability read/write,
-// and a Low mandatory label (AppContainer processes run at Low integrity).
+// SYSTEM and this user full access, the binder-client capability read and write
+// but not FILE_CREATE_PIPE_INSTANCE, and a Low mandatory label (AppContainer
+// processes run at Low integrity).
 // Free with LocalFree.
 DWORD BinderPipeSecurity(PSECURITY_DESCRIPTOR* descriptor);
 

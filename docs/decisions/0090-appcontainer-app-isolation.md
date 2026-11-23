@@ -40,8 +40,10 @@ it is as trusted as a downloaded `.exe`.
 2. **Isolate with AppContainers.** Each Android package runs in a Windows
    AppContainer of its own, created per user without elevation
    (`CreateAppContainerProfile`). The kernel then refuses the process every
-   object whose ACL does not name its container SID or one of its capability
-   SIDs: the user's files, `HKCU`, other processes and shares. It stays in the
+   object whose ACL names neither its container SID, one of its capability SIDs
+   nor ALL APPLICATION PACKAGES: the user's files, `HKCU`, other processes and
+   shares. (ALL APPLICATION PACKAGES can read much of Windows, Program Files and
+   HKLM; LPAC, milestone M4, opts out of it.) It stays in the
    user's session and desktop, so windows, Direct3D and WASAPI keep working, as
    they do for Store applications. No VM (a project principle), no separate
    Windows accounts.
@@ -54,12 +56,15 @@ it is as trusted as a downloaded `.exe`.
    services, as in AOSP.
 4. **binderd admits containers through a capability.** With the sandbox on, its
    pipe has an explicit descriptor: SYSTEM and the user, the custom
-   `gesherBinderClient` capability for read/write, and a Low mandatory label
-   (AppContainer processes run at Low integrity). Nothing else, so no other
-   AppContainer on the machine (a Store app) can reach it.
-5. **Caller identity comes from the kernel, in steps.** M1 already refuses a
-   contained client's hello that claims a UID below `FIRST_APPLICATION_UID` or a
-   pid other than its own (`GetNamedPipeClientProcessId`). M2 maps the
+   `gesherBinderClient` capability for reading and writing but not for creating
+   pipe instances (so no container can serve the device), and a Low mandatory label
+   (AppContainer processes run at Low integrity). No other AppContainer on the
+   machine (a Store app) can reach it. The label also admits the user's own Low
+   integrity processes, so binderd treats those as restricted too.
+5. **Caller identity comes from the kernel, in steps.** M1 already refuses the
+   hello of a restricted client (in an AppContainer, or below Medium integrity)
+   that claims a UID below `FIRST_APPLICATION_UID` or a pid other than its own
+   (`GetNamedPipeClientProcessId`). M2 maps the
    container SID to the package's UID and ignores the hello's UID altogether.
 6. **Roll out behind a switch** (`GESHER_SANDBOX=appcontainer`), off until the
    milestones in docs/sandbox.md pass, with a per-app opt-out and diagnostics for
@@ -75,12 +80,15 @@ not a new contract.
 ## Consequences
 
 - Until M2, the sandbox is **not a security boundary**: a contained process can
-  still claim another application's UID to binderd, and objects that app
-  processes share by name (`Local\` sections, events and mutexes) are separate
-  per container. docs/sandbox.md lists these.
+  still claim another application's UID to binderd. It does not run apps yet
+  either: objects that app processes share by name (`Local\` sections, events
+  and mutexes) are separate per container, among the blockers docs/sandbox.md
+  lists.
 - ACLs are added to the runtime's and the package's directories (explicit,
   inherited ACEs). They are idempotent and only name Gesher's capabilities and
-  containers; the user's own access is unchanged.
+  containers; the user's own access is unchanged. They are not removed when the
+  switch is turned off (a capability ACE grants nothing to a process without
+  that capability); removing them is part of M5's rollout.
 - Each package gets a profile under `%LOCALAPPDATA%\Packages`, removed on
   uninstall (`DeleteAppContainerProfile`).
 

@@ -8,10 +8,10 @@ Security
 Android apps are not isolated from Windows. Gesher runs each app as an
 ordinary Windows program, with the permissions of your Windows account.
 Android's permission prompts control what an app can do through Android's
-APIs; they do not stop its code, native code above all, from reading and
+APIs; they do not stop its code, especially its native code, from reading and
 changing your files, using the network or starting programs. Treat an .apk
 like a downloaded .exe: install only apps you trust, from sources you trust.
-Per-app isolation (Windows AppContainer) is under development and off.
+Per-app isolation (Windows AppContainer) is under development and disabled.
 
 Updating Gesher
 ---------------

@@ -108,16 +108,18 @@ function Run([string[]] $Arguments) {
 $watch = [Collections.Concurrent.ConcurrentDictionary[int, string]]::new()
 $watcher = [PowerShell]::Create()
 [void]$watcher.AddScript({
-  param($watch, $dvm)
+  param($watch, $layout)
   for ($i = 0; $i -lt 6000; $i++) {
     foreach ($p in Get-CimInstance Win32_Process -Filter "Name = 'dalvikvm.exe'" -ErrorAction SilentlyContinue) {
-      if ($p.CommandLine -match 'GesherAppProcess' -and -not $watch.ContainsKey([int]$p.ProcessId)) {
+      # This layout's app processes only: other Gesher installations may run too.
+      if ($p.CommandLine -match 'GesherAppProcess' -and $p.CommandLine.Contains($layout) -and
+          -not $watch.ContainsKey([int]$p.ProcessId)) {
         $watch[[int]$p.ProcessId] = [GesherToken]::Describe([int]$p.ProcessId)
       }
     }
     Start-Sleep -Milliseconds 100
   }
-}).AddArgument($watch).AddArgument("$Dir/dalvikvm.exe")
+}).AddArgument($watch).AddArgument((NoDrive $Dir))
 $async = $watcher.BeginInvoke()
 
 try {

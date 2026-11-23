@@ -47,12 +47,18 @@ final class AppSandbox {
 
     /**
      * The package's profile name: CreateAppContainerProfile takes at most 64 characters
-     * of a restricted set, so the package name is hashed, as Chromium names its own.
+     * of a restricted set, so the device's data root and the package name are hashed, as
+     * Chromium names its own. The root keeps two devices of one Windows user (another
+     * data root) from sharing a container, its grants and its deletion at uninstall.
      */
     static String containerName(String packageName) {
+        return containerName(Device.dataDir(), packageName);
+    }
+
+    static String containerName(String dataRoot, String packageName) {
         try {
             byte[] digest = MessageDigest.getInstance("SHA-256")
-                    .digest(packageName.getBytes(StandardCharsets.UTF_8));
+                    .digest((dataRoot + "\0" + packageName).getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder("Gesher.App.");
             for (int i = 0; i < 20; i++) sb.append(String.format("%02x", digest[i] & 0xff));
             return sb.toString();
@@ -87,11 +93,28 @@ final class AppSandbox {
             throw new IllegalStateException("AppContainer profile " + container + " for "
                     + packageName + ": Win32 error " + error);
         }
+        // dalvikvm.exe's own directory: a Windows path already (GetModuleFileNameW).
+        String exeDir = exeDirectory();
+        if (exeDir != null) {
+            int granted = Zygote.nativeGrantToCapability(exeDir, RUNTIME_FILES, READ_EXECUTE, true);
+            if (granted != 0) {
+                SystemServer.log("sandbox: granting " + RUNTIME_FILES + " " + exeDir
+                        + ": Win32 error " + granted);
+            }
+        }
         for (String dir : runtimeDirectories()) {
             grantCapability(dir, RUNTIME_FILES, READ_EXECUTE, true);
         }
+        // The APK itself; its directory (and the oat files in it) only when it is the
+        // package's own code directory under data/app. An APK run from where the user
+        // keeps it (Downloads) must not open that directory to the container.
         File apk = new File(pkg.apkPath);
-        if (apk.getParentFile() != null) grantContainer(apk.getParent(), container, READ_EXECUTE, true);
+        grantContainer(apk.getPath(), container, READ_EXECUTE, false);
+        File apps = new File(Device.dataDir(), "app");
+        File code = apk.getParentFile();
+        if (code != null && apps.getPath().equals(code.getParent())) {
+            grantContainer(code.getPath(), container, READ_EXECUTE, true);
+        }
         grantContainer(pkg.credentialProtectedDataDir(), container, MODIFY, true);
         grantContainer(pkg.deviceProtectedDataDir(), container, MODIFY, true);
         File profile = Dexopt.currentProfile(packageName).getParentFile();
@@ -124,14 +147,19 @@ final class AppSandbox {
         }
     }
 
+    /** dalvikvm.exe's directory as a Windows path, or null. */
+    static String exeDirectory() {
+        String exe = Zygote.exePath();
+        int slash = exe == null ? -1 : exe.lastIndexOf('\\');
+        return slash > 0 ? exe.substring(0, slash) : null;
+    }
+
     /**
-     * What every app process reads and runs: the runtime's own directory (dalvikvm.exe,
-     * its DLLs and jars) and the Android roots the device points it at.
+     * What every app process reads and runs besides dalvikvm.exe's directory: the
+     * Android roots the device points it at and the boot class path's directories.
      */
     static Set<String> runtimeDirectories() {
         Set<String> dirs = new LinkedHashSet<>();
-        String exe = Zygote.exePath();
-        if (exe != null && new File(exe).getParent() != null) dirs.add(new File(exe).getParent());
         for (String name : new String[] {"ANDROID_ROOT", "ANDROID_ART_ROOT", "ANDROID_I18N_ROOT",
                 "ANDROID_TZDATA_ROOT"}) {
             String value = System.getenv(name);
