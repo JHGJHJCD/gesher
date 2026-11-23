@@ -118,6 +118,10 @@ jobs:
         run: |
           & .\app-identity-restart.exe
           if ($LASTEXITCODE -ne 0) { throw 'Native application identity restart gate failed' }
+      - name: Bound raw DNS owners with real Windows workers and loopback UDP/TCP
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: python tools/test_dns_admission.py
       - name: Build actual dexopt child waiting and resource budgets
         if: ${{ !cancelled() }}
         shell: cmd
@@ -359,6 +363,7 @@ jobs:
           python3 tools/test_input_surface_callbacks.py --sanitize
           python3 tools/test_codec_lifecycle_contracts.py --sanitize
           python3 tools/test_dns_query_lifecycle.py --sanitize
+          python3 tools/test_dns_admission.py --sanitize
 
       - name: Stream device identity across close and reopen
         run: python3 tools/test_stream_device_lifetime.py --sanitize
