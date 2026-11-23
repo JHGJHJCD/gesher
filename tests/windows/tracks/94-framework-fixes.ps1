@@ -451,6 +451,14 @@ Check 'services: AppOps defaults, authority, attributed delivery, foreground lif
   $appOpsOut
 } @('AppOpsContractTest all passed: 489 checks; binder=true')
 
+$permissionStateOut = FixesRun ($dvmFixes + 'gesher.services.ServiceFixtureRunner' +
+  'RuntimePermissionStateTest') 90
+$permissionStateCode = $LASTEXITCODE
+Check 'services: runtime permission denial, rationale, fixed retry policy and owner lifetime' {
+  $global:LASTEXITCODE = $permissionStateCode
+  $permissionStateOut
+} @('RuntimePermissionStateTest all passed:', ' checks; binder=true')
+
 # Real UID grant decisions and the production AudioRecord/MediaRecorder JNI errors.
 . "$PSScriptRoot/../helpers/FixturePermissions.ps1"
 $audioAdmissionData = Join-Path $root 'audio-recording-admission'
