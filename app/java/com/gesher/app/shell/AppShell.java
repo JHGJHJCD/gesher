@@ -134,8 +134,42 @@ public final class AppShell {
         }
     }
 
+    /**
+     * Records whether {@code pkg} has an enabled MAIN/LAUNCHER activity ({@link #NO_LAUNCHER}),
+     * from its installed state when the system server passes its package (an enabled-state
+     * change, the device's start). Never throws.
+     */
+    public static void updateLauncherRecordQuietly(String packageName, ApkPackage pkg) {
+        try {
+            writeLauncherRecord(packageName, launcherActivity(pkg) != null);
+        } catch (Throwable t) {
+            log("no launcher record for " + packageName + ": " + t);
+        }
+    }
+
+    private static void writeLauncherRecord(String packageName, boolean hasLauncher)
+            throws java.io.IOException {
+        File marker = new File(shellDir(packageName), NO_LAUNCHER);
+        if (hasLauncher) {
+            marker.delete();
+        } else if (!marker.isFile()) {
+            marker.getParentFile().mkdirs();
+            new java.io.FileOutputStream(marker).close();
+        }
+    }
+
     private static void register(String packageName, String codePath, boolean changed)
             throws Exception {
+        // The launcher record does not depend on shortcuts being made. A shortcut recorded for
+        // this code means the package had a launcher activity: nothing to parse; otherwise the
+        // package (or the staged microG addon) is parsed once, for the record and below.
+        Properties old = shortcutOf(packageName);
+        ApkPackage addon = null, pkg = null;
+        if (changed || old == null || !codePath.equals(old.getProperty("code"))) {
+            addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
+            pkg = addon != null ? addon : ApkPackage.parseCodeDirectory(codePath);
+            writeLauncherRecord(packageName, launcherActivity(pkg) != null);
+        }
         if ("0".equals(System.getenv(ENV_SHORTCUTS))) return;
         String gesher = installDir();
         String systemRoot = System.getenv("SystemRoot");
@@ -158,7 +192,6 @@ public final class AppShell {
             log("no Start menu shortcut for " + packageName + ": no Programs folder");
             return;
         }
-        Properties old = shortcutOf(packageName);
         String oldLink = old != null ? old.getProperty("link") : null;
         String oldTarget = old != null ? old.getProperty("target") : null;
         if (!changed && oldLink != null && codePath.equals(old.getProperty("code"))
@@ -167,7 +200,10 @@ public final class AppShell {
             return;  // up to date
         }
 
-        ApkPackage addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
+        if (pkg == null) {
+            addon = com.gesher.server.MicrogAddons.stagedAddon(packageName, codePath);
+            pkg = addon != null ? addon : ApkPackage.parseCodeDirectory(codePath);
+        }
         if (addon != null) {
             // A staged microG addon (system/priv-app, not installed with gesher-app): its
             // windows get its icon, but no Start menu shortcut, which gesher-app-microg.ps1
@@ -177,22 +213,15 @@ public final class AppShell {
             writeWindowIcon(addon, packageName, changed);
             return;
         }
-        ApkPackage pkg = ApkPackage.parseCodeDirectory(codePath);
         ActivityInfo launcher = launcherActivity(pkg);
-        File noLauncher = new File(shellDir(packageName), NO_LAUNCHER);
         if (launcher == null) {
             // As a launcher's app list: only apps with a MAIN/LAUNCHER activity.
             log(packageName + " has no launcher activity: no Start menu shortcut");
             removeShortcut(old);
             if (old != null) new File(shellDir(packageName), RECORD).delete();
-            if (!noLauncher.isFile()) {
-                noLauncher.getParentFile().mkdirs();
-                new java.io.FileOutputStream(noLauncher).close();
-            }
             writeWindowIcon(pkg, packageName, changed);
             return;
         }
-        noLauncher.delete();
         AppIcon icon = AppIcon.load(pkg.apkPath, pkg.applicationInfo(0), launcher);
         File dir = shellDir(packageName);
         File ico = new File(dir, ICON);

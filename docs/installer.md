@@ -196,7 +196,9 @@ menu shortcut, as a launcher lists it
   launcher activity also gets `gesher-shell\no-launcher-activity`, so that the
   Control Center lists it without "Launch", as a launcher would not show it;
   the camera app (`com.gesher.camera`, installed by the system server) is
-  registered the same way.
+  registered the same way. The record is kept with `GESHER_SHORTCUTS=0` too,
+  follows `setComponentEnabledSetting` of a launcher activity or alias, and is
+  brought up to date for every installed package at each device start.
 - **`gesher-app launch PACKAGE`** starts an installed package by name (the
   shortcut's command; the device starts if it is not running). `gesher-app
   launch APK` is `gesher-app APK`.

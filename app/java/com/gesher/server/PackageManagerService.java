@@ -70,6 +70,15 @@ public final class PackageManagerService extends IPackageManager.Default {
         mEnabledStateListener = listener;
         mEnabledStateRestarter = restarter;
     }
+    private volatile Consumer<ApkPackage> mDesktopEnabledStateListener;
+
+    /**
+     * The desktop shell's view of a package whose enabled state changed (whether it still has
+     * an enabled launcher activity), called with today's installed package.
+     */
+    void setDesktopEnabledStateListener(Consumer<ApkPackage> listener) {
+        mDesktopEnabledStateListener = listener;
+    }
     private final List<Consumer<String>> mPackageRemoval = new ArrayList<>();
     private final List<Consumer<String>> mPackageRemovalChecks = new ArrayList<>();
     private volatile Consumer<Set<String>> mAccountRemovalReconciler = installed -> { };
@@ -944,6 +953,14 @@ public final class PackageManagerService extends IPackageManager.Default {
             for (EnabledChange event : events.values()) {
                 Consumer<EnabledChange> listener = mEnabledStateListener;
                 if (listener != null && event.current(this)) listener.accept(event);
+                Consumer<ApkPackage> desktop = mDesktopEnabledStateListener;
+                if (desktop != null && event.current(this)) {
+                    try {
+                        desktop.accept(event.pkg);
+                    } catch (RuntimeException failure) {
+                        SystemServer.log("desktop enabled-state update failed: " + failure);
+                    }
+                }
                 if (!event.dontKill && event.restartCurrent(this)) {
                     try {
                         Consumer<EnabledChange> restarter = mEnabledStateRestarter;

@@ -428,6 +428,24 @@ public final class SystemServer {
         void start() throws Exception {
             // The camera app, when the PC has a camera (hwsvc2, ADR 0051).
             CameraApp.sync(mInstaller, mServices.pm);
+            // Whether each package has an enabled launcher activity, for the Control Center
+            // (AppShell's no-launcher-activity record): kept up to date when an enabled state
+            // changes, and brought up to date from the installed packages now, in the
+            // background, for packages installed before the record existed.
+            PackageManagerService pm = mServices.pm;
+            pm.setDesktopEnabledStateListener(
+                    p -> com.gesher.app.shell.AppShell.updateLauncherRecordQuietly(p.packageName, p));
+            Thread records = new Thread(() -> {
+                List<ApkPackage> installed;
+                synchronized (pm) {
+                    installed = new ArrayList<>(pm.packages());
+                }
+                for (ApkPackage p : installed) {
+                    com.gesher.app.shell.AppShell.updateLauncherRecordQuietly(p.packageName, p);
+                }
+            }, "launcher-records");
+            records.setDaemon(true);
+            records.start();
             // The launcher waits for this file: the services are registered.
             File ready = Device.readyFile();
             ready.getParentFile().mkdirs();
