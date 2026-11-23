@@ -144,6 +144,10 @@ jobs:
         if: ${{ !cancelled() }}
         shell: pwsh
         run: tests/windows/test-process-reader-handles.ps1
+      - name: Actual WindowsHost event window, delivery and idle wait
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: python tools/test_windows_host_events.py --java-home "$env:JAVA_HOME"
       - name: Build native clipboard foreground actor before timed startup
         if: ${{ !cancelled() }}
         shell: cmd
@@ -959,7 +963,7 @@ jobs:
   framework:
     needs: [source-identity]
     # Keep the complete reviewed recipe immutable and use hosted build runners.
-    uses: gesher-runtime/gesher/.github/workflows/framework.yml@92c87bef013c0f1a5423b49b68d9b78079a8acd9
+    uses: gesher-runtime/gesher/.github/workflows/framework.yml@a31f1cdcc0c515905a4faa9bd3bf51e906e1c80b
     with:
       local-runner: false
 
