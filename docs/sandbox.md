@@ -19,7 +19,7 @@ launcher), the system server starts app processes in their packages'
 AppContainers and binderd admits them. App processes do **not** run correctly
 in it yet (see M1's results): this is for development only.
 
-- `tests/windows/tracks/46-sandbox.ps1` (CI): binderd in sandbox mode and the
+- `tests/windows/tracks/53-sandbox.ps1` (CI): binderd in sandbox mode and the
   production launch path with real AppContainer tokens
   (`tests/sandbox/appcontainer-probe.cc`).
 - `tests/windows/sandbox/AppContainerPoc.ps1 -Dir <test layout>`: a device with the
