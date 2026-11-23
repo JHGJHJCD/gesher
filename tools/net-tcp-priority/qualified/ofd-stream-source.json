@@ -25,7 +25,7 @@
     "compat/posix/include/wchar.h": "b4ab6d86bfcffc534eb1a74abdfb13164cc7c51200eacece3f96310873120817",
     "compat/posix/include/gesher/stdio.h": "981f2e735df34e3ab4ef1086f040cee6fb51a3a80c1f85edccb46865ecea3051",
     "compat/posix/include/gesher/cancellation.h": "5f56f27a916daf62c5cbd99332cc09cf10d6078f181f2edcffb5ba9a56dd5e02",
-    "compat/posix/src/procfs.cc": "99ad8c2f6ec523f42dc030fa1010f693743bfa60ee025236e99f3429654120d9",
+    "compat/posix/src/procfs.cc": "86742d20b5f94712bd303505be2f27d34219443a4e73d4ce248beee21648431f",
     "compat/elf/exec/exec_spawn.cc": "0ce9e8f78a773910d2eeed283f87a29ffc859ea01b799ee30f2aa72518c9e4f7",
     "compat/libcore/process.cc": "ab1ababf629840fd93be8a3b648e185cfc5bab0cb68650dbd0507305a76719cc",
     "compat/bionic/stdio_bionic.cc": "bb8aba18f5794919f0338eb42df7807b89203ffd3371f9e3a53aad40982ecfa1",
