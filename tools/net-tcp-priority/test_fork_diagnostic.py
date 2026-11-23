@@ -33,7 +33,9 @@ CANONICAL_CONTEXT_BASE = '20252fde18db387b4d99d99f7050d6336f58bf6e'
 # The reviewed rerun change separately authenticated retained canonical producers.
 # Pin only those entry functions to its published commit; all supplier facts,
 # compiler inputs and Windows runtime bodies retain the earlier baseline below.
-RERUN_ENTRY_BASE = 'fb122083970e802f79993cda4f05146a85a687df'
+# #321's squash merge on main: its branch commit fb122083 is not in main's history,
+# so a PR checkout cannot show it; the pinned entry functions are byte-identical.
+RERUN_ENTRY_BASE = 'fdf4861b608d7a5fe8c0fa6c8a285dfbdf573d91'
 
 
 def old_source(path):
