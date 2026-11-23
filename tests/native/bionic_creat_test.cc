@@ -1,7 +1,7 @@
 // Copyright (C) 2026 The Gesher Authors
 // SPDX-License-Identifier: Apache-2.0
 // creat and creat64 through the real Bionic exports on Windows: what a .so
-// imports by name (issue #316: a translated arm64 library called creat, and the
+// imports by name (issue #320: a translated arm64 library called creat, and the
 // missing export aborted the process). The same contract runs directly
 // against Linux libc as the reference.
 #ifndef _GNU_SOURCE

@@ -242,7 +242,7 @@ add_executable(bionic_ftruncate_test tests/native/bionic_ftruncate_test.cc)
 target_compile_options(bionic_ftruncate_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(bionic_ftruncate_test PRIVATE gesher_bionic gesher_elf)
 
-# creat and creat64 through the actual Bionic exports (issue #316).
+# creat and creat64 through the actual Bionic exports (issue #320).
 add_executable(bionic_creat_test tests/native/bionic_creat_test.cc)
 target_compile_options(bionic_creat_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(bionic_creat_test PRIVATE gesher_bionic gesher_elf)
