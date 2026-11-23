@@ -154,6 +154,32 @@ int main() {
   CHECK(CompareFileTime(&before, &after) == 0);
   CHECK(List(cacerts) == files);
 
+  // Temporary files of a writer that died before renaming them, next to the
+  // directory and (an earlier version's) in it, go at the next sync, even an
+  // unchanged one.
+  CHECK(WriteFile(security + L"\\.0000abcd.0.tmp-11-22", "partial"));
+  CHECK(WriteFile(security + L"\\..gesher-cacerts.tmp-11-22", "partial"));
+  CHECK(WriteFile(cacerts + L"\\.0000abcd.0.tmp-11-22", "partial"));
+  gesher::net::SyncSystemCaCerts();
+  CHECK(List(cacerts) == files);
+  for (const std::wstring& name : List(security)) {
+    CHECK(name == L"cacerts" || name == L".gesher-cacerts");
+  }
+
+  // The manifest is outside the directory: a deleted directory, or a deleted
+  // certificate, is written again although the manifest still matches.
+  if (!files.empty()) {
+    DeleteFileW((cacerts + L"\\" + *files.begin()).c_str());
+    gesher::net::SyncSystemCaCerts();
+    CHECK(List(cacerts) == files);
+  }
+  RemoveTree(cacerts);
+  CHECK(GetFileAttributesW(cacerts.c_str()) == INVALID_FILE_ATTRIBUTES);
+  gesher::net::SyncSystemCaCerts();
+  CHECK(List(cacerts) == files);
+  std::string again;
+  CHECK(ReadFile(security + L"\\.gesher-cacerts", &again) && again == manifest);
+
   RemoveTree(root);
   if (g_failed == 0) {
     printf("trust store layout: all passed (%d checks, %zu certificates)\n", g_checks,

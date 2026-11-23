@@ -156,6 +156,21 @@ bool WriteFileAtomically(const std::wstring& dir, const std::wstring& name,
   return ok;
 }
 
+// Removes the .<name>.tmp-<pid>-<tid> files WriteFileAtomically stages in `dir`
+// (earlier versions staged them in cacerts itself). Called with the writers'
+// mutex held, so none of them belongs to a live write.
+void RemoveStaleTemporaryFiles(const std::wstring& dir) {
+  WIN32_FIND_DATAW entry;
+  HANDLE find = FindFirstFileW((dir + L"\\.*.tmp-*").c_str(), &entry);
+  if (find == INVALID_HANDLE_VALUE) return;
+  do {
+    if ((entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+      DeleteFileW((dir + L"\\" + entry.cFileName).c_str());
+    }
+  } while (FindNextFileW(find, &entry));
+  FindClose(find);
+}
+
 bool MakeDirectories(const std::wstring& dir) {
   if (CreateDirectoryW(dir.c_str(), nullptr) || GetLastError() == ERROR_ALREADY_EXISTS) {
     return true;
@@ -288,11 +303,28 @@ void Sync() {
 
   // One process at a time rewrites the directory.
   HANDLE mutex = CreateMutexW(nullptr, FALSE, L"Local\\gesher-system-cacerts");
-  if (mutex != nullptr) WaitForSingleObject(mutex, 30000);
+  DWORD waited = mutex != nullptr ? WaitForSingleObject(mutex, 30000) : WAIT_FAILED;
+  bool held = waited == WAIT_OBJECT_0 || waited == WAIT_ABANDONED;
   std::string current;
   // Earlier versions kept the manifest in cacerts itself.
   DeleteFileW((dir + L"\\.gesher-cacerts").c_str());
-  bool changed = !ReadWholeFile(manifest_path, &current) || current != manifest;
+  // Temporary files of a writer that died before its rename (every writer
+  // holds the mutex while its temporary files exist).
+  if (held) {
+    RemoveStaleTemporaryFiles(security);
+    RemoveStaleTemporaryFiles(dir);
+  }
+  // The manifest is outside the directory: it describes the directory only
+  // while the directory and every file it lists exist.
+  DWORD dir_attributes = GetFileAttributesW(dir.c_str());
+  bool changed = dir_attributes == INVALID_FILE_ATTRIBUTES ||
+                 (dir_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                 !ReadWholeFile(manifest_path, &current) || current != manifest;
+  for (auto it = files.begin(); !changed && it != files.end(); ++it) {
+    if (GetFileAttributesW((dir + L"\\" + it->first).c_str()) == INVALID_FILE_ATTRIBUTES) {
+      changed = true;
+    }
+  }
   size_t written = 0, removed = 0;
   bool ok = true;
   if (changed) {
@@ -315,9 +347,6 @@ void Sync() {
         if (IsCertFileName(name) && files.count(name) == 0 &&
             DeleteFileW((dir + L"\\" + name).c_str())) {
           removed++;
-        } else if (name[0] == L'.' && name.find(L".tmp-") != std::wstring::npos) {
-          // A temporary file an earlier version staged here and never renamed.
-          DeleteFileW((dir + L"\\" + name).c_str());
         }
       } while (FindNextFileW(find, &entry));
       FindClose(find);
