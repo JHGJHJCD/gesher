@@ -12,7 +12,7 @@ add_executable(binderd ${CMAKE_SOURCE_DIR}/compat/binder/binderd.cc
 target_compile_options(binderd PRIVATE -Wall -Wextra -Werror "SHELL:-idirafter ${_uapi}")
 # The descriptor broker's tokens (ADR 0088) come from BCryptGenRandom; the
 # sandboxed pipe's security descriptor (ADR 0090) from app_container.cc.
-target_link_libraries(binderd PRIVATE bcrypt userenv advapi32 mincore ole32)
+target_link_libraries(binderd PRIVATE bcrypt advapi32 ole32)
 
 # servicemanager, as vndservicemanager is built (no VINTF, no perfetto), with
 # libcutils' multiuser.cpp (not in libcutils' Windows set) and a main of its

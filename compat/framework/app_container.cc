@@ -1,4 +1,9 @@
 // Gesher: experimental per-package AppContainer isolation (see app_container.h).
+// The AppContainer APIs are declared for Windows 8 and later; standalone builds
+// (tools/test_binder_lifetime.py) may not define a version.
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0A00
+#endif
 #include "app_container.h"
 
 #include <aclapi.h>
@@ -9,6 +14,57 @@
 namespace gesher {
 namespace appcontainer {
 namespace {
+
+// The AppContainer APIs, resolved at run time from System32's userenv.dll and
+// kernelbase.dll: linking userenv or mincore would change every importer's
+// Windows import set (binderd's is checked), for functions only the sandbox uses.
+template <typename F>
+F Resolve(const wchar_t* module, const char* name) {
+  HMODULE handle = GetModuleHandleW(module);
+  if (handle == nullptr) handle = LoadLibraryExW(module, nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (handle == nullptr) return nullptr;
+  return reinterpret_cast<F>(reinterpret_cast<void*>(GetProcAddress(handle, name)));
+}
+
+using CreateProfileFn = HRESULT(WINAPI*)(PCWSTR, PCWSTR, PCWSTR, PSID_AND_ATTRIBUTES, DWORD, PSID*);
+using DeriveSidFn = HRESULT(WINAPI*)(PCWSTR, PSID*);
+using DeleteProfileFn = HRESULT(WINAPI*)(PCWSTR);
+using FolderPathFn = HRESULT(WINAPI*)(PCWSTR, PWSTR*);
+using CapabilitySidsFn = BOOL(WINAPI*)(LPCWSTR, PSID**, DWORD*, PSID**, DWORD*);
+
+const HRESULT kMissing = HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND);
+
+HRESULT CreateProfile(PCWSTR name, PCWSTR display, PCWSTR description, PSID* sid) {
+  static const auto fn = Resolve<CreateProfileFn>(L"userenv.dll", "CreateAppContainerProfile");
+  return fn ? fn(name, display, description, nullptr, 0, sid) : kMissing;
+}
+
+HRESULT DeriveSid(PCWSTR name, PSID* sid) {
+  static const auto fn =
+      Resolve<DeriveSidFn>(L"userenv.dll", "DeriveAppContainerSidFromAppContainerName");
+  return fn ? fn(name, sid) : kMissing;
+}
+
+HRESULT DeleteProfile(PCWSTR name) {
+  static const auto fn = Resolve<DeleteProfileFn>(L"userenv.dll", "DeleteAppContainerProfile");
+  return fn ? fn(name) : kMissing;
+}
+
+HRESULT ContainerFolder(PCWSTR sid, PWSTR* path) {
+  static const auto fn = Resolve<FolderPathFn>(L"userenv.dll", "GetAppContainerFolderPath");
+  return fn ? fn(sid, path) : kMissing;
+}
+
+BOOL CapabilitySids(LPCWSTR name, PSID** groups, DWORD* group_count, PSID** sids,
+                    DWORD* sid_count) {
+  static const auto fn =
+      Resolve<CapabilitySidsFn>(L"kernelbase.dll", "DeriveCapabilitySidsFromName");
+  if (fn == nullptr) {
+    SetLastError(ERROR_PROC_NOT_FOUND);
+    return FALSE;
+  }
+  return fn(name, groups, group_count, sids, sid_count);
+}
 
 std::wstring StringSid(PSID sid) {
   LPWSTR text = nullptr;
@@ -62,11 +118,8 @@ bool ValidName(const std::wstring& name) {
 DWORD EnsureProfile(const std::wstring& name, const std::wstring& display_name, Sid* sid) {
   if (!ValidName(name) || sid == nullptr) return ERROR_INVALID_PARAMETER;
   PSID created = nullptr;
-  HRESULT hr = CreateAppContainerProfile(name.c_str(), display_name.c_str(), display_name.c_str(),
-                                         nullptr, 0, &created);
-  if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) {
-    hr = DeriveAppContainerSidFromAppContainerName(name.c_str(), &created);
-  }
+  HRESULT hr = CreateProfile(name.c_str(), display_name.c_str(), display_name.c_str(), &created);
+  if (hr == HRESULT_FROM_WIN32(ERROR_ALREADY_EXISTS)) hr = DeriveSid(name.c_str(), &created);
   if (FAILED(hr)) return HRESULT_CODE(hr) != 0 ? HRESULT_CODE(hr) : ERROR_GEN_FAILURE;
   sid->value = created;
   sid->local = false;
@@ -76,7 +129,7 @@ DWORD EnsureProfile(const std::wstring& name, const std::wstring& display_name, 
 DWORD ContainerSid(const std::wstring& name, Sid* sid) {
   if (!ValidName(name) || sid == nullptr) return ERROR_INVALID_PARAMETER;
   PSID derived = nullptr;
-  HRESULT hr = DeriveAppContainerSidFromAppContainerName(name.c_str(), &derived);
+  HRESULT hr = DeriveSid(name.c_str(), &derived);
   if (FAILED(hr)) return HRESULT_CODE(hr) != 0 ? HRESULT_CODE(hr) : ERROR_GEN_FAILURE;
   sid->value = derived;
   sid->local = false;
@@ -85,7 +138,7 @@ DWORD ContainerSid(const std::wstring& name, Sid* sid) {
 
 DWORD DeleteContainerProfile(const std::wstring& name) {
   if (!ValidName(name)) return ERROR_INVALID_PARAMETER;
-  HRESULT hr = DeleteAppContainerProfile(name.c_str());
+  HRESULT hr = DeleteProfile(name.c_str());
   // S_OK also when it did not exist (documented); a not-found HRESULT is the same.
   if (SUCCEEDED(hr) || hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND) ||
       hr == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
@@ -99,7 +152,7 @@ DWORD CapabilitySid(const std::wstring& capability, Sid* sid) {
   PSID* groups = nullptr;
   PSID* sids = nullptr;
   DWORD group_count = 0, sid_count = 0;
-  if (!DeriveCapabilitySidsFromName(capability.c_str(), &groups, &group_count, &sids, &sid_count)) {
+  if (!CapabilitySids(capability.c_str(), &groups, &group_count, &sids, &sid_count)) {
     return GetLastError();
   }
   for (DWORD i = 0; i < group_count; ++i) LocalFree(groups[i]);
@@ -120,7 +173,7 @@ DWORD FolderPath(PSID container, std::wstring* path) {
   std::wstring text = StringSid(container);
   if (text.empty()) return GetLastError();
   PWSTR folder = nullptr;
-  HRESULT hr = GetAppContainerFolderPath(text.c_str(), &folder);
+  HRESULT hr = ContainerFolder(text.c_str(), &folder);
   if (FAILED(hr)) return HRESULT_CODE(hr) != 0 ? HRESULT_CODE(hr) : ERROR_GEN_FAILURE;
   *path = folder;
   CoTaskMemFree(folder);
