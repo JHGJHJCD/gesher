@@ -102,6 +102,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '21.0.13'
+      - name: Java DNS admission and completion ownership on Windows
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: python tools/test_dns_resolver_admission.py --java-home "$JAVA_HOME"
       - name: Durable settings journal, replacement and crash recovery contracts
         if: ${{ !cancelled() }}
         shell: bash
@@ -114,6 +118,16 @@ jobs:
         run: |
           & .\app-identity-restart.exe
           if ($LASTEXITCODE -ne 0) { throw 'Native application identity restart gate failed' }
+      - name: Build actual dexopt child waiting and resource budgets
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: cl /nologo /std:c++17 /EHsc /W4 /WX /D_WIN32_WINNT=0x0A00 compat\framework\services_zygote.cc compat\framework\app_container.cc compat\framework\services_dexopt_watch.cc tests\native\dexopt_child_wait_test.cc /Fe:dexopt-child-wait.exe user32.lib advapi32.lib ole32.lib
+      - name: Verify real compiler cancellation, reaping, CPU and memory budgets
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: |
+          & .\dexopt-child-wait.exe
+          if ($LASTEXITCODE -ne 0) { throw 'Native dexopt child wait/budget gate failed' }
       - name: Build actual private clipboard publication and competing-writer regression
         if: ${{ !cancelled() }}
         shell: cmd
@@ -273,6 +287,9 @@ jobs:
           python3 -m unittest discover -s tools/tests -p test_soong_zip.py
           python3 -m unittest discover -s tools/tests -p test_sdk_resource_attrs_diff.py
           python3 tools/fonts/test-standalone-link.py
+
+      - name: Notification image staging, cache, cancellation and encoder ownership
+        run: python3 tools/test_notification_images.py
 
       - name: Native allocation, directory, semaphore, file-lock and socket-control contracts
         run: |
@@ -470,6 +487,9 @@ jobs:
       - name: Android HttpEngine requests over real HTTP sockets
         run: python3 tools/test_http_engine.py --java-home "$JAVA_HOME"
 
+      - name: Java DNS admission, cancellation, callback ownership and actual deadlines
+        run: python3 tools/test_dns_resolver_admission.py --java-home "$JAVA_HOME"
+
       - name: WebStorage origin, owned WebView responses and running-task contracts
         run: |
           python3 tools/test_webstorage_origin_contracts.py --java-home "$JAVA_HOME"
@@ -510,7 +530,9 @@ jobs:
           python3 tools/test_legacy_camera_buffers.py --java-home "$JAVA_HOME"
           python3 tools/test_camera_selection_and_orientation.py --java-home "$JAVA_HOME"
           python3 tools/test_camera_capture_lifetime.py --java-home "$JAVA_HOME"
+          python3 tools/test_camera_callback_admission.py --java-home "$JAVA_HOME"
           python3 tools/test_camera2_capture_dispatch.py --java-home "$JAVA_HOME"
+          python3 tools/test_dexopt_work.py --java-home "$JAVA_HOME"
 
       - name: Validate user interface translations
         run: |

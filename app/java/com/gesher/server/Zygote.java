@@ -35,6 +35,11 @@ public final class Zygote {
     static native int nativeGrantToCapability(String path, String capability, int access,
             boolean inherit);
     static native int nativeDeleteAppContainer(String container);
+    static native int nativeSpawnCompiler(String commandLine, String[] setEnv, String[] unsetEnv,
+            String logPath, int memoryMiB, int cpuRate);
+    static native int nativeWaitChild(int pid, long identity, int timeoutMs, long cancel,
+            boolean stopOnLowMemory);
+    static native long nativeAvailableMemory();
     private static native int nativeRestartWithUid(int uid);
     static native long nativeStartTime(int pid);
     static native long nativeChildStartTime(int pid);
