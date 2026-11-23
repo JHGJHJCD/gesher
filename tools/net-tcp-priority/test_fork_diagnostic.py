@@ -31,9 +31,9 @@ BASE = '0da2b7f18fa8013932a6cb77dac32423df9ef8ab'
 # compiler, source-preservation or runtime baseline below.
 CANONICAL_CONTEXT_BASE = '20252fde18db387b4d99d99f7050d6336f58bf6e'
 # The reviewed rerun change separately authenticated retained canonical producers.
-# Pin only those entry functions to its published commit; all supplier facts,
+# Pin only those entry functions to its squash on main; all supplier facts,
 # compiler inputs and Windows runtime bodies retain the earlier baseline below.
-RERUN_ENTRY_BASE = 'fb122083970e802f79993cda4f05146a85a687df'
+RERUN_ENTRY_BASE = 'fdf4861b608d7a5fe8c0fa6c8a285dfbdf573d91'
 
 
 def old_source(path):
